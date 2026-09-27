@@ -1,24 +1,41 @@
 //! Trace capture: adapter-specific structured trace collection.
 //!
 //! This module captures full execution traces from agent runs including
-//! tool calls, agent reasoning, and verifier output. Traces are stored
-//! in `.beads/traces/<bead-id>/` with structured metadata.
+//! tool calls, agent reasoning, and verifier output. Each dispatch attempt
+//! writes its capture to `.beads/traces/<bead-id>/<attempt-id>/` with
+//! structured metadata, so a redispatch of the same bead adds a new attempt
+//! directory instead of overwriting the previous attempt's files.
 //!
 //! ## Trace Retention Policy
 //!
 //! - **Failed beads**: 7 days (full trace retained)
 //! - **Successful beads**: metadata-only after 1 day (trace data pruned)
 //!
+//! Both rules are applied per directory: to each attempt directory
+//! independently, and to a bead directory that still holds a capture
+//! directly (the legacy flat layout written by older binaries — recognised
+//! and pruned by the same rules, never migrated). A legacy flat capture
+//! that ages out takes only its own files when the bead directory also
+//! holds attempt directories; a flat-only bead directory is removed whole,
+//! exactly as before.
+//!
 //! ## Directory Structure
 //!
 //! ```text
 //! .beads/traces/<bead-id>/
-//! ├── trace.jsonl     # Structured trace events (one JSON object per line)
-//! ├── stdout.txt      # Raw stdout from agent process
-//! ├── stderr.txt      # Raw stderr from agent process
-//! ├── test-output.txt # Processed test output (for test runs)
-//! └── metadata.json   # Timing, tokens, cost, template version
+//! ├── attempts.jsonl    # Per-bead attempt journal (see attempt_history)
+//! └── <attempt-id>/     # One directory per dispatch attempt
+//!     ├── trace.jsonl     # Structured trace events (one JSON object per line)
+//!     ├── stdout.txt      # Raw stdout from agent process
+//!     ├── stderr.txt      # Raw stderr from agent process
+//!     ├── test-output.txt # Processed test output (for test runs)
+//!     └── metadata.json   # Timing, tokens, cost, template version
 //! ```
+//!
+//! Older binaries wrote the capture files directly into
+//! `.beads/traces/<bead-id>/`. Those legacy flat directories remain
+//! recognised by retention cleanup and by readers, and nothing migrates
+//! them.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -117,34 +134,83 @@ pub enum TraceFormat {
 
 /// Manages trace storage for a bead execution.
 pub struct TraceCapture {
-    /// Trace directory for this bead (`.beads/traces/<bead-id>`).
+    /// Trace directory for this attempt
+    /// (`.beads/traces/<bead-id>/<attempt-id>`, or the legacy flat
+    /// `.beads/traces/<bead-id>` when no attempt id was supplied).
     trace_dir: PathBuf,
     /// Whether trace capture is enabled.
     enabled: bool,
     /// Optional sanitizer applied to all content before writing to disk.
     sanitizer: Option<Arc<Sanitizer>>,
-    /// Attempt identity bound before the adapter process starts.
+    /// Attempt identity scoping this capture, bound at construction.
     attempt_id: Option<String>,
     /// Credential-free claim facts carried from the worker's retained handle.
     claim_handle: Option<ClaimHandleMetadata>,
 }
 
+/// Whether `id` can serve as one path segment of a trace directory.
+///
+/// Attempt ids are UUIDv7 strings minted at dispatch start, which always
+/// qualify; the check exists so a malformed id can never steer writes
+/// outside the bead's trace directory.
+fn is_safe_attempt_component(id: &str) -> bool {
+    !id.is_empty() && !id.contains(['/', '\\']) && id != "." && id != ".."
+}
+
+/// Normalize a caller-supplied attempt id into a usable directory component.
+///
+/// `None` when no id was supplied or the id is not a safe component; an
+/// unusable non-empty id is dropped with a warning rather than trusted as a
+/// path segment, falling back to the legacy flat layout.
+fn normalized_attempt_component(attempt_id: Option<&str>) -> Option<String> {
+    let id = attempt_id?.trim();
+    if is_safe_attempt_component(id) {
+        Some(id.to_string())
+    } else {
+        tracing::warn!(
+            attempt_id = %id,
+            "attempt id is not a usable trace directory component; using the legacy flat trace layout"
+        );
+        None
+    }
+}
+
+/// Scope a bead's trace directory to one attempt.
+///
+/// Appends the attempt segment when `attempt_id` is a usable component and
+/// returns the bead directory unchanged otherwise, so callers without an
+/// attempt identity (and legacy layouts on disk) keep resolving exactly as
+/// before.
+pub fn attempt_scoped_dir(bead_trace_dir: &Path, attempt_id: Option<&str>) -> PathBuf {
+    match normalized_attempt_component(attempt_id) {
+        Some(id) => bead_trace_dir.join(id),
+        None => bead_trace_dir.to_path_buf(),
+    }
+}
+
 impl TraceCapture {
-    /// Create a new trace capture for a bead without sanitization.
+    /// Create a new trace capture for one dispatch attempt of a bead, without
+    /// sanitization.
     ///
-    /// `beads_root` is the workspace directory containing `.beads/`.
+    /// `beads_root` is the workspace directory containing `.beads/`. With an
+    /// attempt id the capture is scoped to
+    /// `.beads/traces/<bead-id>/<attempt-id>/` so a redispatch writes a fresh
+    /// directory instead of overwriting the previous attempt; without one the
+    /// legacy flat `.beads/traces/<bead-id>/` layout is used.
     /// Returns `None` if trace capture is disabled.
-    pub fn new(bead_id: &BeadId, beads_root: &Path) -> Option<Self> {
-        Self::new_with_sanitizer(bead_id, beads_root, None)
+    pub fn new(bead_id: &BeadId, beads_root: &Path, attempt_id: Option<&str>) -> Option<Self> {
+        Self::new_with_sanitizer(bead_id, beads_root, attempt_id, None)
     }
 
-    /// Create a new trace capture for a bead with an optional sanitizer.
+    /// Create a new trace capture for one dispatch attempt of a bead with an
+    /// optional sanitizer.
     ///
     /// When `sanitizer` is `Some`, all trace content is sanitized synchronously
     /// before writing to disk (no unsanitized window on disk).
     pub fn new_with_sanitizer(
         bead_id: &BeadId,
         beads_root: &Path,
+        attempt_id: Option<&str>,
         sanitizer: Option<Arc<Sanitizer>>,
     ) -> Option<Self> {
         // Traces live inside the workspace's existing store. Creating
@@ -158,10 +224,12 @@ impl TraceCapture {
             );
             return None;
         }
-        let trace_dir = beads_root
-            .join(".beads")
-            .join("traces")
-            .join(bead_id.as_ref());
+        let attempt_id = normalized_attempt_component(attempt_id);
+        let mut trace_dir = beads_root.join(".beads").join("traces");
+        trace_dir.push(bead_id.as_ref());
+        if let Some(ref attempt_id) = attempt_id {
+            trace_dir.push(attempt_id);
+        }
 
         // Create the trace directory.
         if let Err(e) = std::fs::create_dir_all(&trace_dir) {
@@ -178,7 +246,7 @@ impl TraceCapture {
             trace_dir,
             enabled: true,
             sanitizer,
-            attempt_id: None,
+            attempt_id,
             claim_handle: None,
         })
     }
@@ -186,11 +254,6 @@ impl TraceCapture {
     /// Get the trace directory path.
     pub fn trace_dir(&self) -> &Path {
         &self.trace_dir
-    }
-
-    /// Bind the immutable attempt identity to this trace capture.
-    pub fn bind_attempt_id(&mut self, attempt_id: impl Into<String>) {
-        self.attempt_id = Some(attempt_id.into());
     }
 
     /// Bind only the redacted identity view; the fencing credential is never
@@ -597,6 +660,11 @@ pub struct TraceCleanupSummary {
 /// - Failed beads (non-zero exit): delete after the configured failure retention
 /// - Successful beads (exit 0): prune data after the configured success retention,
 ///   keeping metadata only
+///
+/// The rules are applied per trace directory: to the bead directory itself
+/// (the legacy flat layout written by older binaries — never migrated) and to
+/// each attempt subdirectory independently, so one aged-out attempt never
+/// decides the fate of a newer attempt of the same bead.
 pub fn cleanup_traces(
     traces_dir: &Path,
     retention_days_failed: u32,
@@ -629,54 +697,124 @@ pub fn cleanup_traces(
             continue;
         }
 
-        // Check metadata.json to determine outcome and age.
-        let metadata_path = path.join("metadata.json");
-        let metadata: Option<TraceMetadata> = metadata_path
-            .exists()
-            .then(|| {
-                let content = std::fs::read_to_string(&metadata_path).ok()?;
-                serde_json::from_str(&content).ok()
-            })
-            .flatten();
+        // Legacy flat layout: the bead directory itself holds one capture.
+        apply_retention_to_dir(
+            &path,
+            now,
+            retention_days_failed,
+            retention_days_success,
+            &mut summary,
+        );
 
-        let age_days = metadata
-            .as_ref()
-            .and_then(|m| now.checked_sub(m.captured_at.timestamp() as u64))
-            .map(|secs| secs / 86400)
-            .unwrap_or(u64::MAX);
-
-        let is_failed = metadata.as_ref().map(|m| m.exit_code != 0).unwrap_or(false);
-        let is_pruned = metadata.as_ref().map(|m| m.pruned).unwrap_or(false);
-
-        // Check if trace data files actually exist before attempting to prune.
-        // This prevents counting a trace as "pruned" when the data files were
-        // already removed in a previous run but the metadata update failed
-        // or was interrupted. This check is crucial for preventing infinite
-        // loops where the same trace is counted repeatedly.
-        let has_data_files = ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE]
-            .iter()
-            .any(|file| path.join(file).exists());
-
-        let should_delete = is_failed && age_days > retention_days_failed as u64;
-        // A trace marked pruned may still contain data when a prior cleanup was
-        // interrupted after updating metadata. Finish removing those files too.
-        let should_prune = !is_failed && has_data_files && age_days > retention_days_success as u64;
-
-        // Fix up metadata for traces that were partially pruned (files gone
-        // but metadata not updated). This prevents infinite loops.
-        if !is_failed && !is_pruned && !has_data_files && age_days > retention_days_success as u64 {
-            if let Err(e) = fix_pruned_metadata(&path) {
-                tracing::debug!(
-                    path = %path.display(),
-                    error = %e,
-                    "failed to fix pruned metadata for partially-pruned trace"
-                );
+        // Attempt layout: each subdirectory holds one dispatch attempt's
+        // capture and is retained independently of its siblings.
+        if let Ok(attempts) = std::fs::read_dir(&path) {
+            for attempt in attempts.flatten() {
+                let attempt_path = attempt.path();
+                if attempt_path.is_dir() {
+                    apply_retention_to_dir(
+                        &attempt_path,
+                        now,
+                        retention_days_failed,
+                        retention_days_success,
+                        &mut summary,
+                    );
+                }
             }
         }
 
-        if should_delete {
+        // When every attempt directory has aged out and nothing else remains
+        // (the attempt journal, lessons, a WIP patch), drop the empty bead
+        // directory. `remove_dir` — not `remove_dir_all` — so a concurrent
+        // attempt creation between the emptiness check and the removal makes
+        // this a no-op instead of deleting a live capture.
+        if path.is_dir() && dir_is_empty(&path) {
+            if let Err(e) = std::fs::remove_dir(&path) {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to remove empty bead trace directory"
+                );
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Apply the retention rules to one trace directory: a bead directory in the
+/// legacy flat layout, or one attempt directory.
+fn apply_retention_to_dir(
+    path: &Path,
+    now: u64,
+    retention_days_failed: u32,
+    retention_days_success: u32,
+    summary: &mut TraceCleanupSummary,
+) {
+    // Check metadata.json to determine outcome and age.
+    let metadata_path = path.join("metadata.json");
+    let metadata: Option<TraceMetadata> = metadata_path
+        .exists()
+        .then(|| {
+            let content = std::fs::read_to_string(&metadata_path).ok()?;
+            serde_json::from_str(&content).ok()
+        })
+        .flatten();
+
+    let age_days = metadata
+        .as_ref()
+        .and_then(|m| now.checked_sub(m.captured_at.timestamp() as u64))
+        .map(|secs| secs / 86400)
+        .unwrap_or(u64::MAX);
+
+    let is_failed = metadata.as_ref().map(|m| m.exit_code != 0).unwrap_or(false);
+    let is_pruned = metadata.as_ref().map(|m| m.pruned).unwrap_or(false);
+
+    // Check if trace data files actually exist before attempting to prune.
+    // This prevents counting a trace as "pruned" when the data files were
+    // already removed in a previous run but the metadata update failed
+    // or was interrupted. This check is crucial for preventing infinite
+    // loops where the same trace is counted repeatedly.
+    let has_data_files = ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE]
+        .iter()
+        .any(|file| path.join(file).exists());
+
+    let should_delete = is_failed && age_days > retention_days_failed as u64;
+    // A trace marked pruned may still contain data when a prior cleanup was
+    // interrupted after updating metadata. Finish removing those files too.
+    let should_prune = !is_failed && has_data_files && age_days > retention_days_success as u64;
+
+    // Fix up metadata for traces that were partially pruned (files gone
+    // but metadata not updated). This prevents infinite loops.
+    if !is_failed && !is_pruned && !has_data_files && age_days > retention_days_success as u64 {
+        if let Err(e) = fix_pruned_metadata(path) {
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "failed to fix pruned metadata for partially-pruned trace"
+            );
+        }
+    }
+
+    if should_delete {
+        if contains_subdirectories(path) {
+            // Mixed layout: the directory also holds attempt captures (and
+            // possibly the bead journal), each retained on its own age. A
+            // flat capture aging out must take only its own files — the
+            // bead directory is reaped by the empty-dir pass once nothing
+            // else remains.
+            if let Err(e) = remove_capture_files(path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to delete legacy flat trace files"
+                );
+            } else {
+                summary.traces_deleted += 1;
+            }
+        } else {
             // Delete entire trace directory.
-            if let Err(e) = std::fs::remove_dir_all(&path) {
+            if let Err(e) = std::fs::remove_dir_all(path) {
                 tracing::warn!(
                     path = %path.display(),
                     error = %e,
@@ -685,21 +823,56 @@ pub fn cleanup_traces(
             } else {
                 summary.traces_deleted += 1;
             }
-        } else if should_prune {
-            // Prune trace data, keep metadata.
-            if let Err(e) = prune_trace_dir(&path) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "failed to prune trace data"
-                );
-            } else if !is_pruned {
-                summary.traces_pruned += 1;
-            }
+        }
+    } else if should_prune {
+        // Prune trace data, keep metadata.
+        if let Err(e) = prune_trace_dir(path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to prune trace data"
+            );
+        } else if !is_pruned {
+            summary.traces_pruned += 1;
         }
     }
+}
 
-    Ok(summary)
+/// Whether a directory holds no entries (unreadable counts as non-empty).
+fn dir_is_empty(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+}
+
+/// Whether a directory holds at least one subdirectory. Unreadable counts
+/// as true — the conservative answer that steers deletion away from a
+/// wholesale directory removal.
+fn contains_subdirectories(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.path().is_dir()))
+        .unwrap_or(true)
+}
+
+/// Remove one directory's flat capture files (data plus metadata), leaving
+/// any other content — attempt directories, the bead journal — in place.
+fn remove_capture_files(trace_dir: &Path) -> Result<()> {
+    for file in [
+        "trace.jsonl",
+        STDOUT_FILE,
+        STDERR_FILE,
+        TEST_OUTPUT_FILE,
+        "test_metrics.json",
+        "compilation_errors.json",
+        "metadata.json",
+    ] {
+        let path = trace_dir.join(file);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to remove trace file: {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Fix metadata for a trace that was partially pruned (data files gone but
@@ -797,7 +970,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         assert!(capture.trace_dir().exists());
         assert!(capture.trace_dir().ends_with("traces/needle-test"));
     }
@@ -818,7 +991,7 @@ mod tests {
 
         // Attempting to create a TraceCapture should return None gracefully.
         let bead_id = BeadId::from("blocked-bead");
-        let capture = TraceCapture::new(&bead_id, beads_root);
+        let capture = TraceCapture::new(&bead_id, beads_root, None);
         assert!(
             capture.is_none(),
             "TraceCapture should return None when directory creation fails"
@@ -831,7 +1004,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         capture.write_stdout("hello stdout").unwrap();
 
         let stdout_path = capture.trace_dir().join("stdout.txt");
@@ -846,7 +1019,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         capture.write_stderr("error output").unwrap();
 
         let stderr_path = capture.trace_dir().join("stderr.txt");
@@ -861,7 +1034,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
 
         // Remove the trace directory to force a write error. `write_stderr`
         // does not create parent directories, so the write fails with
@@ -887,7 +1060,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         capture.write_test_output("test output content").unwrap();
 
         let test_output_path = capture.trace_dir().join(TEST_OUTPUT_FILE);
@@ -902,7 +1075,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         let lines = vec![
             r#"{"event": "start"}"#.to_string(),
             r#"{"event": "tool", "name": "read_file"}"#.to_string(),
@@ -922,7 +1095,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         let metadata = TraceMetadata {
             bead_id: test_bead_id(),
             agent: "claude-sonnet".to_string(),
@@ -961,7 +1134,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         assert!(capture.trace_dir().exists());
 
         capture.delete().unwrap();
@@ -974,7 +1147,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
 
         // Remove the trace directory to force a write error. `write_stdout`
         // does not create parent directories, so the write fails with
@@ -1000,7 +1173,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         capture.write_stdout("stdout").unwrap();
         capture.write_stderr("stderr").unwrap();
         capture.write_test_output("test output").unwrap();
@@ -1845,8 +2018,8 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let mut capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
-        capture.bind_attempt_id("0192-attempt-identity");
+        let capture =
+            TraceCapture::new(&test_bead_id(), beads_root, Some("0192-attempt-identity")).unwrap();
 
         capture.write_metadata(&attempt_metadata()).unwrap();
 
@@ -1862,7 +2035,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let mut capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let mut capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         capture.bind_claim_handle(ClaimHandleMetadata {
             bead_id: test_bead_id(),
             target_workspace_identity: "workspace-sha256".to_string(),
@@ -1894,7 +2067,7 @@ mod tests {
         let beads_root = temp_dir.path();
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
-        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         capture.write_metadata(&attempt_metadata()).unwrap();
 
         // An unbound capture must not invent an identity: a missing key is
@@ -1917,9 +2090,13 @@ mod tests {
             }])
             .unwrap(),
         );
-        let mut capture =
-            TraceCapture::new_with_sanitizer(&test_bead_id(), beads_root, Some(sanitizer)).unwrap();
-        capture.bind_attempt_id("0192-attempt-identity");
+        let capture = TraceCapture::new_with_sanitizer(
+            &test_bead_id(),
+            beads_root,
+            Some("0192-attempt-identity"),
+            Some(sanitizer),
+        )
+        .unwrap();
 
         capture
             .write_stdout("token sk-test-abc123 leaked into output")
@@ -1938,5 +2115,349 @@ mod tests {
         // sanitized.
         let raw = read_raw_metadata(&capture);
         assert_eq!(raw["attempt_id"], "0192-attempt-identity");
+    }
+
+    // ── Attempt-scoped trace directories ──
+
+    fn retention_metadata(bead_id: &str, exit_code: i32, age_days: i64) -> TraceMetadata {
+        TraceMetadata {
+            bead_id: BeadId::from(bead_id),
+            agent: "test".to_string(),
+            provider: None,
+            model: None,
+            exit_code,
+            outcome: if exit_code == 0 {
+                "success".to_string()
+            } else {
+                "failure".to_string()
+            },
+            duration_ms: 100,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(age_days),
+            trace_format: TraceFormat::RawText,
+            pruned: false,
+            template_version: None,
+            timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
+        }
+    }
+
+    /// Stage one complete attempt capture for the retention fixtures.
+    fn stage_attempt(
+        bead_dir: &Path,
+        attempt_id: &str,
+        exit_code: i32,
+        age_days: i64,
+    ) -> std::path::PathBuf {
+        let attempt_dir = bead_dir.join(attempt_id);
+        std::fs::create_dir_all(&attempt_dir).unwrap();
+        std::fs::write(attempt_dir.join(STDOUT_FILE), "stdout").unwrap();
+        std::fs::write(attempt_dir.join(STDERR_FILE), "stderr").unwrap();
+        std::fs::write(attempt_dir.join("trace.jsonl"), "{\"event\":\"test\"}").unwrap();
+        std::fs::write(
+            attempt_dir.join("metadata.json"),
+            serde_json::to_string(&retention_metadata(
+                bead_dir.file_name().unwrap().to_str().unwrap(),
+                exit_code,
+                age_days,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        attempt_dir
+    }
+
+    #[test]
+    fn attempt_scoped_capture_writes_into_attempt_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
+
+        let capture = TraceCapture::new(
+            &test_bead_id(),
+            beads_root,
+            Some("0192a6f0-0000-7000-8000-000000000001"),
+        )
+        .unwrap();
+
+        assert!(capture
+            .trace_dir()
+            .ends_with("traces/needle-test/0192a6f0-0000-7000-8000-000000000001"));
+        assert!(capture.trace_dir().is_dir());
+        // The flat bead directory is a pure parent here, not the capture.
+        assert!(!capture
+            .trace_dir()
+            .parent()
+            .unwrap()
+            .join(STDOUT_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn unsafe_attempt_ids_fall_back_to_the_flat_layout() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
+
+        for unusable in ["", "  ", "..", "a/b", "a\\b"] {
+            let capture = TraceCapture::new(&test_bead_id(), beads_root, Some(unusable)).unwrap();
+            assert!(
+                capture.trace_dir().ends_with("traces/needle-test"),
+                "attempt id {unusable:?} must not become a path segment"
+            );
+        }
+    }
+
+    #[test]
+    fn attempt_scoped_dir_appends_only_usable_components() {
+        let bead_dir = Path::new("/workspace/.beads/traces/needle-test");
+        assert_eq!(
+            attempt_scoped_dir(bead_dir, Some("0192a6f0-0000-7000-8000-000000000001")),
+            bead_dir.join("0192a6f0-0000-7000-8000-000000000001")
+        );
+        // No attempt identity resolves to the bead directory itself.
+        assert_eq!(attempt_scoped_dir(bead_dir, None), bead_dir);
+        for unusable in ["", "  ", ".", "..", "a/b", "a\\b"] {
+            assert_eq!(
+                attempt_scoped_dir(bead_dir, Some(unusable)),
+                bead_dir,
+                "attempt id {unusable:?} must not scope the directory"
+            );
+        }
+    }
+
+    #[test]
+    fn two_dispatches_produce_two_complete_attempt_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
+
+        // First dispatch of the bead.
+        let first = TraceCapture::new(
+            &test_bead_id(),
+            beads_root,
+            Some("0192a6f0-0000-7000-8000-000000000001"),
+        )
+        .unwrap();
+        first.write_stdout("first stdout").unwrap();
+        first.write_stderr("first stderr").unwrap();
+        first
+            .write_trace_jsonl(&[r#"{"event":"first"}"#.to_string()])
+            .unwrap();
+
+        // Retry: a new attempt id must land in a new directory, not overwrite.
+        let second = TraceCapture::new(
+            &test_bead_id(),
+            beads_root,
+            Some("0192a6f0-0000-7000-8000-000000000002"),
+        )
+        .unwrap();
+        second.write_stdout("second stdout").unwrap();
+        second.write_stderr("second stderr").unwrap();
+        second
+            .write_trace_jsonl(&[r#"{"event":"second"}"#.to_string()])
+            .unwrap();
+
+        let first_dir = beads_root
+            .join(".beads")
+            .join("traces")
+            .join("needle-test")
+            .join("0192a6f0-0000-7000-8000-000000000001");
+        let second_dir = beads_root
+            .join(".beads")
+            .join("traces")
+            .join("needle-test")
+            .join("0192a6f0-0000-7000-8000-000000000002");
+
+        assert!(first_dir.is_dir() && second_dir.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(first_dir.join(STDOUT_FILE)).unwrap(),
+            "first stdout"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first_dir.join(STDERR_FILE)).unwrap(),
+            "first stderr"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first_dir.join("trace.jsonl")).unwrap(),
+            r#"{"event":"first"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(second_dir.join(STDOUT_FILE)).unwrap(),
+            "second stdout"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second_dir.join(STDERR_FILE)).unwrap(),
+            "second stderr"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second_dir.join("trace.jsonl")).unwrap(),
+            r#"{"event":"second"}"#
+        );
+    }
+
+    #[test]
+    fn retention_prunes_aged_attempt_and_spares_newer_sibling() {
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        let bead_dir = traces_dir.join("needle-retried");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        let old_attempt = stage_attempt(&bead_dir, "0192a6f0-0000-7000-8000-000000000001", 0, 8);
+        let new_attempt = stage_attempt(&bead_dir, "0192a6f0-0000-7000-8000-000000000002", 0, 1);
+
+        let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
+
+        assert_eq!(summary.traces_deleted, 0);
+        assert_eq!(summary.traces_pruned, 1, "only the aged attempt is pruned");
+
+        // Aged attempt: metadata-only.
+        assert!(!old_attempt.join(STDOUT_FILE).exists());
+        assert!(!old_attempt.join(STDERR_FILE).exists());
+        assert!(!old_attempt.join("trace.jsonl").exists());
+        assert!(old_attempt.join("metadata.json").exists());
+        let pruned: TraceMetadata = serde_json::from_str(
+            &std::fs::read_to_string(old_attempt.join("metadata.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(pruned.pruned);
+
+        // Newer attempt of the same bead: untouched.
+        assert!(new_attempt.join(STDOUT_FILE).exists());
+        assert!(new_attempt.join(STDERR_FILE).exists());
+        assert!(new_attempt.join("trace.jsonl").exists());
+        assert!(new_attempt.join("metadata.json").exists());
+        let fresh: TraceMetadata = serde_json::from_str(
+            &std::fs::read_to_string(new_attempt.join("metadata.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(!fresh.pruned);
+    }
+
+    #[test]
+    fn retention_deletes_aged_failed_attempts_and_the_empty_bead_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        let bead_dir = traces_dir.join("needle-flaky");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        let old_failure = stage_attempt(&bead_dir, "0192a6f0-0000-7000-8000-000000000001", 1, 31);
+        // A recent failed retry stays: each attempt is retained on its own age.
+        let recent_retry = stage_attempt(&bead_dir, "0192a6f0-0000-7000-8000-000000000002", 1, 1);
+
+        let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
+
+        assert_eq!(summary.traces_deleted, 1);
+        assert!(!old_failure.exists());
+        assert!(recent_retry.join("metadata.json").exists());
+        assert!(bead_dir.is_dir(), "the bead dir survives its live attempts");
+
+        // Once the retry also ages out, the bead directory goes with it.
+        std::fs::write(
+            recent_retry.join("metadata.json"),
+            serde_json::to_string(&retention_metadata("needle-flaky", 1, 31)).unwrap(),
+        )
+        .unwrap();
+        let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
+        assert_eq!(summary.traces_deleted, 1);
+        assert!(!bead_dir.exists(), "no empty bead-dir shell remains");
+    }
+
+    #[test]
+    fn retention_prunes_legacy_flat_and_attempt_layouts_side_by_side() {
+        // A bead directory can hold both a legacy flat capture (older binary)
+        // and attempt directories (this change); each is retained on its own
+        // metadata, and nothing migrates the flat files.
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        let bead_dir = traces_dir.join("needle-mixed");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        // Legacy flat capture, success, past retention.
+        std::fs::write(bead_dir.join(STDOUT_FILE), "legacy stdout").unwrap();
+        std::fs::write(bead_dir.join("trace.jsonl"), "{\"event\":\"legacy\"}").unwrap();
+        std::fs::write(
+            bead_dir.join("metadata.json"),
+            serde_json::to_string(&retention_metadata("needle-mixed", 0, 8)).unwrap(),
+        )
+        .unwrap();
+
+        // Attempt capture, success, past retention too.
+        let attempt = stage_attempt(&bead_dir, "0192a6f0-0000-7000-8000-000000000001", 0, 8);
+
+        let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
+
+        assert_eq!(summary.traces_deleted, 0);
+        assert_eq!(
+            summary.traces_pruned, 2,
+            "flat and attempt captures each prune"
+        );
+
+        assert!(!bead_dir.join(STDOUT_FILE).exists());
+        assert!(!bead_dir.join("trace.jsonl").exists());
+        assert!(bead_dir.join("metadata.json").exists());
+        assert!(!attempt.join(STDOUT_FILE).exists());
+        assert!(attempt.join("metadata.json").exists());
+    }
+
+    #[test]
+    fn retention_failed_flat_capture_spares_attempt_dirs() {
+        // A legacy failed capture aging out must not take newer attempt
+        // captures with it: the flat capture's own files go, the bead
+        // directory and the fresh attempt stay.
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        let bead_dir = traces_dir.join("needle-mixed-failed");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        // Legacy flat capture: failed, past the 30-day failure retention.
+        std::fs::write(bead_dir.join(STDOUT_FILE), "legacy stdout").unwrap();
+        std::fs::write(bead_dir.join("trace.jsonl"), "{\"event\":\"legacy\"}").unwrap();
+        std::fs::write(
+            bead_dir.join("metadata.json"),
+            serde_json::to_string(&retention_metadata("needle-mixed-failed", 1, 31)).unwrap(),
+        )
+        .unwrap();
+
+        // Fresh attempt of the same bead.
+        let fresh = stage_attempt(&bead_dir, "0192a6f0-0000-7000-8000-000000000002", 0, 1);
+
+        let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
+
+        assert_eq!(summary.traces_deleted, 1);
+        // The flat capture is deleted file by file...
+        assert!(!bead_dir.join(STDOUT_FILE).exists());
+        assert!(!bead_dir.join("trace.jsonl").exists());
+        assert!(!bead_dir.join("metadata.json").exists());
+        // ...while the fresh attempt and its bead directory survive.
+        assert!(fresh.join(STDOUT_FILE).exists());
+        assert!(fresh.join("metadata.json").exists());
+        assert!(bead_dir.is_dir());
+    }
+
+    #[test]
+    fn retention_leaves_bead_journal_files_alone() {
+        // attempts.jsonl / lessons.jsonl live at the bead level and are not
+        // trace data: cleanup must neither prune around them into deletion
+        // nor empty the bead directory while they exist.
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        let bead_dir = traces_dir.join("needle-journaled");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+        std::fs::write(bead_dir.join("attempts.jsonl"), "{}\n").unwrap();
+        std::fs::write(bead_dir.join("lessons.jsonl"), "{}\n").unwrap();
+
+        let old_attempt = stage_attempt(&bead_dir, "0192a6f0-0000-7000-8000-000000000001", 1, 31);
+
+        let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
+
+        assert_eq!(summary.traces_deleted, 1);
+        assert!(!old_attempt.exists());
+        assert!(bead_dir.join("attempts.jsonl").exists());
+        assert!(bead_dir.join("lessons.jsonl").exists());
+        assert!(bead_dir.is_dir());
     }
 }

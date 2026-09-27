@@ -2182,20 +2182,27 @@ impl Dispatcher {
         prompt_file: &Path,
         authority: SpawnAuthority<'_>,
     ) -> Result<ExecutionResult> {
-        // Create trace capture for this bead execution.
+        // Create the trace capture for this dispatch attempt, scoped to the
+        // attempt's own directory (`.beads/traces/<bead-id>/<attempt-id>/`)
+        // so a redispatch adds a new capture instead of overwriting the
+        // previous attempt's files.
         // Sanitizer is cloned (Arc clone — cheap) and applied before every disk write.
-        let mut trace_capture =
-            TraceCapture::new_with_sanitizer(bead_id, workspace, self.sanitizer.clone());
+        let attempt_id = authority
+            .claim_context()
+            .and_then(DispatchContext::attempt_id)
+            .map(str::to_owned)
+            .or_else(|| self.telemetry.attempt_id());
+        let mut trace_capture = TraceCapture::new_with_sanitizer(
+            bead_id,
+            workspace,
+            attempt_id.as_deref(),
+            self.sanitizer.clone(),
+        );
         if let (Some(capture), Some(metadata)) = (
             trace_capture.as_mut(),
             authority.claim_handle_metadata().await,
         ) {
             capture.bind_claim_handle(metadata);
-        }
-        if let (Some(capture), Some(attempt_id)) =
-            (trace_capture.as_mut(), self.telemetry.attempt_id())
-        {
-            capture.bind_attempt_id(attempt_id);
         }
 
         // Provision tsnet identity if enabled
@@ -2229,11 +2236,6 @@ impl Dispatcher {
         // Build environment variables for the child process
         let mut child_env = adapter.environment.clone();
 
-        let attempt_id = authority
-            .claim_context()
-            .and_then(DispatchContext::attempt_id)
-            .map(str::to_owned)
-            .or_else(|| self.telemetry.attempt_id());
         if let Some(attempt_id) = attempt_id {
             child_env.insert("NEEDLE_ATTEMPT_ID".to_string(), attempt_id);
         }

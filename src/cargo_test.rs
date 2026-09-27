@@ -1029,9 +1029,12 @@ impl CargoTest {
         // First run the test to get the outcome
         let outcome = self.run()?;
 
-        // Create bead trace directory and write outputs
+        // Create bead trace directory and write outputs. This runner executes
+        // verification test runs outside a dispatch attempt, so there is no
+        // attempt id to scope the directory by and the capture keeps the
+        // legacy flat layout.
         let bead_id = BeadId::from(bead_id);
-        if let Some(trace) = TraceCapture::new(&bead_id, &self.workspace) {
+        if let Some(trace) = TraceCapture::new(&bead_id, &self.workspace, None) {
             // Write stdout
             if let Err(e) = trace.write_stdout(&outcome.stdout) {
                 tracing::warn!(
