@@ -84,7 +84,9 @@ strands:
     severity_threshold: 3
     prompt_template: null
   reflect:
-    enabled: true
+    # Legacy text-similarity Reflect is off (ADR-026); its output fed
+    # .beads/learnings.md with sentence fragments. needle-026f551a.
+    enabled: false
     min_beads_since_last: 10
     cooldown_hours: 24
     max_learnings_per_run: 10
