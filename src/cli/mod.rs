@@ -684,10 +684,12 @@ pub enum StatsBy {
     /// `"verified_success"`), over `attempt.resolved` ledger rows.
     #[value(name = "outcome")]
     Outcome,
-    /// Group by the model that executed each attempt (e.g. `"glm-5.3-flash"`),
-    /// over `attempt.resolved` ledger rows.
+    /// Group by the provider-returned model that executed each attempt.
     #[value(name = "model")]
     Model,
+    /// Group by the adapter alias requested for each attempt.
+    #[value(name = "requested_model")]
+    RequestedModel,
     /// Group by the workspace each attempt ran in, over `attempt.resolved`
     /// ledger rows.
     #[value(name = "workspace")]
@@ -4812,6 +4814,7 @@ fn cmd_stats(
         StatsBy::Adapter => StatsDimension::Adapter,
         StatsBy::Outcome => StatsDimension::Outcome,
         StatsBy::Model => StatsDimension::Model,
+        StatsBy::RequestedModel => StatsDimension::RequestedModel,
         StatsBy::Workspace => StatsDimension::Workspace,
     };
 
@@ -4826,7 +4829,8 @@ fn cmd_stats(
         StatsBy::Worker => ("WORKER", "BEADS"),
         StatsBy::Adapter => ("ADAPTER", "ATTEMPTS"),
         StatsBy::Outcome => ("OUTCOME", "ATTEMPTS"),
-        StatsBy::Model => ("MODEL", "ATTEMPTS"),
+        StatsBy::Model => ("EFFECTIVE MODEL", "ATTEMPTS"),
+        StatsBy::RequestedModel => ("REQUESTED MODEL", "ATTEMPTS"),
         StatsBy::Workspace => ("WORKSPACE", "ATTEMPTS"),
     };
     // Only the attempt dimensions read `attempt.resolved` rows, so only they

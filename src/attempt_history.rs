@@ -308,9 +308,18 @@ pub struct AttemptRecord {
     pub worker: String,
     /// Adapter that executed it (e.g. `claude-code-glm-5.3-flash`).
     pub adapter: String,
-    /// Model identifier when the adapter declares one.
+    /// Compatibility alias for `requested_model`; never provider-returned.
     #[serde(default)]
     pub model: Option<String>,
+    /// Model identifier configured on the adapter.
+    #[serde(default)]
+    pub requested_model: Option<String>,
+    /// Model identifier returned by provider metadata. Missing evidence stays unknown.
+    #[serde(default)]
+    pub effective_model: Option<String>,
+    /// Provider response field that supplied `effective_model`.
+    #[serde(default)]
+    pub model_resolution_source: Option<String>,
     /// Semantic outcome class (`verified_success`, `work_failure`,
     /// `infrastructure_failure`, `indeterminate`, `cancelled`).
     pub outcome: String,
@@ -1365,6 +1374,9 @@ mod tests {
             worker: "w".into(),
             adapter: "claude-code-glm-5.3-flash".into(),
             model: Some("glm-5.3-flash".into()),
+            requested_model: Some("glm-5.3-flash".into()),
+            effective_model: Some("glm-5.3-flash".into()),
+            model_resolution_source: Some("claude_message.model".into()),
             outcome: outcome.into(),
             terminal_reason: Some("gate:definition-of-done".into()),
             exit_code: 0,

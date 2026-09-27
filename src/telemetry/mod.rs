@@ -190,7 +190,14 @@ pub struct AttemptResolvedFields {
     pub worker: String,
     pub adapter: String,
     pub harness: Option<String>,
+    /// Compatibility alias for `requested_model`; never provider-returned.
     pub model: Option<String>,
+    /// Adapter model requested for this attempt.
+    pub requested_model: Option<String>,
+    /// Model returned by provider metadata. Missing evidence remains unknown.
+    pub effective_model: Option<String>,
+    /// Provider response field that supplied `effective_model`.
+    pub model_resolution_source: Option<String>,
     pub provider: Option<String>,
     pub prompt_template: String,
     pub template_version: String,
@@ -1248,11 +1255,26 @@ pub enum EventKind {
         bead_id: BeadId,
         elapsed_ms: u64,
         agent_name: String,
+        /// Compatibility alias for `requested_model`.
         model: Option<String>,
+        /// Adapter model identifier requested for this attempt.
+        requested_model: Option<String>,
+        /// Model identifier returned by provider metadata, when known.
+        effective_model: Option<String>,
+        /// Provider response metadata field that supplied `effective_model`.
+        model_resolution_source: Option<String>,
         provider: Option<String>,
         tokens_in: Option<u64>,
         tokens_out: Option<u64>,
         estimated_cost_usd: Option<f64>,
+    },
+    /// Provider response metadata reported a different model than requested.
+    ProviderModelSubstituted {
+        attempt_id: String,
+        requested_model: String,
+        effective_model: String,
+        model_resolution_source: String,
+        provider: Option<String>,
     },
     BudgetWarning {
         daily_cost: f64,
@@ -1996,6 +2018,7 @@ impl EventKind {
             EventKind::OutcomeHandled { .. } => "outcome.handled",
             EventKind::AttemptResolved(..) => "attempt.resolved",
             EventKind::AttemptOverridden { .. } => "attempt.overridden",
+            EventKind::ProviderModelSubstituted { .. } => "provider.model_substituted",
             EventKind::WorkerHandlingTimeout { .. } => "worker.handling.timeout",
             EventKind::HeartbeatEmitted { .. } => "heartbeat.emitted",
             EventKind::StuckDetected { .. } => "peer.stale",
@@ -2343,6 +2366,7 @@ impl EventKind {
             EventKind::QuarantineExpired { bead_id } => Some(bead_id.clone()),
             EventKind::AttemptResolved(f) => Some(f.bead_id.clone()),
             EventKind::AttemptOverridden { .. } => None,
+            EventKind::ProviderModelSubstituted { .. } => None,
         }
     }
 
@@ -3014,6 +3038,9 @@ impl EventKind {
                 elapsed_ms,
                 agent_name,
                 model,
+                requested_model,
+                effective_model,
+                model_resolution_source,
                 provider,
                 tokens_in,
                 tokens_out,
@@ -3024,12 +3051,28 @@ impl EventKind {
                     "elapsed_ms": elapsed_ms,
                     "agent_name": agent_name,
                     "model": model,
+                    "requested_model": requested_model,
+                    "effective_model": effective_model,
+                    "model_resolution_source": model_resolution_source,
                     "provider": provider,
                     "tokens_in": tokens_in,
                     "tokens_out": tokens_out,
                     "estimated_cost_usd": estimated_cost_usd,
                 })
             }
+            EventKind::ProviderModelSubstituted {
+                attempt_id,
+                requested_model,
+                effective_model,
+                model_resolution_source,
+                provider,
+            } => serde_json::json!({
+                "attempt_id": attempt_id,
+                "requested_model": requested_model,
+                "effective_model": effective_model,
+                "model_resolution_source": model_resolution_source,
+                "provider": provider,
+            }),
             EventKind::BudgetWarning {
                 daily_cost,
                 threshold,
@@ -4315,6 +4358,9 @@ impl EventKind {
                     adapter,
                     harness,
                     model,
+                    requested_model,
+                    effective_model,
+                    model_resolution_source,
                     provider,
                     prompt_template,
                     template_version,
@@ -4392,6 +4438,15 @@ impl EventKind {
                 if let Some(m) = model {
                     data["model"] = serde_json::json!(m);
                 }
+                if let Some(model) = requested_model {
+                    data["requested_model"] = serde_json::json!(model);
+                }
+                if let Some(model) = effective_model {
+                    data["effective_model"] = serde_json::json!(model);
+                }
+                if let Some(source) = model_resolution_source {
+                    data["model_resolution_source"] = serde_json::json!(source);
+                }
                 if let Some(p) = provider {
                     data["provider"] = serde_json::json!(p);
                 }
@@ -4462,6 +4517,7 @@ impl EventKind {
             | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
             EventKind::AttemptResolved(f) => Some(f.duration_ms),
             EventKind::AttemptOverridden { .. } => None,
+            EventKind::ProviderModelSubstituted { .. } => None,
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -7779,6 +7835,9 @@ mod tests {
             adapter: "claude-code-glm-5.3-flash".to_string(),
             harness: Some("claude-code".to_string()),
             model: Some("glm-5.3-flash".to_string()),
+            requested_model: Some("glm-5.3-flash".to_string()),
+            effective_model: Some("glm-5.3-flash".to_string()),
+            model_resolution_source: Some("claude_message.model".to_string()),
             provider: Some("anthropic".to_string()),
             prompt_template: "pluck".to_string(),
             template_version: "pluck-default".to_string(),
@@ -7822,6 +7881,10 @@ mod tests {
     fn nt47_costed_is_always_serialized_and_an_uncosted_row_conforms() {
         let data = EventKind::AttemptResolved(Box::new(attempt_resolved_fields())).to_data();
         assert_eq!(data["costed"], true);
+        assert_eq!(data["model"], "glm-5.3-flash");
+        assert_eq!(data["requested_model"], "glm-5.3-flash");
+        assert_eq!(data["effective_model"], "glm-5.3-flash");
+        assert_eq!(data["model_resolution_source"], "claude_message.model");
 
         let mut fields = attempt_resolved_fields();
         fields.tokens_in = None;
@@ -8980,11 +9043,21 @@ mod tests {
                 bead_id: id.clone(),
                 elapsed_ms: 45000,
                 agent_name: "claude-sonnet".to_string(),
-                model: Some("claude-sonnet-4-6".to_string()),
+                model: Some("glm-4.7".to_string()),
+                requested_model: Some("glm-4.7".to_string()),
+                effective_model: Some("glm-5.3-flash".to_string()),
+                model_resolution_source: Some("claude_message.model".to_string()),
                 provider: Some("anthropic".to_string()),
                 tokens_in: Some(10000),
                 tokens_out: Some(2000),
                 estimated_cost_usd: Some(0.06),
+            },
+            EventKind::ProviderModelSubstituted {
+                attempt_id: "attempt-1".to_string(),
+                requested_model: "glm-4.7".to_string(),
+                effective_model: "glm-5.3-flash".to_string(),
+                model_resolution_source: "claude_message.model".to_string(),
+                provider: Some("anthropic".to_string()),
             },
             EventKind::BudgetWarning {
                 daily_cost: 8.50,
@@ -9041,6 +9114,25 @@ mod tests {
             assert_eq!(parsed.event_type, event.event_type);
             assert_eq!(parsed.sequence, event.sequence);
         }
+        let effort = collected
+            .iter()
+            .find(|event| event.event_type == "effort.recorded")
+            .expect("effort event should be present");
+        assert_eq!(effort.data["model"], "glm-4.7");
+        assert_eq!(effort.data["requested_model"], "glm-4.7");
+        assert_eq!(effort.data["effective_model"], "glm-5.3-flash");
+
+        let substitution = collected
+            .iter()
+            .find(|event| event.event_type == "provider.model_substituted")
+            .expect("substitution event should be present");
+        assert_eq!(substitution.data["attempt_id"], "attempt-1");
+        assert_eq!(substitution.data["requested_model"], "glm-4.7");
+        assert_eq!(substitution.data["effective_model"], "glm-5.3-flash");
+        assert_eq!(
+            substitution.data["model_resolution_source"],
+            "claude_message.model"
+        );
     }
 
     // ── StdoutSink tests ──

@@ -118,7 +118,8 @@ pub struct WorkerEntry {
     pub workspace: PathBuf,
     /// Agent adapter name.
     pub agent: String,
-    /// Model name (if known).
+    /// Worker adapter's requested model alias (if known). This is worker
+    /// configuration identity, not provider-returned per-attempt evidence.
     pub model: Option<String>,
     /// Provider name (e.g., `anthropic`, `openai`).
     pub provider: Option<String>,

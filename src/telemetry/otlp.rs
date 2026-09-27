@@ -1406,12 +1406,24 @@ impl OtlpSink {
                     .get("model")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
+                let requested_model = event
+                    .data
+                    .get("requested_model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(model);
+                let effective_model = event
+                    .data
+                    .get("effective_model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 if let Some(tokens_in) = event.data.get("tokens_in").and_then(|v| v.as_u64()) {
                     self.metrics.tokens_input.add(
                         tokens_in,
                         &[
                             KeyValue::new("agent", agent.to_string()),
                             KeyValue::new("model", model.to_string()),
+                            KeyValue::new("requested_model", requested_model.to_string()),
+                            KeyValue::new("effective_model", effective_model.to_string()),
                         ],
                     );
                 }
@@ -1421,6 +1433,8 @@ impl OtlpSink {
                         &[
                             KeyValue::new("agent", agent.to_string()),
                             KeyValue::new("model", model.to_string()),
+                            KeyValue::new("requested_model", requested_model.to_string()),
+                            KeyValue::new("effective_model", effective_model.to_string()),
                         ],
                     );
                 }
@@ -1434,6 +1448,8 @@ impl OtlpSink {
                         &[
                             KeyValue::new("agent", agent.to_string()),
                             KeyValue::new("model", model.to_string()),
+                            KeyValue::new("requested_model", requested_model.to_string()),
+                            KeyValue::new("effective_model", effective_model.to_string()),
                         ],
                     );
                 }
@@ -1534,15 +1550,33 @@ impl OtlpSink {
             attrs.push(("duration_ms", AnyValue::from(duration_ms as i64)));
         }
 
-        // Add needle.agent, needle.model, and needle.model.provider from dispatch context when available.
-        // These per-record attributes reflect the actual adapter/model dispatched,
-        // which can differ from the configured default due to routing rules.
+        // Keep the legacy needle.model attribute as the requested alias and
+        // carry the provider-returned identity separately. Unknown effective
+        // models remain absent; they never inherit the requested value.
         // Per ADR-016 §2: record value wins over Resource value.
         if let Some(agent_name) = event.data.get("agent_name").and_then(|v| v.as_str()) {
             attrs.push(("needle.agent", agent_name.to_string().into()));
         }
-        if let Some(model) = event.data.get("model").and_then(|v| v.as_str()) {
+        let requested_model = event
+            .data
+            .get("requested_model")
+            .and_then(|v| v.as_str())
+            .or_else(|| event.data.get("model").and_then(|v| v.as_str()));
+        if let Some(model) = requested_model {
             attrs.push(("needle.model", model.to_string().into()));
+            attrs.push(("needle.model.requested", model.to_string().into()));
+            attrs.push(("gen_ai.request.model", model.to_string().into()));
+        }
+        if let Some(model) = event.data.get("effective_model").and_then(|v| v.as_str()) {
+            attrs.push(("needle.model.effective", model.to_string().into()));
+            attrs.push(("gen_ai.response.model", model.to_string().into()));
+        }
+        if let Some(source) = event
+            .data
+            .get("model_resolution_source")
+            .and_then(|v| v.as_str())
+        {
+            attrs.push(("needle.model.resolution_source", source.to_string().into()));
         }
         if let Some(provider) = event.data.get("provider").and_then(|v| v.as_str()) {
             attrs.push(("needle.model.provider", provider.to_string().into()));
@@ -2501,13 +2535,17 @@ mod tests {
                 .build(),
         );
 
-        // Test with provider in event data (simulating a DispatchCompleted event)
+        // Model identity metadata is logged on the same record without carrying
+        // provider response bodies or reasoning content.
         sink.emit_log(&make_test_event(
-            "agent.completed",
+            "effort.recorded",
             None,
             serde_json::json!({
-                "agent": "claude-anthropic-sonnet",
-                "model": "claude-sonnet-4-6",
+                "agent_name": "claude-anthropic-sonnet",
+                "model": "glm-4.7",
+                "requested_model": "glm-4.7",
+                "effective_model": "glm-5.3-flash",
+                "model_resolution_source": "claude_message.model",
                 "provider": "anthropic",
             }),
         ))
@@ -2534,6 +2572,25 @@ mod tests {
             }
             _ => panic!("needle.model.provider should be a String value"),
         }
+
+        let attr_string = |name: &str| {
+            records[0]
+                .attributes_iter()
+                .find(|(key, _)| key.as_str() == name)
+                .and_then(|(_, value)| match value {
+                    AnyValue::String(value) => Some(value.to_string()),
+                    _ => None,
+                })
+        };
+        assert_eq!(attr_string("needle.model"), Some("glm-4.7".to_string()));
+        assert_eq!(
+            attr_string("needle.model.effective"),
+            Some("glm-5.3-flash".to_string())
+        );
+        assert_eq!(
+            attr_string("needle.model.resolution_source"),
+            Some("claude_message.model".to_string())
+        );
 
         drop(records);
 

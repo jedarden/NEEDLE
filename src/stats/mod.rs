@@ -924,9 +924,12 @@ pub enum StatsDimension {
     /// Group by the semantic ledger outcome of each attempt (e.g.
     /// `"verified_success"`), read from `attempt.resolved` ledger rows.
     Outcome,
-    /// Group by the model that executed each attempt (e.g. `"glm-5.3-flash"`),
-    /// read from `attempt.resolved` ledger rows.
+    /// Group by the provider-returned model that executed each attempt.
     Model,
+    /// Group by the adapter alias requested for each attempt. For historical
+    /// rows without `requested_model`, compatibility `model` is the requested
+    /// identifier and is never treated as effective-model evidence.
+    RequestedModel,
     /// Group by the workspace each attempt ran in (last path component),
     /// read from `attempt.resolved` ledger rows.
     Workspace,
@@ -941,6 +944,7 @@ impl StatsDimension {
             StatsDimension::Adapter
                 | StatsDimension::Outcome
                 | StatsDimension::Model
+                | StatsDimension::RequestedModel
                 | StatsDimension::Workspace
         )
     }
@@ -954,13 +958,14 @@ pub struct StatsRow {
     pub key: String,
     /// Total number of beads dispatched in this group.
     ///
-    /// For the `Adapter` and `Outcome` dimensions this counts attempts (one
-    /// `attempt.resolved` row per attempt), not dispatches.
+    /// For the `Adapter`, `Outcome`, `Model`, `RequestedModel`, and
+    /// `Workspace` dimensions this counts attempts (one `attempt.resolved`
+    /// row per attempt), not dispatches.
     pub beads: u64,
     /// Number of rows in this group without accepted attempt identity
     /// (`"provisional": true`, or a missing/invalid flag). Populated only by
-    /// the `Adapter` and `Outcome` dimensions. These rows are excluded from
-    /// learning evidence and authoritative SLOs (plan section 4.4 step 1).
+    /// attempt dimensions. These rows are excluded from learning evidence and
+    /// authoritative SLOs (plan section 4.4 step 1).
     pub provisional: u64,
     /// Number of beads that completed with `"Success"` outcome.
     pub pass: u64,
@@ -1078,6 +1083,7 @@ pub fn compute_stats(
                     StatsDimension::Adapter
                     | StatsDimension::Outcome
                     | StatsDimension::Model
+                    | StatsDimension::RequestedModel
                     | StatsDimension::Workspace => continue,
                 };
                 bead_key.insert(bead_id, key.clone());
@@ -1182,7 +1188,8 @@ pub fn compute_attempt_stats(
         let key_field = match dimension {
             StatsDimension::Adapter => "adapter",
             StatsDimension::Outcome => "outcome",
-            StatsDimension::Model => "model",
+            StatsDimension::Model => "effective_model",
+            StatsDimension::RequestedModel => "requested_model",
             StatsDimension::Workspace => "workspace",
             // Only called with the attempt dimensions; the dispatch
             // dimensions take the bead-correlated path above.
@@ -1193,6 +1200,11 @@ pub fn compute_attempt_stats(
         let raw_key = event
             .data
             .get(key_field)
+            .or_else(|| {
+                (dimension == StatsDimension::RequestedModel)
+                    .then(|| event.data.get("model"))
+                    .flatten()
+            })
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .unwrap_or("unknown");
@@ -1771,6 +1783,32 @@ mod tests {
             Some(825.0),
             "only rows that reported tokens average them in"
         );
+        let mut replay = attempt_row("adapter-glm", "verified_success", None, None, None);
+        replay.data["model"] = serde_json::json!("glm-4.7");
+        replay.data["requested_model"] = serde_json::json!("glm-4.7");
+        replay.data["effective_model"] = serde_json::json!("glm-5.3-flash");
+        replay.data["model_resolution_source"] = serde_json::json!("claude_message.model");
+
+        let by_effective = compute_attempt_stats(&[replay.clone()], StatsDimension::Model);
+        let by_requested = compute_attempt_stats(&[replay.clone()], StatsDimension::RequestedModel);
+        assert_eq!(by_effective[0].key, "glm-5.3-flash");
+        assert_eq!(by_requested[0].key, "glm-4.7");
+
+        let mut historical = replay;
+        historical
+            .data
+            .as_object_mut()
+            .unwrap()
+            .remove("effective_model");
+        historical
+            .data
+            .as_object_mut()
+            .unwrap()
+            .remove("requested_model");
+        let old_effective = compute_attempt_stats(&[historical.clone()], StatsDimension::Model);
+        let old_requested = compute_attempt_stats(&[historical], StatsDimension::RequestedModel);
+        assert_eq!(old_effective[0].key, "unknown");
+        assert_eq!(old_requested[0].key, "glm-4.7");
     }
 
     #[test]

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ardenone.com/schemas/needle/attempt-resolved-v3.schema.json",
   "title": "attempt.resolved",
-  "description": "Terminal ledger row for one dispatch (plan section 4.4 step 1, transition N-T16). Exactly one is emitted per dispatch, from OutcomeHandler::handle, regardless of which terminal path resolved it. The canonical Rust type is AttemptResolvedFields in src/telemetry/mod.rs; this fixture is the versioned contract its serialized `data` object must satisfy. Schema version 3 adds commits_before_deadline (N-T25); version 2 added decomposed (N-T46) and costed (N-T47).",
+  "description": "Terminal ledger row for one dispatch (plan section 4.4 step 1, transition N-T16). Exactly one is emitted per dispatch, from OutcomeHandler::handle, regardless of which terminal path resolved it. The canonical Rust type is AttemptResolvedFields in src/telemetry/mod.rs; this fixture is the versioned contract its serialized `data` object must satisfy. Schema version 3 adds commits_before_deadline (N-T25); version 2 added decomposed (N-T46) and costed (N-T47). Optional requested_model and effective_model are additive; legacy model remains the requested alias.",
   "type": "object",
   "required": [
     "adapter",
@@ -98,7 +98,20 @@
     },
     "model": {
       "type": "string",
-      "description": "Model identifier from the adapter config. Absent when the adapter publishes none."
+      "description": "Compatibility alias for requested_model: the model identifier from the adapter config. Absent when the adapter publishes none."
+    },
+    "requested_model": {
+      "type": "string",
+      "description": "Adapter model identifier requested for this attempt. Historical model values mean requested model only."
+    },
+    "effective_model": {
+      "type": "string",
+      "description": "Model identifier observed in provider response metadata. Absent when no response metadata identified it; never inferred from the adapter or requested alias."
+    },
+    "model_resolution_source": {
+      "type": "string",
+      "enum": ["claude_message.model", "claude_system_init.model"],
+      "description": "Provider response metadata field used to resolve effective_model."
     },
     "provider": {
       "type": "string",

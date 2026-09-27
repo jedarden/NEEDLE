@@ -3126,6 +3126,10 @@ impl Dispatcher {
                 api_error_status,
                 ..
             } = parse_result_envelope(&stdout).unwrap_or_default();
+            let effective_model = (adapter.output_transform.as_deref()
+                == Some("needle-transform-claude"))
+            .then(|| crate::attempt::effective_model_from_claude_stream(&stdout))
+            .flatten();
             if let Some(metadata) = authority.claim_handle_metadata().await {
                 capture.bind_claim_handle(metadata);
             }
@@ -3134,6 +3138,13 @@ impl Dispatcher {
                 agent: adapter.name.clone(),
                 provider: adapter.provider.clone(),
                 model: adapter.model.clone(),
+                requested_model: adapter.model.clone(),
+                effective_model: effective_model
+                    .as_ref()
+                    .map(|model| model.identifier.clone()),
+                model_resolution_source: effective_model
+                    .as_ref()
+                    .map(|model| model.source.to_string()),
                 exit_code,
                 outcome: outcome.as_str().to_string(),
                 duration_ms: elapsed.as_millis() as u64,

@@ -46,8 +46,18 @@ pub struct AttemptArchiveInput {
     pub workspace: String,
     pub worker: String,
     pub adapter: String,
+    /// Compatibility alias for the adapter identifier requested.
     #[serde(default)]
     pub model: Option<String>,
+    /// Adapter model identifier requested for this attempt.
+    #[serde(default)]
+    pub requested_model: Option<String>,
+    /// Model identifier returned by provider metadata; unknown remains absent.
+    #[serde(default)]
+    pub effective_model: Option<String>,
+    /// Provider response metadata field that supplied `effective_model`.
+    #[serde(default)]
+    pub model_resolution_source: Option<String>,
     pub outcome: String,
     #[serde(default)]
     pub terminal_reason: Option<String>,
@@ -284,6 +294,9 @@ mod tests {
             worker: "needle-alpha".into(),
             adapter: "claude-code-glm-5.3-flash".into(),
             model: Some("glm-5.3-flash".into()),
+            requested_model: Some("glm-5.3-flash".into()),
+            effective_model: Some("glm-5.3-flash".into()),
+            model_resolution_source: Some("claude_message.model".into()),
             outcome: "work_failure".into(),
             terminal_reason: Some("gate:dod".into()),
             recorded_at: "2026-09-12T15:00:00.000Z".into(),

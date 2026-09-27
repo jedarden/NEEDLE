@@ -77,8 +77,17 @@ pub struct TraceMetadata {
     pub agent: String,
     /// AI provider (e.g., "anthropic", "openai").
     pub provider: Option<String>,
-    /// Model identifier (e.g., "claude-sonnet-4-6").
+    /// Compatibility alias for `requested_model`; never provider-returned.
     pub model: Option<String>,
+    /// Model identifier configured on the adapter.
+    #[serde(default)]
+    pub requested_model: Option<String>,
+    /// Model identifier returned by provider metadata; unknown stays absent.
+    #[serde(default)]
+    pub effective_model: Option<String>,
+    /// Provider response field that supplied `effective_model`.
+    #[serde(default)]
+    pub model_resolution_source: Option<String>,
     /// Process exit code.
     pub exit_code: i32,
     /// Classified outcome.
@@ -1101,6 +1110,9 @@ mod tests {
             agent: "claude-sonnet".to_string(),
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 1234,
@@ -1183,6 +1195,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 100,
@@ -1496,6 +1511,9 @@ mod tests {
             agent: "claude-sonnet".to_string(),
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 1234,
@@ -1543,6 +1561,9 @@ mod tests {
             agent: "test-agent".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 124,
             outcome: "timeout".to_string(),
             duration_ms: 6_125,
@@ -1605,6 +1626,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 1, // Failed
             outcome: "failure".to_string(),
             duration_ms: 100,
@@ -1655,6 +1679,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0, // Success
             outcome: "success".to_string(),
             duration_ms: 100,
@@ -1713,6 +1740,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 100,
@@ -1769,6 +1799,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 100,
@@ -1825,6 +1858,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 100,
@@ -1890,6 +1926,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 100,
@@ -1954,6 +1993,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 100,
@@ -1989,8 +2031,11 @@ mod tests {
         TraceMetadata {
             bead_id: test_bead_id(),
             agent: "probe".to_string(),
-            provider: None,
-            model: None,
+            provider: Some("anthropic".to_string()),
+            model: Some("glm-4.7".to_string()),
+            requested_model: Some("glm-4.7".to_string()),
+            effective_model: Some("glm-5.3-flash".to_string()),
+            model_resolution_source: Some("claude_message.model".to_string()),
             exit_code: 0,
             outcome: "success".to_string(),
             duration_ms: 10,
@@ -2027,6 +2072,10 @@ mod tests {
         // document: parsing into the struct would silently drop the key.
         let raw = read_raw_metadata(&capture);
         assert_eq!(raw["attempt_id"], "0192-attempt-identity");
+        assert_eq!(raw["model"], "glm-4.7");
+        assert_eq!(raw["requested_model"], "glm-4.7");
+        assert_eq!(raw["effective_model"], "glm-5.3-flash");
+        assert_eq!(raw["model_resolution_source"], "claude_message.model");
     }
 
     #[test]
@@ -2125,6 +2174,9 @@ mod tests {
             agent: "test".to_string(),
             provider: None,
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             exit_code,
             outcome: if exit_code == 0 {
                 "success".to_string()

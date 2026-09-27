@@ -442,6 +442,28 @@ Rows may also carry `provider_errors`, `provider_error_classes`, and
 contain only categorical counts and timing; provider error bodies are never
 stored. `provider_error_classes` uses `api_error`, `retry`, and `http_429`,
 `http_502`, `http_503`, or `http_529` keys.
+Model identity is additive in schema version 3: `requested_model` is the
+adapter identifier, `effective_model` is the first non-empty provider response
+identifier observed, and `model_resolution_source` names its metadata field.
+The legacy `model` field remains a compatibility alias for `requested_model`;
+it never means provider-returned identity. The same fields appear in
+`effort.recorded`, trace `metadata.json`, and OTLP log attributes. OTLP effort
+metrics and `needle stats --by model` group quality by effective model, while
+`--by requested_model` retains the requested alias. Dashboards should use
+`effective_model` for model-quality grouping and `requested_model` for alias
+comparisons. A `provider.model_substituted` event is emitted once for an
+attempt only when both observed identifiers are present and differ.
+Its data contains `attempt_id`, `requested_model`, `effective_model`,
+`model_resolution_source`, and the declared provider when available; it never
+contains the response body.
+
+The cutover applies only to rows emitted by binaries that observe provider
+metadata. Historical rows containing only `model` are known requested aliases;
+they remain `effective_model=unknown` for aggregation and are never
+retroactively relabelled. Missing response metadata stays absent rather than
+falling back to the requested alias. The same rule applies to attempt history
+and archive sidecars: the legacy `model` value remains the requested alias
+unless response metadata was observed for that attempt.
 Version 2 added `decomposed` and `costed`; rows carrying `schema_version: 1`
 predate it and validate against
 [`attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json).

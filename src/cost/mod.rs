@@ -211,8 +211,14 @@ pub struct EffortData {
     pub cycle_start: std::time::Instant,
     /// Agent adapter name used.
     pub agent_name: String,
-    /// Model identifier (from adapter config).
+    /// Legacy model alias: the requested adapter identifier.
     pub model: Option<String>,
+    /// Model identifier configured on the adapter.
+    pub requested_model: Option<String>,
+    /// Model identifier returned by provider metadata; unknown stays `None`.
+    pub effective_model: Option<String>,
+    /// Provider response field used to resolve `effective_model`.
+    pub model_resolution_source: Option<String>,
     /// Provider name (e.g., "anthropic", "openai").
     pub provider: Option<String>,
     /// Extracted token usage from agent output.

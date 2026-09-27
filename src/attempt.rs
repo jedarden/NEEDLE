@@ -26,10 +26,65 @@ pub struct AttemptProvenance {
     pub adapter: Option<String>,
     /// Harness identity, when the adapter declares one.
     pub harness: Option<String>,
-    /// Model identity.
-    pub model: Option<String>,
+    /// Model identifier requested through the selected adapter. The legacy
+    /// `model` fields in persisted telemetry remain aliases of this value.
+    pub requested_model: Option<String>,
+    /// Model identifier returned in provider response metadata, when observed.
+    pub effective_model: Option<String>,
+    /// Metadata field that supplied `effective_model` (for example
+    /// `claude_message.model` or `claude_system_init.model`).
+    pub model_resolution_source: Option<String>,
     /// Digest of the context manifest exposed to the adapter.
     pub context_manifest_hash: Option<String>,
+}
+
+/// The provider-reported model identity from a supported response field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveModel {
+    pub identifier: String,
+    pub source: &'static str,
+}
+
+/// Read the first non-empty model identifier from Claude's raw JSONL stream.
+///
+/// Only the identifier and its source field are returned. Transcript text,
+/// tool arguments, and reasoning content are never copied into provenance.
+pub fn effective_model_from_claude_stream(stream: &str) -> Option<EffectiveModel> {
+    for line in stream.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("assistant") {
+            if let Some(identifier) = value
+                .get("message")
+                .and_then(|message| message.get("model"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                return Some(EffectiveModel {
+                    identifier: identifier.to_string(),
+                    source: "claude_message.model",
+                });
+            }
+        }
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("system")
+            && value.get("subtype").and_then(serde_json::Value::as_str) == Some("init")
+        {
+            if let Some(identifier) = value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                return Some(EffectiveModel {
+                    identifier: identifier.to_string(),
+                    source: "claude_system_init.model",
+                });
+            }
+        }
+    }
+    None
 }
 
 /// Mint the one opaque identity for a claim/dispatch attempt.
@@ -94,5 +149,32 @@ mod tests {
         };
         assert_eq!(hash(&first), hash(&first));
         assert_ne!(hash(&first), hash(&retry));
+        let stream = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"  \",\"session_id\":\"s\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"glm-5.3-flash\",\"content\":[]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"later-model\"}}\n"
+        );
+        assert_eq!(
+            effective_model_from_claude_stream(stream),
+            Some(EffectiveModel {
+                identifier: "glm-5.3-flash".to_string(),
+                source: "claude_message.model",
+            })
+        );
+        assert_eq!(
+            effective_model_from_claude_stream(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"glm-5.3-flash\"}"
+            ),
+            Some(EffectiveModel {
+                identifier: "glm-5.3-flash".to_string(),
+                source: "claude_system_init.model",
+            })
+        );
+        assert_eq!(
+            effective_model_from_claude_stream(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[],\"model\":\"\"}}"
+            ),
+            None
+        );
     }
 }

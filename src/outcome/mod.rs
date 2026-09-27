@@ -869,7 +869,7 @@ pub struct AttemptContext {
     /// The claimant identity the bead is assigned to (the worker's qualified
     /// id), passed to the backend as the resolving actor.
     pub actor: String,
-    /// Model identifier from the adapter config.
+    /// Legacy model alias: the requested adapter identifier.
     pub model: Option<String>,
     /// Provider name (e.g. `"anthropic"`).
     pub provider: Option<String>,
@@ -2196,6 +2196,9 @@ impl OutcomeHandler {
             worker: ledger.worker.clone(),
             adapter: ledger.adapter.clone(),
             model: ledger.model.clone(),
+            requested_model: ledger.requested_model.clone(),
+            effective_model: ledger.effective_model.clone(),
+            model_resolution_source: ledger.model_resolution_source.clone(),
             outcome: ledger.outcome.clone(),
             terminal_reason: ledger.terminal_reason.clone(),
             recorded_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -2613,6 +2616,9 @@ impl OutcomeHandler {
             worker: ledger.worker.clone(),
             adapter: ledger.adapter.clone(),
             model: ledger.model.clone(),
+            requested_model: ledger.requested_model.clone(),
+            effective_model: ledger.effective_model.clone(),
+            model_resolution_source: ledger.model_resolution_source.clone(),
             outcome: ledger.outcome.clone(),
             terminal_reason: ledger.terminal_reason.clone(),
             exit_code: ledger.exit_code,
@@ -2862,7 +2868,10 @@ impl OutcomeHandler {
                 .adapter
                 .unwrap_or_else(|| attempt.adapter.clone()),
             harness: provenance.harness,
-            model: attempt.model,
+            model: attempt.model.clone(),
+            requested_model: provenance.requested_model.or_else(|| attempt.model.clone()),
+            effective_model: provenance.effective_model,
+            model_resolution_source: provenance.model_resolution_source,
             provider: attempt.provider,
             prompt_template: attempt.prompt_template,
             template_version: attempt.template_version,
@@ -2896,6 +2905,28 @@ impl OutcomeHandler {
                 .clone(),
             wip_patch: attempt.wip_patch,
         };
+        if let (Some(requested_model), Some(effective_model), Some(source)) = (
+            fields.requested_model.as_deref(),
+            fields.effective_model.as_deref(),
+            fields.model_resolution_source.as_deref(),
+        ) {
+            if requested_model != effective_model {
+                let event = EventKind::ProviderModelSubstituted {
+                    attempt_id: fields.attempt_id.clone(),
+                    requested_model: requested_model.to_string(),
+                    effective_model: effective_model.to_string(),
+                    model_resolution_source: source.to_string(),
+                    provider: fields.provider.clone(),
+                };
+                if let Err(error) = self.telemetry.emit(event, Utc::now()) {
+                    tracing::warn!(
+                        attempt_id = %fields.attempt_id,
+                        error = %error,
+                        "failed to enqueue provider.model_substituted event"
+                    );
+                }
+            }
+        }
         let event = EventKind::AttemptResolved(Box::new(fields.clone()));
 
         let timestamp = Utc::now();
@@ -9314,11 +9345,116 @@ mod tests {
         );
     }
 
+    async fn assert_model_identity_replay_control_and_missing_metadata() {
+        async fn resolve(
+            raw_stream: &str,
+            requested_model: &str,
+        ) -> Vec<crate::telemetry::TelemetryEvent> {
+            let mut config = Config::default();
+            config.worker.enforce_shipped_work = false;
+            let helper = crate::telemetry::test_utils::TestHelper::new("model-identity-test");
+            let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+            handler.set_attempt_provenance(crate::attempt::AttemptProvenance {
+                assignee: Some("model-identity-test".to_string()),
+                adapter: Some("claude-code".to_string()),
+                requested_model: Some(requested_model.to_string()),
+                effective_model: crate::attempt::effective_model_from_claude_stream(raw_stream)
+                    .map(|model| model.identifier),
+                model_resolution_source: crate::attempt::effective_model_from_claude_stream(
+                    raw_stream,
+                )
+                .map(|model| model.source.to_string()),
+                ..Default::default()
+            });
+            let mut output = test_output(0);
+            output.stdout = raw_stream.to_string();
+            let store = test_store(BeadStatus::InProgress);
+            let bead = test_bead(BeadStatus::InProgress);
+            let _ = handler.handle(&store, &bead, &output, false).await.unwrap();
+            helper.sync().await;
+            let mut events = helper.events_by_type("attempt.resolved");
+            events.extend(helper.events_by_type("provider.model_substituted"));
+            events
+        }
+
+        let replay = resolve(
+            include_str!("../../tests/fixtures/model-substitution-replay.jsonl"),
+            "glm-4.7",
+        )
+        .await;
+        let attempts: Vec<_> = replay
+            .iter()
+            .filter(|event| event.event_type == "attempt.resolved")
+            .collect();
+        let substitutions: Vec<_> = replay
+            .iter()
+            .filter(|event| event.event_type == "provider.model_substituted")
+            .collect();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(attempts[0].data["model"], "glm-4.7");
+        assert_eq!(attempts[0].data["requested_model"], "glm-4.7");
+        assert_eq!(attempts[0].data["effective_model"], "glm-5.3-flash");
+        assert_eq!(
+            attempts[0].data["model_resolution_source"],
+            "claude_message.model"
+        );
+        assert_eq!(
+            substitutions[0].data["attempt_id"],
+            attempts[0].data["attempt_id"]
+        );
+        assert_eq!(substitutions[0].data["requested_model"], "glm-4.7");
+        assert_eq!(substitutions[0].data["effective_model"], "glm-5.3-flash");
+        assert!(substitutions[0].data.get("content").is_none());
+
+        let control = resolve(
+            include_str!("../../tests/fixtures/model-substitution-control.jsonl"),
+            "glm-5.3-flash",
+        )
+        .await;
+        assert_eq!(
+            control
+                .iter()
+                .filter(|event| event.event_type == "provider.model_substituted")
+                .count(),
+            0
+        );
+        let control_attempt = control
+            .iter()
+            .find(|event| event.event_type == "attempt.resolved")
+            .unwrap();
+        assert_eq!(control_attempt.data["effective_model"], "glm-5.3-flash");
+
+        let missing = resolve(
+            include_str!("../../tests/fixtures/model-substitution-missing.jsonl"),
+            "glm-4.7",
+        )
+        .await;
+        assert_eq!(
+            missing
+                .iter()
+                .filter(|event| event.event_type == "provider.model_substituted")
+                .count(),
+            0
+        );
+        let missing_attempt = missing
+            .iter()
+            .find(|event| event.event_type == "attempt.resolved")
+            .unwrap();
+        assert_eq!(missing_attempt.data["requested_model"], "glm-4.7");
+        assert!(missing_attempt.data.get("effective_model").is_none());
+        assert!(missing_attempt
+            .data
+            .get("model_resolution_source")
+            .is_none());
+    }
+
     /// Rows without accepted claim-time identity stay provisional; the worker
     /// path clears the flag once N-T03 binds the dispatch ID to claim provenance.
     #[tokio::test]
     async fn attempt_resolved_is_provisional_and_stamped_with_the_dispatch_attempt_id() {
         let (_guard, _home) = isolated_home();
+        assert_model_identity_replay_control_and_missing_metadata().await;
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
         let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");

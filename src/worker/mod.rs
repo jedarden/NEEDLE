@@ -3560,6 +3560,9 @@ impl Worker {
                     cycle_start: self.clock.now(),
                     agent_name: String::new(),
                     model: None,
+                    requested_model: None,
+                    effective_model: None,
+                    model_resolution_source: None,
                     provider: None,
                     tokens: dispatch::TokenUsage::default(),
                     estimated_cost_usd: None,
@@ -4114,7 +4117,7 @@ impl Worker {
         let _ = self.health.bind_current_activity(attempt_id.clone());
         self.attempt_provenance.adapter = Some(adapter.name.clone());
         self.attempt_provenance.harness = Some(adapter.name.clone());
-        self.attempt_provenance.model = adapter.model.clone();
+        self.attempt_provenance.requested_model = adapter.model.clone();
 
         // Enter the agent.dispatch span for the dispatching phase.
         let _bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
@@ -4375,7 +4378,7 @@ impl Worker {
         ));
         self.attempt_provenance.adapter = Some(adapter.name.clone());
         self.attempt_provenance.harness = Some(adapter.name.clone());
-        self.attempt_provenance.model = adapter.model.clone();
+        self.attempt_provenance.requested_model = adapter.model.clone();
         self.outcome_handler
             .set_attempt_provenance(self.attempt_provenance.clone());
 
@@ -4813,6 +4816,18 @@ impl Worker {
             &output.stdout,
             &output.stderr,
         );
+        let effective_model = (adapter.output_transform.as_deref()
+            == Some("needle-transform-claude"))
+        .then(|| crate::attempt::effective_model_from_claude_stream(&output.stdout))
+        .flatten();
+        self.attempt_provenance.effective_model = effective_model
+            .as_ref()
+            .map(|model| model.identifier.clone());
+        self.attempt_provenance.model_resolution_source = effective_model
+            .as_ref()
+            .map(|model| model.source.to_string());
+        self.outcome_handler
+            .set_attempt_provenance(self.attempt_provenance.clone());
         let model_name = adapter.model.as_deref().unwrap_or("");
         let usage = crate::adapter_usage::resolve_usage(
             adapter.effective_usage_format(),
@@ -4834,6 +4849,10 @@ impl Worker {
         if let Some(ref mut effort) = self.last_effort {
             effort.agent_name = adapter.name.clone();
             effort.model = adapter.model.clone();
+            effort.requested_model = adapter.model.clone();
+            effort.effective_model = self.attempt_provenance.effective_model.clone();
+            effort.model_resolution_source =
+                self.attempt_provenance.model_resolution_source.clone();
             effort.provider = adapter.provider.clone();
             effort.tokens = tokens;
             effort.estimated_cost_usd = estimated_cost;
@@ -7069,6 +7088,9 @@ impl Worker {
                     elapsed_ms,
                     agent_name: effort.agent_name.clone(),
                     model: effort.model.clone(),
+                    requested_model: effort.requested_model.clone(),
+                    effective_model: effort.effective_model.clone(),
+                    model_resolution_source: effort.model_resolution_source.clone(),
                     provider: effort.provider.clone(),
                     tokens_in: effort.tokens.input_tokens,
                     tokens_out: effort.tokens.output_tokens,
@@ -12780,6 +12802,9 @@ mod tests {
             cycle_start: Instant::now(),
             agent_name: "probe-agent".to_string(),
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             provider: None,
             tokens: dispatch::TokenUsage::default(),
             estimated_cost_usd: Some(0.01),
@@ -13809,6 +13834,9 @@ mod tests {
             cycle_start: Instant::now(),
             agent_name: "test".to_string(),
             model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
             provider: None,
             tokens: dispatch::TokenUsage::default(),
             estimated_cost_usd: None,
