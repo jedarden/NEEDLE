@@ -2848,6 +2848,7 @@ impl OutcomeHandler {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(attempt_id.clone());
 
+        let requested_model = provenance.requested_model.or_else(|| attempt.model.clone());
         let fields = crate::telemetry::AttemptResolvedFields {
             attempt_id,
             // Direct handler callers without claim provenance remain
@@ -2868,8 +2869,9 @@ impl OutcomeHandler {
                 .adapter
                 .unwrap_or_else(|| attempt.adapter.clone()),
             harness: provenance.harness,
-            model: attempt.model.clone(),
-            requested_model: provenance.requested_model.or_else(|| attempt.model.clone()),
+            // `model` is the legacy alias for the configured/requested model.
+            model: requested_model.clone(),
+            requested_model,
             effective_model: provenance.effective_model,
             model_resolution_source: provenance.model_resolution_source,
             provider: attempt.provider,
