@@ -867,6 +867,10 @@ owner = "component:shell-verification"
 pattern = "tests/cargo-targets/*"
 owner = "component:cargo-target-policy"
 
+[[artifact]]
+pattern = "tests/adapter-cargo-environment/*"
+owner = "component:shell-verification"
+
 # Shared fixtures for the two admission harnesses. A plain module, not a
 # declared Cargo target: autotests = false means only the explicit [[test]]
 # inventory is built, so this is included by both harnesses rather than
