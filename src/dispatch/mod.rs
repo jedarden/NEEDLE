@@ -129,8 +129,8 @@ use crate::prompt::BuiltPrompt;
 use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::trace::{
-    classify_from_stream, detect_trace_format, parse_result_envelope, ClaudeResultEnvelope,
-    TraceCapture, TraceMetadata,
+    classify_from_stream, detect_trace_format, parse_result_envelope, parse_session_id,
+    ClaudeResultEnvelope, TraceCapture, TraceFormat, TraceMetadata,
 };
 use crate::tsnet::{inject_identity_env, IdentityRegistry, TsnetConfig};
 use crate::types::{BeadId, InputMethod};
@@ -2236,8 +2236,8 @@ impl Dispatcher {
         // Build environment variables for the child process
         let mut child_env = adapter.environment.clone();
 
-        if let Some(attempt_id) = attempt_id {
-            child_env.insert("NEEDLE_ATTEMPT_ID".to_string(), attempt_id);
+        if let Some(attempt_id) = attempt_id.as_ref() {
+            child_env.insert("NEEDLE_ATTEMPT_ID".to_string(), attempt_id.clone());
         }
 
         // Inject tsnet identity environment variables if provisioned
@@ -3116,6 +3116,12 @@ impl Dispatcher {
             // as the verdict for every other format.
             let trace_format = detect_trace_format(&adapter.name);
             let outcome = classify_from_stream(exit_code, &stdout, &trace_format);
+            let session_id = matches!(
+                &trace_format,
+                TraceFormat::ClaudeJson | TraceFormat::ZcodeJsonl
+            )
+            .then(|| parse_session_id(&stdout))
+            .flatten();
             // Record the envelope's terminal fields next to the outcome: during
             // the 2026-09-02 zai-proxy outage the only way to tell outage
             // casualties from genuinely hard tasks was grepping raw stdout for
@@ -3134,7 +3140,16 @@ impl Dispatcher {
                 capture.bind_claim_handle(metadata);
             }
             let metadata = TraceMetadata {
+                schema_version: 1,
+                attempt_id: attempt_id.clone(),
+                provisional: authority
+                    .claim_context()
+                    .and_then(DispatchContext::attempt_id)
+                    .is_none(),
                 bead_id: bead_id.clone(),
+                workspace: workspace.display().to_string(),
+                worker_id: self.telemetry.worker_id().to_string(),
+                adapter: adapter.name.clone(),
                 agent: adapter.name.clone(),
                 provider: adapter.provider.clone(),
                 model: adapter.model.clone(),
@@ -3155,6 +3170,8 @@ impl Dispatcher {
                 trace_format,
                 pruned: false,
                 template_version: None,
+                session_id,
+                started_at: Some(capture.started_at()),
                 timeout_reason: timeout_reason.clone(),
                 terminal_reason,
                 api_error_status,

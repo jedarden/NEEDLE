@@ -8478,6 +8478,7 @@ mod tests {
             // exit_code alone and ignore them.
             terminal_reason: Some("api_error".to_string()),
             api_error_status: Some(503),
+            ..TraceMetadata::default()
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -8556,6 +8557,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -8638,6 +8640,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -8710,6 +8713,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         std::fs::write(
             failed_trace_dir.join("metadata.json"),
@@ -8743,6 +8747,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         std::fs::write(
             success_trace_dir.join("metadata.json"),

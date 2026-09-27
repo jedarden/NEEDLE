@@ -71,8 +71,28 @@ pub const TEST_OUTPUT_FILE: &str = "test-output.txt";
 /// Metadata stored in `metadata.json` for each trace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceMetadata {
+    /// Version of the trace metadata schema. Old metadata without this field
+    /// deserializes as version zero.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Dispatch attempt identity, when one was propagated to the trace.
+    #[serde(default)]
+    pub attempt_id: Option<String>,
+    /// Whether this metadata was written before an authoritative attempt
+    /// identity was available.
+    #[serde(default)]
+    pub provisional: bool,
     /// Bead ID this trace belongs to.
     pub bead_id: BeadId,
+    /// Workspace in which the attempt ran.
+    #[serde(default)]
+    pub workspace: String,
+    /// NEEDLE worker that dispatched the attempt.
+    #[serde(default)]
+    pub worker_id: String,
+    /// Adapter selected for the attempt.
+    #[serde(default)]
+    pub adapter: String,
     /// Agent adapter name (e.g., "claude-sonnet").
     pub agent: String,
     /// AI provider (e.g., "anthropic", "openai").
@@ -108,6 +128,12 @@ pub struct TraceMetadata {
     pub pruned: bool,
     /// SHA-256 hex digest of the rendered prompt (identifies template version).
     pub template_version: Option<String>,
+    /// Harness session id parsed from the stream-json init event.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Wall-clock time at which trace capture began.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
     /// Structured timeout reason if terminated by timeout (exit_code 124).
     pub timeout_reason: Option<TimeoutReason>,
     /// Envelope `terminal_reason` from the claude_json result envelope, when the
@@ -119,6 +145,41 @@ pub struct TraceMetadata {
     /// (e.g. 503 during the 2026-09-02 zai-proxy outage). Absent for every
     /// outcome that was not an API error.
     pub api_error_status: Option<u16>,
+}
+
+impl Default for TraceMetadata {
+    fn default() -> Self {
+        Self {
+            schema_version: 0,
+            attempt_id: None,
+            provisional: false,
+            bead_id: BeadId::from(""),
+            workspace: String::new(),
+            worker_id: String::new(),
+            adapter: String::new(),
+            agent: String::new(),
+            provider: None,
+            model: None,
+            requested_model: None,
+            effective_model: None,
+            model_resolution_source: None,
+            exit_code: 0,
+            outcome: String::new(),
+            duration_ms: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now(),
+            trace_format: TraceFormat::RawText,
+            pruned: false,
+            template_version: None,
+            session_id: None,
+            started_at: None,
+            timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
+        }
+    }
 }
 
 /// Adapter-specific trace format identifier.
@@ -155,6 +216,8 @@ pub struct TraceCapture {
     attempt_id: Option<String>,
     /// Credential-free claim facts carried from the worker's retained handle.
     claim_handle: Option<ClaimHandleMetadata>,
+    /// Wall-clock time at which this capture was created.
+    started_at: DateTime<Utc>,
 }
 
 /// Whether `id` can serve as one path segment of a trace directory.
@@ -257,12 +320,18 @@ impl TraceCapture {
             sanitizer,
             attempt_id,
             claim_handle: None,
+            started_at: Utc::now(),
         })
     }
 
     /// Get the trace directory path.
     pub fn trace_dir(&self) -> &Path {
         &self.trace_dir
+    }
+
+    /// Wall-clock time at which this capture was created.
+    pub fn started_at(&self) -> DateTime<Utc> {
+        self.started_at
     }
 
     /// Bind only the redacted identity view; the fencing credential is never
@@ -560,6 +629,32 @@ impl ClaudeResultEnvelope {
 fn is_error_terminal_reason(reason: &str) -> bool {
     let lower = reason.to_ascii_lowercase();
     lower.contains("error") || matches!(lower.as_str(), "rate_limited" | "overloaded")
+}
+
+/// Parse the first Claude Code-family stream-json `system/init` session id.
+///
+/// The stream is line-delimited, so malformed lines are ignored without
+/// affecting the attempt. Once the first valid `system/init` object is found,
+/// its session id is authoritative: a missing or empty id returns `None` and a
+/// later init object is not consulted.
+pub fn parse_session_id(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(|kind| kind.as_str()) != Some("system")
+            || value.get("subtype").and_then(|kind| kind.as_str()) != Some("init")
+        {
+            continue;
+        }
+        return value
+            .get("session_id")
+            .and_then(|session| session.as_str())
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+            .map(str::to_owned);
+    }
+    None
 }
 
 /// Parse the final `type="result"` envelope from a Claude stream-json stdout.
@@ -1106,7 +1201,13 @@ mod tests {
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         let metadata = TraceMetadata {
+            schema_version: 1,
+            attempt_id: Some("attempt-1".to_string()),
+            provisional: true,
             bead_id: test_bead_id(),
+            workspace: beads_root.display().to_string(),
+            worker_id: "worker-1".to_string(),
+            adapter: "claude-sonnet".to_string(),
             agent: "claude-sonnet".to_string(),
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
@@ -1123,9 +1224,12 @@ mod tests {
             trace_format: TraceFormat::ClaudeJson,
             pruned: false,
             template_version: Some("abc123".to_string()),
+            session_id: Some("session-1".to_string()),
+            started_at: Some(Utc::now()),
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         capture.write_metadata(&metadata).unwrap();
 
@@ -1136,6 +1240,14 @@ mod tests {
         let parsed: TraceMetadata = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.bead_id, test_bead_id());
         assert_eq!(parsed.agent, "claude-sonnet");
+        assert_eq!(parsed.schema_version, 1);
+        assert_eq!(parsed.attempt_id.as_deref(), Some("attempt-1"));
+        assert!(parsed.provisional);
+        assert_eq!(parsed.workspace, beads_root.display().to_string());
+        assert_eq!(parsed.worker_id, "worker-1");
+        assert_eq!(parsed.adapter, "claude-sonnet");
+        assert_eq!(parsed.session_id.as_deref(), Some("session-1"));
+        assert!(parsed.started_at.is_some());
         assert_eq!(parsed.exit_code, 0);
         assert!(!parsed.pruned);
     }
@@ -1211,6 +1323,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         capture.write_metadata(&metadata).unwrap();
 
@@ -1266,6 +1379,22 @@ mod tests {
     #[test]
     fn detect_trace_format_generic() {
         assert_eq!(detect_trace_format("generic"), TraceFormat::RawText);
+        let stdout = concat!(
+            "not json\n",
+            r#"{"type":"system","subtype":"init","session_id":"first"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"init","session_id":"later"}"#,
+        );
+        assert_eq!(parse_session_id(stdout).as_deref(), Some("first"));
+        assert_eq!(parse_session_id("{malformed}\nplain text"), None);
+        assert_eq!(
+            parse_session_id(r#"{"type":"assistant","session_id":"not-init"}"#),
+            None
+        );
+        assert_eq!(
+            parse_session_id(r#"{"type":"system","subtype":"init","session_id":" "}"#),
+            None
+        );
     }
 
     // ── Result envelope (claude_json) tests ──
@@ -1527,6 +1656,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: Some("api_error".to_string()),
             api_error_status: Some(503),
+            ..TraceMetadata::default()
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -1577,6 +1707,7 @@ mod tests {
             timeout_reason: Some(TimeoutReason::Hard { timeout_secs: 30 }),
             terminal_reason: Some("timeout:hard".to_string()),
             api_error_status: None,
+            ..TraceMetadata::default()
         };
 
         let value = serde_json::to_value(&metadata).unwrap();
@@ -1607,6 +1738,10 @@ mod tests {
             "template_version": null
         }"#;
         let parsed: TraceMetadata = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.schema_version, 0);
+        assert_eq!(parsed.attempt_id, None);
+        assert_eq!(parsed.session_id, None);
+        assert_eq!(parsed.started_at, None);
         assert_eq!(parsed.terminal_reason, None);
         assert_eq!(parsed.api_error_status, None);
     }
@@ -1642,6 +1777,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1695,6 +1831,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1756,6 +1893,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1815,6 +1953,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1874,6 +2013,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1942,6 +2082,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -2009,6 +2150,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         };
         std::fs::write(
             bead_dir.join("metadata.json"),
@@ -2049,6 +2191,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         }
     }
 
@@ -2119,10 +2262,10 @@ mod tests {
         let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
         capture.write_metadata(&attempt_metadata()).unwrap();
 
-        // An unbound capture must not invent an identity: a missing key is
-        // the observable shape of missing propagation, never a placeholder.
+        // An unbound capture must not invent an identity: null is the
+        // observable shape of missing propagation, never a placeholder.
         let raw = read_raw_metadata(&capture);
-        assert!(raw.get("attempt_id").is_none());
+        assert!(raw["attempt_id"].is_null());
     }
 
     #[test]
@@ -2194,6 +2337,7 @@ mod tests {
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
+            ..TraceMetadata::default()
         }
     }
 
