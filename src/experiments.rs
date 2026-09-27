@@ -17,10 +17,14 @@
 //! by design (ADR-026/027: automatic adaptation selects among approved
 //! variants and may withdraw one; it does not create policy).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ExperimentConfig, VariantConfig};
@@ -198,7 +202,18 @@ pub fn stop_file(state_dir: &Path, template: &str, variant: &str) -> PathBuf {
 
 /// Whether a variant has a stop receipt.
 pub fn is_stopped(state_dir: &Path, template: &str, variant: &str) -> bool {
-    stop_file(state_dir, template, variant).is_file()
+    if stop_file(state_dir, template, variant).is_file() {
+        return true;
+    }
+    load_experiment(state_dir, template, variant)
+        .ok()
+        .flatten()
+        .is_some_and(|record| {
+            matches!(
+                record.status,
+                ExperimentStatus::Stopped | ExperimentStatus::RolledBack
+            )
+        })
 }
 
 /// Write the receipt for a `Stop` decision. Returns `Ok(false)` when one
@@ -227,6 +242,530 @@ pub fn record_stop(state_dir: &Path, decision: &Decision) -> Result<bool> {
     Ok(true)
 }
 
+/// The declared primary metric for a prompt-template experiment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentPrimaryMetric {
+    VerifiedSuccessRate,
+}
+
+/// Lifecycle of a policy experiment. `Promotable` is only a recommendation;
+/// changing prompt configuration remains an operator or audited-operation act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentStatus {
+    Running,
+    Promotable,
+    Stopped,
+    RolledBack,
+}
+
+impl ExperimentStatus {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Stopped | Self::RolledBack)
+    }
+}
+
+/// Evidence floor and candidate regression tolerance declared for an experiment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentStopCondition {
+    pub min_attempts: u64,
+    pub regression_tolerance: f64,
+}
+
+/// Metric values observed when the controller writes a decision receipt.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentMetrics {
+    pub attempts: u64,
+    pub judged_attempts: u64,
+    pub verified_closes: u64,
+    pub verified_success_rate: Option<f64>,
+    pub cost_per_verified_close_usd: Option<f64>,
+    pub retry_amplification: Option<f64>,
+    pub gate_error_rate: Option<f64>,
+}
+
+/// Audit record created for a stop, rollback, or promotable recommendation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentReceipt {
+    pub schema_version: u32,
+    pub decided_at: DateTime<Utc>,
+    pub status: ExperimentStatus,
+    pub reason: String,
+    pub baseline: ExperimentMetrics,
+    pub candidate: ExperimentMetrics,
+}
+
+/// Durable controller record for one configured prompt variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentRecord {
+    pub id: String,
+    pub template: String,
+    pub baseline_version: String,
+    pub candidate_version: String,
+    /// Maximum candidate allocation as a fraction in `[0.0, 1.0]`.
+    pub share: f64,
+    pub primary_metric: ExperimentPrimaryMetric,
+    pub guardrails: crate::config::ExperimentGuardrailsConfig,
+    pub stop_condition: ExperimentStopCondition,
+    pub started_at: DateTime<Utc>,
+    pub status: ExperimentStatus,
+    pub receipt: Option<ExperimentReceipt>,
+}
+
+/// Construct an experiment record from the configured variant and its share.
+pub fn experiment_record(
+    template: &str,
+    variant: &VariantConfig,
+    config: &ExperimentConfig,
+    started_at: DateTime<Utc>,
+) -> ExperimentRecord {
+    let candidate_version = format!("{template}-{}", variant.name);
+    ExperimentRecord {
+        id: format!("{template}--{}", variant.name),
+        template: template.to_string(),
+        baseline_version: format!("{template}-default"),
+        candidate_version,
+        share: f64::from(variant.weight) / 100.0,
+        primary_metric: ExperimentPrimaryMetric::VerifiedSuccessRate,
+        guardrails: config.guardrails.clone(),
+        stop_condition: ExperimentStopCondition {
+            min_attempts: config.min_attempts,
+            regression_tolerance: config.regression_margin,
+        },
+        started_at,
+        status: ExperimentStatus::Running,
+        receipt: None,
+    }
+}
+
+/// Evaluate the current ledger window for one configured variant.
+///
+/// Baseline and candidate attempts must be authoritative `attempt.resolved`
+/// rows. The caller supplies the already bounded ledger window and retains the
+/// previous record so `started_at` and terminal decisions survive restarts.
+pub fn evaluate_policy_experiment(
+    template: &str,
+    variant: &VariantConfig,
+    rows: &[serde_json::Value],
+    config: &ExperimentConfig,
+    previous: Option<&ExperimentRecord>,
+    evaluated_at: DateTime<Utc>,
+) -> ExperimentRecord {
+    let started_at = previous
+        .map(|record| record.started_at)
+        .unwrap_or(evaluated_at);
+    let mut record = experiment_record(template, variant, config, started_at);
+
+    if let Some(previous) = previous {
+        if previous.status.is_terminal() {
+            return previous.clone();
+        }
+    }
+
+    let baseline = experiment_metrics(rows, template, &record.baseline_version);
+    let candidate = experiment_metrics(rows, template, &record.candidate_version);
+    let candidate_rate = candidate.verified_success_rate;
+    let baseline_rate = baseline.verified_success_rate;
+    let min_attempts = record.stop_condition.min_attempts;
+
+    let guardrail_failure = guardrail_breach(&record.guardrails, &candidate);
+    let (status, reason) = if let Some(reason) = guardrail_failure {
+        (ExperimentStatus::Stopped, reason)
+    } else if candidate.judged_attempts >= min_attempts && baseline.judged_attempts >= min_attempts
+    {
+        match (candidate_rate, baseline_rate) {
+            (Some(candidate_rate), Some(baseline_rate))
+                if candidate_rate + record.stop_condition.regression_tolerance < baseline_rate =>
+            {
+                (
+                    ExperimentStatus::Stopped,
+                    "verified-success rate regressed beyond the declared tolerance".to_string(),
+                )
+            }
+            (Some(candidate_rate), Some(baseline_rate))
+                if candidate_rate > baseline_rate + record.stop_condition.regression_tolerance =>
+            {
+                (
+                    ExperimentStatus::Promotable,
+                    "verified-success rate improved beyond the declared tolerance".to_string(),
+                )
+            }
+            _ => (
+                ExperimentStatus::Running,
+                "evidence is within tolerance".to_string(),
+            ),
+        }
+    } else {
+        (
+            ExperimentStatus::Running,
+            "waiting for the declared minimum judged attempts".to_string(),
+        )
+    };
+
+    // Once evidence makes a candidate promotable, keep that recommendation
+    // while monitoring it. A later regression or guardrail breach still wins.
+    let (status, reason) = if status == ExperimentStatus::Running
+        && previous.is_some_and(|prior| prior.status == ExperimentStatus::Promotable)
+    {
+        (
+            ExperimentStatus::Promotable,
+            "candidate remains promotable while guardrails hold".to_string(),
+        )
+    } else {
+        (status, reason)
+    };
+
+    record.status = status;
+    if status != ExperimentStatus::Running {
+        record.receipt = Some(ExperimentReceipt {
+            schema_version: 1,
+            decided_at: evaluated_at,
+            status,
+            reason,
+            baseline,
+            candidate,
+        });
+    }
+    record
+}
+
+fn experiment_metrics(
+    rows: &[serde_json::Value],
+    template: &str,
+    version: &str,
+) -> ExperimentMetrics {
+    let mut metrics = ExperimentMetrics::default();
+    let mut beads = BTreeSet::new();
+    let mut known_cost_usd = 0.0;
+    let mut costed_rows = 0u64;
+    let mut gate_error_attempts = 0u64;
+    let mut infrastructure_attempts = 0u64;
+    let mut decomposed_attempts = 0u64;
+
+    for row in rows {
+        if !crate::evidence_routing::is_authoritative_attempt_row(row)
+            || row.get("prompt_template").and_then(|value| value.as_str()) != Some(template)
+            || row.get("template_version").and_then(|value| value.as_str()) != Some(version)
+        {
+            continue;
+        }
+        metrics.attempts += 1;
+        match row.get("outcome").and_then(|value| value.as_str()) {
+            Some("verified_success") => metrics.verified_closes += 1,
+            Some("infrastructure_failure") => infrastructure_attempts += 1,
+            Some(crate::attempt_accounting::DECOMPOSED) => decomposed_attempts += 1,
+            _ => {}
+        }
+        if let Some(bead_id) = row.get("bead_id").and_then(|value| value.as_str()) {
+            beads.insert(bead_id.to_string());
+        }
+        if row.get("costed").and_then(|value| value.as_bool()) == Some(true) {
+            if let Some(cost) = row
+                .get("estimated_cost_usd")
+                .and_then(|value| value.as_f64())
+            {
+                known_cost_usd += cost.max(0.0);
+                costed_rows += 1;
+            }
+        }
+        let terminal_gate_error = row
+            .get("terminal_reason")
+            .and_then(|value| value.as_str())
+            .is_some_and(|reason| reason.starts_with("gate_error"));
+        let gate_result_error = row
+            .get("gate_results")
+            .and_then(|value| value.as_array())
+            .is_some_and(|gates| {
+                gates.iter().any(|gate| {
+                    gate.get("status").and_then(|value| value.as_str()) == Some("execution_error")
+                })
+            });
+        if terminal_gate_error || gate_result_error {
+            gate_error_attempts += 1;
+        }
+    }
+
+    metrics.judged_attempts = metrics
+        .attempts
+        .saturating_sub(infrastructure_attempts)
+        .saturating_sub(decomposed_attempts);
+    if metrics.judged_attempts > 0 {
+        metrics.verified_success_rate =
+            Some(metrics.verified_closes as f64 / metrics.judged_attempts as f64);
+    }
+    if !beads.is_empty() {
+        metrics.retry_amplification = Some(metrics.attempts as f64 / beads.len() as f64);
+    }
+    if metrics.attempts > 0 {
+        metrics.gate_error_rate = Some(gate_error_attempts as f64 / metrics.attempts as f64);
+    }
+    if costed_rows == metrics.attempts && metrics.attempts > 0 && metrics.verified_closes > 0 {
+        metrics.cost_per_verified_close_usd = Some(known_cost_usd / metrics.verified_closes as f64);
+    }
+    metrics
+}
+
+fn guardrail_breach(
+    guardrails: &crate::config::ExperimentGuardrailsConfig,
+    metrics: &ExperimentMetrics,
+) -> Option<String> {
+    if let (Some(limit), Some(value)) = (
+        guardrails.max_cost_per_verified_close_usd,
+        metrics.cost_per_verified_close_usd,
+    ) {
+        if value > limit {
+            return Some(format!(
+                "cost per verified close {value:.4} USD exceeded {limit:.4} USD"
+            ));
+        }
+    }
+    if let (Some(limit), Some(value)) = (
+        guardrails.max_retry_amplification,
+        metrics.retry_amplification,
+    ) {
+        if value > limit {
+            return Some(format!(
+                "retry amplification {value:.4} exceeded {limit:.4}"
+            ));
+        }
+    }
+    if let (Some(limit), Some(value)) = (guardrails.max_gate_error_rate, metrics.gate_error_rate) {
+        if value > limit {
+            return Some(format!("gate-error rate {value:.4} exceeded {limit:.4}"));
+        }
+    }
+    None
+}
+
+/// Path for the durable experiment record, outside prompt and template files.
+pub fn experiment_path(state_dir: &Path, template: &str, variant: &str) -> PathBuf {
+    state_dir.join(format!(
+        "{}--{}.experiment.json",
+        safe_component(template),
+        safe_component(variant)
+    ))
+}
+
+fn safe_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Load an experiment record if it has been created.
+pub fn load_experiment(
+    state_dir: &Path,
+    template: &str,
+    variant: &str,
+) -> Result<Option<ExperimentRecord>> {
+    let path = experiment_path(state_dir, template, variant);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse {}", path.display()))
+        .map(Some)
+}
+
+/// Persist an experiment record atomically under the experiment state dir.
+/// Terminal states cannot be overwritten by a stale running evaluation.
+pub fn record_experiment(state_dir: &Path, record: &ExperimentRecord) -> Result<bool> {
+    anyhow::ensure!(
+        record.share.is_finite() && (0.0..=1.0).contains(&record.share),
+        "experiment share must be between 0 and 1"
+    );
+    with_template_lock(state_dir, &record.template, || {
+        let variant = record
+            .candidate_version
+            .strip_prefix(&format!("{}-", record.template))
+            .unwrap_or(&record.candidate_version);
+        let path = experiment_path(state_dir, &record.template, variant);
+        if let Some(current) = load_experiment(state_dir, &record.template, variant)? {
+            if current.status.is_terminal() && !record.status.is_terminal() {
+                return Ok(false);
+            }
+            if current.status == ExperimentStatus::Promotable
+                && record.status == ExperimentStatus::Running
+            {
+                return Ok(false);
+            }
+            if current == *record {
+                return Ok(false);
+            }
+        }
+        write_json_atomic(&path, record)?;
+        Ok(true)
+    })
+}
+
+/// Revert future exposure to the baseline and write a rollback receipt.
+pub fn rollback_experiment(
+    state_dir: &Path,
+    record: &ExperimentRecord,
+    reason: impl Into<String>,
+    rolled_back_at: DateTime<Utc>,
+) -> Result<ExperimentRecord> {
+    let mut rolled_back = record.clone();
+    rolled_back.status = ExperimentStatus::RolledBack;
+    let prior_metrics = record.receipt.as_ref();
+    rolled_back.receipt = Some(ExperimentReceipt {
+        schema_version: 1,
+        decided_at: rolled_back_at,
+        status: ExperimentStatus::RolledBack,
+        reason: reason.into(),
+        baseline: prior_metrics
+            .map(|receipt| receipt.baseline.clone())
+            .unwrap_or_default(),
+        candidate: prior_metrics
+            .map(|receipt| receipt.candidate.clone())
+            .unwrap_or_default(),
+    });
+    record_experiment(state_dir, &rolled_back)?;
+    Ok(rolled_back)
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ExposureLedger {
+    #[serde(default)]
+    total_attempts: u64,
+    #[serde(default)]
+    candidate_attempts: BTreeMap<String, u64>,
+    /// Attempt ID to the assigned variant name; an empty string means baseline.
+    #[serde(default)]
+    assignments: BTreeMap<String, String>,
+}
+
+/// Assign one attempt to a prompt variant without exceeding that variant's
+/// declared share at any prefix of the assignment sequence. Repeated calls for
+/// an attempt ID return the original assignment.
+pub fn assign_prompt_variant(
+    state_dir: &Path,
+    template: &str,
+    variants: &[VariantConfig],
+    attempt_id: &str,
+) -> Result<Option<String>> {
+    anyhow::ensure!(!attempt_id.is_empty(), "attempt ID must not be empty");
+    anyhow::ensure!(
+        variants.iter().all(|variant| variant.weight <= 100),
+        "prompt variant weight must be between 0 and 100"
+    );
+    with_template_lock(state_dir, template, || {
+        let path = exposure_path(state_dir, template);
+        let mut ledger = if path.is_file() {
+            let bytes =
+                fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+            serde_json::from_slice::<ExposureLedger>(&bytes)
+                .with_context(|| format!("failed to parse {}", path.display()))?
+        } else {
+            ExposureLedger::default()
+        };
+        if let Some(assigned) = ledger.assignments.get(attempt_id) {
+            return Ok((!assigned.is_empty()).then(|| assigned.clone()));
+        }
+
+        let next_total = ledger.total_attempts.saturating_add(1);
+        let mut eligible: Vec<&VariantConfig> = Vec::new();
+        for variant in variants {
+            if variant.weight == 0 {
+                continue;
+            }
+            if load_experiment(state_dir, template, &variant.name)?.is_some_and(|record| {
+                matches!(
+                    record.status,
+                    ExperimentStatus::Stopped | ExperimentStatus::RolledBack
+                )
+            }) {
+                continue;
+            }
+            let cap = (u128::from(next_total) * u128::from(variant.weight)) / 100;
+            let assigned = ledger
+                .candidate_attempts
+                .get(&variant.name)
+                .copied()
+                .unwrap_or(0);
+            if u128::from(assigned) < cap {
+                eligible.push(variant);
+            }
+        }
+        let selected = if eligible.is_empty() {
+            None
+        } else {
+            let bucket = assignment_bucket(attempt_id) as usize % eligible.len();
+            Some(eligible.swap_remove(bucket).name.clone())
+        };
+        ledger.total_attempts = next_total;
+        if let Some(name) = &selected {
+            *ledger.candidate_attempts.entry(name.clone()).or_default() += 1;
+        }
+        ledger
+            .assignments
+            .insert(attempt_id.to_string(), selected.clone().unwrap_or_default());
+        // Keep idempotency bounded; attempt.resolved remains the durable row
+        // describing the actual version used on each completed attempt.
+        while ledger.assignments.len() > 20_000 {
+            if let Some(oldest) = ledger.assignments.keys().next().cloned() {
+                ledger.assignments.remove(&oldest);
+            }
+        }
+        write_json_atomic(&path, &ledger)?;
+        Ok(selected)
+    })
+}
+
+fn assignment_bucket(attempt_id: &str) -> u64 {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(attempt_id.as_bytes());
+    u64::from_be_bytes(digest[..8].try_into().unwrap_or([0; 8]))
+}
+
+fn exposure_path(state_dir: &Path, template: &str) -> PathBuf {
+    state_dir.join(format!("{}.exposure.json", safe_component(template)))
+}
+
+fn with_template_lock<T>(
+    state_dir: &Path,
+    template: &str,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    fs::create_dir_all(state_dir)
+        .with_context(|| format!("failed to create {}", state_dir.display()))?;
+    let lock_path = state_dir.join(format!("{}.lock", safe_component(template)));
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    lock.lock_exclusive()
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    let result = action();
+    FileExt::unlock(&lock).with_context(|| format!("failed to unlock {}", lock_path.display()))?;
+    result
+}
+
+fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let mut file = File::create(&temp_path)
+        .with_context(|| format!("failed to create {}", temp_path.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", temp_path.display()))?;
+    fs::rename(&temp_path, path).with_context(|| format!("failed to commit {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +777,7 @@ mod tests {
             regression_margin: 0.15,
             window_days: 14,
             refresh_secs: 600,
+            guardrails: crate::config::ExperimentGuardrailsConfig::default(),
         }
     }
 
@@ -296,6 +836,34 @@ mod tests {
             ));
         }
         out
+    }
+
+    fn policy_rows(default: (u64, u64), v2: (u64, u64), cost: f64) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for (version, (attempts, successes)) in [("pluck-default", default), ("pluck-v2", v2)] {
+            for index in 0..attempts {
+                out.push(serde_json::json!({
+                    "provisional": false,
+                    "attempt_id": format!("{version}-{index}"),
+                    "bead_id": format!("{version}-bead-{index}"),
+                    "prompt_template": "pluck",
+                    "template_version": version,
+                    "outcome": if index < successes { "verified_success" } else { "work_failure" },
+                    "estimated_cost_usd": cost,
+                    "costed": true,
+                    "gate_results": [{"name": "dod", "status": "pass"}]
+                }));
+            }
+        }
+        out
+    }
+
+    fn fast_cfg() -> ExperimentConfig {
+        ExperimentConfig {
+            min_attempts: 10,
+            regression_margin: 0.10,
+            ..cfg()
+        }
     }
 
     #[test]
@@ -370,5 +938,115 @@ mod tests {
             baseline_attempts: 0,
         };
         assert!(!record_stop(dir.path(), &cont).unwrap());
+    }
+
+    #[test]
+    fn fixture_experiment_marks_better_candidate_promotable_with_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&prompt_dir).unwrap();
+        let template_path = prompt_dir.join("pluck-v2.md");
+        let config_path = dir.path().join("prompt.yaml");
+        std::fs::write(&template_path, "candidate prompt bytes").unwrap();
+        std::fs::write(&config_path, "prompt: { variants: {} }\n").unwrap();
+        let template_before = std::fs::read(&template_path).unwrap();
+        let config_before = std::fs::read(&config_path).unwrap();
+
+        let rows = policy_rows((20, 10), (20, 19), 0.10);
+        let record = evaluate_policy_experiment(
+            "pluck",
+            &variants()[0],
+            &rows,
+            &fast_cfg(),
+            None,
+            Utc::now(),
+        );
+        assert_eq!(record.status, ExperimentStatus::Promotable);
+        assert_eq!(record.share, 0.5);
+        assert_eq!(
+            record.primary_metric,
+            ExperimentPrimaryMetric::VerifiedSuccessRate
+        );
+        assert!(record.receipt.is_some());
+        assert!(record_experiment(&dir.path().join("state"), &record).unwrap());
+        let saved = load_experiment(&dir.path().join("state"), "pluck", "v2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved, record);
+
+        assert_eq!(std::fs::read(template_path).unwrap(), template_before);
+        assert_eq!(std::fs::read(config_path).unwrap(), config_before);
+    }
+
+    #[test]
+    fn fixture_guardrail_stop_writes_receipt_and_withdraws_exposure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = fast_cfg();
+        config.guardrails.max_cost_per_verified_close_usd = Some(0.05);
+        let rows = policy_rows((20, 15), (20, 16), 0.10);
+        let record =
+            evaluate_policy_experiment("pluck", &variants()[0], &rows, &config, None, Utc::now());
+        assert_eq!(record.status, ExperimentStatus::Stopped);
+        let receipt = record.receipt.as_ref().expect("guardrail receipt");
+        assert!(receipt.reason.contains("cost per verified close"));
+        assert!(record_experiment(dir.path(), &record).unwrap());
+        assert!(is_stopped(dir.path(), "pluck", "v2"));
+        assert_eq!(
+            assign_prompt_variant(dir.path(), "pluck", &variants(), "after-stop").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn fixture_rollback_writes_receipt_and_exposure_never_exceeds_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let quota_dir = tempfile::tempdir().unwrap();
+        let mut assignments = Vec::new();
+        for index in 0..100 {
+            assignments.push(
+                assign_prompt_variant(
+                    quota_dir.path(),
+                    "pluck",
+                    &variants(),
+                    &format!("attempt-{index:03}"),
+                )
+                .unwrap(),
+            );
+        }
+        let candidate_count = assignments.iter().filter(|item| item.is_some()).count();
+        assert!(
+            candidate_count <= 50,
+            "candidate exposure was {candidate_count}%"
+        );
+        assert_eq!(
+            assign_prompt_variant(quota_dir.path(), "pluck", &variants(), "attempt-099").unwrap(),
+            assignments[99]
+        );
+
+        let rows = policy_rows((20, 10), (20, 19), 0.10);
+        let record = evaluate_policy_experiment(
+            "pluck",
+            &variants()[0],
+            &rows,
+            &fast_cfg(),
+            None,
+            Utc::now(),
+        );
+        let rolled_back =
+            rollback_experiment(dir.path(), &record, "operator rollback fixture", Utc::now())
+                .unwrap();
+        assert_eq!(rolled_back.status, ExperimentStatus::RolledBack);
+        assert_eq!(
+            rolled_back.receipt.as_ref().unwrap().status,
+            ExperimentStatus::RolledBack
+        );
+        assert!(load_experiment(dir.path(), "pluck", "v2")
+            .unwrap()
+            .is_some());
+        assert!(is_stopped(dir.path(), "pluck", "v2"));
+        assert_eq!(
+            assign_prompt_variant(dir.path(), "pluck", &variants(), "after-rollback").unwrap(),
+            None
+        );
     }
 }

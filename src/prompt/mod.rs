@@ -719,8 +719,8 @@ pub struct PromptBuilder {
     /// skills together). `None` leaves it unbounded — the pre-N-T15 behavior,
     /// kept only for the byte-identical legacy regression path.
     learning_context_cap: Option<usize>,
-    /// Where stopped-variant receipts live (see [`crate::experiments`]).
-    /// `None` skips the check, so a stopped variant stays exposed.
+    /// Where exposure quotas and experiment receipts live. Attempt-scoped
+    /// variant assignment fails back to the baseline when this is absent.
     experiment_state_dir: Option<std::path::PathBuf>,
 }
 
@@ -761,8 +761,8 @@ impl PromptBuilder {
         }
     }
 
-    /// Consult `dir` for stopped-variant receipts when selecting a variant
-    /// (N-T19): a stopped variant falls back to the built-in template.
+    /// Consult `dir` for durable attempt exposure state and experiment
+    /// receipts (N-T19).
     pub fn with_experiment_state_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.experiment_state_dir = Some(dir);
         self
@@ -929,9 +929,62 @@ impl PromptBuilder {
         template_name: &str,
         extra_vars: &[(&str, &str)],
     ) -> Result<BuiltPrompt> {
+        self.build_with_vars_using_assignment(
+            bead,
+            workspace,
+            worker_id,
+            template_name,
+            extra_vars,
+            None,
+        )
+    }
+
+    /// Build a prompt using an attempt-scoped variant assignment. The worker
+    /// identity remains available to `{worker_id}` in the template; only the
+    /// exposure key changes to the unique attempt ID.
+    #[tracing::instrument(
+        name = "bead.prompt_build",
+        skip(self, bead, workspace, extra_vars),
+        fields(
+            needle.bead.id = %bead.id,
+            needle.prompt.template_name = %template_name,
+            needle.prompt.template_version = tracing::field::Empty,
+            needle.prompt.token_estimate = tracing::field::Empty,
+        )
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_vars_for_attempt(
+        &self,
+        bead: &Bead,
+        workspace: &Path,
+        worker_id: &str,
+        attempt_id: &str,
+        template_name: &str,
+        extra_vars: &[(&str, &str)],
+    ) -> Result<BuiltPrompt> {
+        self.build_with_vars_using_assignment(
+            bead,
+            workspace,
+            worker_id,
+            template_name,
+            extra_vars,
+            Some(attempt_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_vars_using_assignment(
+        &self,
+        bead: &Bead,
+        workspace: &Path,
+        worker_id: &str,
+        template_name: &str,
+        extra_vars: &[(&str, &str)],
+        attempt_id: Option<&str>,
+    ) -> Result<BuiltPrompt> {
         // Resolve template: variant takes precedence over built-in.
         let (template_version, variant_content) =
-            self.select_variant(worker_id, template_name, workspace);
+            self.select_variant(template_name, workspace, attempt_id);
         let template_content: &str = match variant_content {
             Some(ref c) => c.as_str(),
             None => self
@@ -1085,6 +1138,32 @@ impl PromptBuilder {
         )
     }
 
+    /// Build a pluck prompt with a per-attempt prompt-variant assignment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_pluck_with_history_for_attempt(
+        &self,
+        bead: &Bead,
+        workspace: &Path,
+        worker_id: &str,
+        attempt_id: &str,
+        failure_history: &str,
+        prior_fixes: &str,
+        deadline_notice: &str,
+    ) -> Result<BuiltPrompt> {
+        self.build_with_vars_for_attempt(
+            bead,
+            workspace,
+            worker_id,
+            attempt_id,
+            "pluck",
+            &[
+                ("{failure_history}", failure_history),
+                ("{prior_fixes}", prior_fixes),
+                ("{deadline_notice}", deadline_notice),
+            ],
+        )
+    }
+
     /// Build a split prompt carrying the bead's rendered attempt history and
     /// retrieved prior fixes.
     ///
@@ -1108,6 +1187,34 @@ impl PromptBuilder {
             bead,
             workspace,
             worker_id,
+            "split",
+            &[
+                ("{failure_count}", &failure_count.to_string()),
+                ("{failure_history}", failure_history),
+                ("{prior_fixes}", prior_fixes),
+            ],
+        )
+    }
+
+    /// Build a split prompt with a per-attempt prompt-variant assignment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_split_with_history_for_attempt(
+        &self,
+        bead: &Bead,
+        workspace: &Path,
+        worker_id: &str,
+        attempt_id: &str,
+        failure_count: u32,
+        failure_history: &str,
+        prior_fixes: &str,
+        deadline_notice: &str,
+    ) -> Result<BuiltPrompt> {
+        let _ = deadline_notice;
+        self.build_with_vars_for_attempt(
+            bead,
+            workspace,
+            worker_id,
+            attempt_id,
             "split",
             &[
                 ("{failure_count}", &failure_count.to_string()),
@@ -1337,19 +1444,19 @@ impl PromptBuilder {
         sections
     }
 
-    /// Select the variant version for a given template and worker.
+    /// Select a variant for one attempt. Callers without an attempt identity
+    /// use the baseline and do not enter a canary cohort.
     ///
     /// Returns `(template_version, variant_content)`:
     /// - `template_version`: e.g. `"pluck-default"` or `"pluck-v2"`
     /// - `variant_content`: `Some(String)` if a variant file was loaded, `None` for the default
     ///
-    /// Assignment is deterministic: `worker_bucket(worker_id)` in `[0, 99]` is compared
-    /// against cumulative variant weights.  Same `worker_id` always produces the same result.
+    /// Worker dispatches use the attempt ID and durable share-capped allocator.
     fn select_variant(
         &self,
-        worker_id: &str,
         template_name: &str,
         workspace: &Path,
+        attempt_id: Option<&str>,
     ) -> (String, Option<String>) {
         let Some(variants) = self.variants.get(template_name) else {
             return (format!("{template_name}-default"), None);
@@ -1359,35 +1466,48 @@ impl PromptBuilder {
             return (format!("{template_name}-default"), None);
         }
 
-        let bucket = worker_bucket(worker_id);
-        let mut cumulative: u32 = 0;
-
-        for variant in variants {
-            cumulative += u32::from(variant.weight);
-            if u32::from(bucket) < cumulative {
-                // A variant the canary evaluator stopped is no longer
-                // exposed: its cohort takes the built-in template until an
-                // operator removes the receipt or changes the config.
-                if let Some(dir) = &self.experiment_state_dir {
-                    if crate::experiments::is_stopped(dir, template_name, &variant.name) {
-                        return (format!("{template_name}-default"), None);
-                    }
-                }
-                let abs_path = workspace.join(&variant.content_file);
-                match std::fs::read_to_string(&abs_path) {
-                    Ok(content) => {
-                        return (format!("{template_name}-{}", variant.name), Some(content));
-                    }
-                    Err(_) => {
-                        // Content file missing — fall back to the built-in default.
-                        return (format!("{template_name}-default"), None);
-                    }
-                }
+        let Some(attempt_id) = attempt_id else {
+            return (format!("{template_name}-default"), None);
+        };
+        let Some(dir) = &self.experiment_state_dir else {
+            tracing::warn!(
+                template = %template_name,
+                attempt_id = %attempt_id,
+                "prompt experiment state directory is unavailable; using baseline"
+            );
+            return (format!("{template_name}-default"), None);
+        };
+        let selected = match crate::experiments::assign_prompt_variant(
+            dir,
+            template_name,
+            variants,
+            attempt_id,
+        ) {
+            Ok(selected) => selected,
+            Err(error) => {
+                tracing::warn!(
+                    template = %template_name,
+                    attempt_id = %attempt_id,
+                    error = %error,
+                    "prompt experiment assignment failed; using baseline"
+                );
+                None
             }
+        };
+        let Some(name) = selected else {
+            return (format!("{template_name}-default"), None);
+        };
+        let Some(variant) = variants.iter().find(|variant| variant.name == name) else {
+            return (format!("{template_name}-default"), None);
+        };
+        if crate::experiments::is_stopped(dir, template_name, &name) {
+            return (format!("{template_name}-default"), None);
         }
-
-        // Cumulative weights < 100: worker falls outside all variant ranges.
-        (format!("{template_name}-default"), None)
+        let abs_path = workspace.join(&variant.content_file);
+        match std::fs::read_to_string(&abs_path) {
+            Ok(content) => (format!("{template_name}-{name}"), Some(content)),
+            Err(_) => (format!("{template_name}-default"), None),
+        }
     }
 }
 
@@ -1414,18 +1534,6 @@ fn cap_learning_context(text: String, cap: Option<usize>) -> String {
         "\n\n(learning context truncated to {cap} bytes — see strands.learning.max_learning_context_bytes)"
     ));
     truncated
-}
-
-/// Compute the worker's variant bucket: `hash(worker_id) % 100` in `[0, 99]`.
-///
-/// Uses the first 8 bytes of the SHA-256 digest of `worker_id` as a `u64`,
-/// then takes modulo 100.  The result is deterministic and stable.
-fn worker_bucket(worker_id: &str) -> u8 {
-    let mut hasher = Sha256::new();
-    hasher.update(worker_id.as_bytes());
-    let result = hasher.finalize();
-    let n = u64::from_le_bytes(result[..8].try_into().expect("sha256 is at least 8 bytes"));
-    (n % 100) as u8
 }
 
 /// Compute the SHA-256 hex digest of a string.
@@ -1894,7 +2002,17 @@ mod tests {
 
         let builder =
             PromptBuilder::new(&config).with_experiment_state_dir(state.path().to_path_buf());
-        let exposed = builder.build_pluck(&bead, ws.path(), "worker-01").unwrap();
+        let exposed = builder
+            .build_pluck_with_history_for_attempt(
+                &bead,
+                ws.path(),
+                "worker-01",
+                "attempt-exposed",
+                "",
+                "",
+                "",
+            )
+            .unwrap();
         assert_eq!(exposed.template_version, "pluck-v2");
         assert!(exposed.content.starts_with("VARIANT V2"));
 
@@ -1909,15 +2027,85 @@ mod tests {
             stopped_at: "2026-09-12T17:00:00Z".into(),
         };
         crate::experiments::record_stop(state.path(), &stop).unwrap();
-        let withdrawn = builder.build_pluck(&bead, ws.path(), "worker-01").unwrap();
+        let withdrawn = builder
+            .build_pluck_with_history_for_attempt(
+                &bead,
+                ws.path(),
+                "worker-01",
+                "attempt-withdrawn",
+                "",
+                "",
+                "",
+            )
+            .unwrap();
         assert_eq!(withdrawn.template_version, "pluck-default");
         assert!(withdrawn.content.contains("## Task"));
 
-        // Without a state dir the check is skipped (pre-N-T19 behaviour).
+        // Calls without an attempt identity do not enter an untracked cohort.
         let unchecked = PromptBuilder::new(&config)
             .build_pluck(&bead, ws.path(), "worker-01")
             .unwrap();
-        assert_eq!(unchecked.template_version, "pluck-v2");
+        assert_eq!(unchecked.template_version, "pluck-default");
+    }
+
+    #[test]
+    fn prompt_canary_exposure_is_assigned_and_recorded_per_attempt() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("prompts")).unwrap();
+        std::fs::write(
+            workspace.path().join("prompts/pluck-v2.md"),
+            "VARIANT V2 for {worker_id}",
+        )
+        .unwrap();
+        let variants = std::collections::BTreeMap::from([(
+            "pluck".to_string(),
+            vec![crate::config::VariantConfig {
+                name: "v2".to_string(),
+                weight: 50,
+                content_file: PathBuf::from("prompts/pluck-v2.md"),
+            }],
+        )]);
+        let config = PromptConfig {
+            variants,
+            ..PromptConfig::default()
+        };
+        let state = tempfile::tempdir().unwrap();
+        let builder =
+            PromptBuilder::new(&config).with_experiment_state_dir(state.path().to_path_buf());
+        let bead = test_bead();
+
+        let baseline = builder
+            .build_pluck_with_history_for_attempt(
+                &bead,
+                workspace.path(),
+                "worker-01",
+                "attempt-canary-1",
+                "",
+                "",
+                "",
+            )
+            .unwrap();
+        let candidate = builder
+            .build_pluck_with_history_for_attempt(
+                &bead,
+                workspace.path(),
+                "worker-01",
+                "attempt-canary-2",
+                "",
+                "",
+                "",
+            )
+            .unwrap();
+
+        assert_eq!(baseline.template_version, "pluck-default");
+        assert_eq!(candidate.template_version, "pluck-v2");
+        assert!(candidate.content.contains("worker-01"));
+        let assignments: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(state.path().join("pluck.exposure.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(assignments["assignments"]["attempt-canary-1"], "");
+        assert_eq!(assignments["assignments"]["attempt-canary-2"], "v2");
     }
 
     #[test]

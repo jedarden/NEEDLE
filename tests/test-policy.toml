@@ -283,7 +283,8 @@ version = 1
 # provisional-aware StatsAggregator metric/interval reporting plus preserving
 # max-turns terminal reasons in the attempt ledger.
 # +2 N-T23 Claude provider-error replay and hysteresis contracts.
-max_tests = 4046
+# +4 N-T19 prompt-canary promotion, stop, rollback, and attempt-assignment fixtures.
+max_tests = 4050
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

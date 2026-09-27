@@ -6561,13 +6561,14 @@ impl ConfigTier for LimitsConfig {
 /// A/B test variant for a prompt template.
 ///
 /// Configured under `prompt.variants.<template_name>` in `.needle.yaml`.
-/// Workers are assigned to variants deterministically by `hash(worker_id) % 100`.
+/// Each dispatch attempt is assigned independently, under the variant's
+/// durable share cap.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantConfig {
     /// Variant name (e.g., `"control"`, `"v2"`).
     pub name: String,
 
-    /// Percentage of workers assigned to this variant (0–100).
+    /// Maximum percentage of dispatch attempts assigned to this variant (0–100).
     pub weight: u8,
 
     /// Path to the file containing the variant template content.
@@ -6598,8 +6599,9 @@ pub struct PromptConfig {
     /// A/B test variants per template name.
     ///
     /// Keys are template names; values are ordered lists of variants.
-    /// Workers are assigned to variants based on `hash(worker_id) % 100`
-    /// compared against cumulative variant weights.
+    /// Attempts are assigned to variants independently. Each configured
+    /// `weight` is a maximum share of attempts, enforced by the durable
+    /// exposure ledger under `~/.needle/state/experiments/`.
     ///
     /// Example `.needle.yaml`:
     /// ```yaml
@@ -6620,9 +6622,11 @@ pub struct PromptConfig {
 }
 
 /// Prompt-variant canary evaluation: a variant whose verified-success rate
-/// trails the default by more than `regression_margin`, once both have
-/// `min_attempts`, is stopped (receipt under `~/.needle/state/experiments/`)
-/// and workers fall back to the built-in template. Promotion stays manual.
+/// trails the default beyond `regression_margin`, or breaches a configured
+/// cost, retry, or gate-error guardrail, is stopped with a receipt under
+/// `~/.needle/state/experiments/`. A candidate with sufficient improvement is
+/// marked promotable. Prompt files and config are changed only by an operator
+/// or an audited promotion operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentConfig {
     /// Evaluate and auto-stop (default: true; harmless without variants).
@@ -6640,6 +6644,45 @@ pub struct ExperimentConfig {
     /// How often a worker re-evaluates (default: 600 s).
     #[serde(default = "ExperimentConfig::default_refresh_secs")]
     pub refresh_secs: u64,
+    /// Absolute guardrails applied to the candidate cohort. A missing value
+    /// disables that guardrail; the observed values and declared limits are
+    /// retained in each experiment receipt.
+    #[serde(default)]
+    pub guardrails: ExperimentGuardrailsConfig,
+}
+
+/// Declared limits for prompt-template experiment guardrails.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentGuardrailsConfig {
+    /// Maximum known USD spent per verified close. `None` disables the limit.
+    #[serde(default)]
+    pub max_cost_per_verified_close_usd: Option<f64>,
+    /// Maximum attempts per distinct bead in the candidate cohort.
+    #[serde(default = "ExperimentGuardrailsConfig::default_max_retry_amplification")]
+    pub max_retry_amplification: Option<f64>,
+    /// Maximum fraction of candidate attempts with a gate execution error.
+    #[serde(default = "ExperimentGuardrailsConfig::default_max_gate_error_rate")]
+    pub max_gate_error_rate: Option<f64>,
+}
+
+impl Default for ExperimentGuardrailsConfig {
+    fn default() -> Self {
+        Self {
+            max_cost_per_verified_close_usd: None,
+            max_retry_amplification: Self::default_max_retry_amplification(),
+            max_gate_error_rate: Self::default_max_gate_error_rate(),
+        }
+    }
+}
+
+impl ExperimentGuardrailsConfig {
+    fn default_max_retry_amplification() -> Option<f64> {
+        Some(3.0)
+    }
+
+    fn default_max_gate_error_rate() -> Option<f64> {
+        Some(0.10)
+    }
 }
 
 impl Default for ExperimentConfig {
@@ -6650,6 +6693,7 @@ impl Default for ExperimentConfig {
             regression_margin: Self::default_regression_margin(),
             window_days: Self::default_window_days(),
             refresh_secs: Self::default_refresh_secs(),
+            guardrails: ExperimentGuardrailsConfig::default(),
         }
     }
 }
@@ -9050,7 +9094,13 @@ fn validate_attempt_archive_field(
 }
 
 fn validate_prompt_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
-    let valid_fields = ["context_files", "instructions", "templates"];
+    let valid_fields = [
+        "context_files",
+        "instructions",
+        "templates",
+        "variants",
+        "experiments",
+    ];
     if !valid_fields.contains(&field) {
         return Err(ConfigError::new(
             key_path.to_string(),

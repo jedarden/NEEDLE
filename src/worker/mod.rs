@@ -170,7 +170,6 @@ struct LedgerCache {
     evidence: crate::evidence_routing::Evidence,
     /// Timestamped rows support same-bead timeout/max-turns retry bias.
     rows: Vec<crate::evidence_routing::LedgerRow>,
-    variants: std::collections::HashMap<String, crate::experiments::VariantOutcome>,
 }
 
 /// Remove the trailing source annotation from a formatted config dump line.
@@ -3968,24 +3967,30 @@ impl Worker {
             }
         };
 
+        let attempt_id_for_prompt = self.attempt_id.clone();
         let mut prompt = match tokio::time::timeout(
             timeout_dur,
             tokio::task::spawn_blocking(move || {
+                let attempt_id = attempt_id_for_prompt.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("prompt build started without an attempt identity")
+                })?;
                 if template_name == "split" {
-                    prompt_builder.build_split_with_history(
+                    prompt_builder.build_split_with_history_for_attempt(
                         &bead,
                         &build_ws,
                         &worker_name,
+                        attempt_id,
                         failure_count,
                         &failure_history,
                         &prior_fixes,
                         "",
                     )
                 } else {
-                    prompt_builder.build_pluck_with_history(
+                    prompt_builder.build_pluck_with_history_for_attempt(
                         &bead,
                         &build_ws,
                         &worker_name,
+                        attempt_id,
                         &failure_history,
                         &prior_fixes,
                         "",
@@ -9205,12 +9210,10 @@ impl Worker {
         rows.sort_by_key(|row| row.timestamp);
         let data_rows: Vec<serde_json::Value> = rows.iter().map(|row| row.data.clone()).collect();
         let evidence = crate::evidence_routing::Evidence::from_rows(&data_rows);
-        let variants = crate::experiments::variant_outcomes(&data_rows);
         let cache = LedgerCache {
             computed_at: self.clock.now(),
             evidence,
             rows,
-            variants,
         };
         *guard = Some(cache.clone());
         drop(guard);
@@ -9278,51 +9281,94 @@ impl Worker {
             return;
         }
         let state_dir = crate::experiments::default_state_dir();
+        let rows: Vec<serde_json::Value> = cache.rows.iter().map(|row| row.data.clone()).collect();
+        let now = chrono::Utc::now();
         for (template, variants) in &self.config.prompt.variants {
-            for decision in
-                crate::experiments::evaluate(template, variants, &cache.variants, experiments)
-            {
-                if let crate::experiments::Decision::Stop {
+            for variant in variants {
+                let previous = match crate::experiments::load_experiment(
+                    &state_dir,
+                    template,
+                    &variant.name,
+                ) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        tracing::warn!(
+                            template = %template,
+                            variant = %variant.name,
+                            error = %error,
+                            "could not load prompt experiment state"
+                        );
+                        continue;
+                    }
+                };
+                let record = crate::experiments::evaluate_policy_experiment(
                     template,
                     variant,
-                    variant_rate,
-                    baseline_rate,
-                    variant_attempts,
-                    baseline_attempts,
-                    ..
-                } = &decision
-                {
-                    match crate::experiments::record_stop(&state_dir, &decision) {
-                        Ok(true) => {
+                    &rows,
+                    experiments,
+                    previous.as_ref(),
+                    now,
+                );
+                let previous_status = previous.as_ref().map(|record| record.status);
+                match crate::experiments::record_experiment(&state_dir, &record) {
+                    Ok(changed) if changed => match record.status {
+                        crate::experiments::ExperimentStatus::Stopped => {
+                            let receipt = record.receipt.as_ref();
+                            let candidate_rate = receipt
+                                .and_then(|receipt| receipt.candidate.verified_success_rate)
+                                .unwrap_or(0.0);
+                            let baseline_rate = receipt
+                                .and_then(|receipt| receipt.baseline.verified_success_rate)
+                                .unwrap_or(0.0);
+                            let candidate_attempts = receipt
+                                .map(|receipt| receipt.candidate.judged_attempts)
+                                .unwrap_or(0);
+                            let baseline_attempts = receipt
+                                .map(|receipt| receipt.baseline.judged_attempts)
+                                .unwrap_or(0);
                             tracing::warn!(
                                 template = %template,
-                                variant = %variant,
-                                variant_rate,
+                                variant = %variant.name,
+                                reason = receipt.map(|receipt| receipt.reason.as_str()).unwrap_or("stopped"),
+                                candidate_rate,
                                 baseline_rate,
-                                variant_attempts,
+                                candidate_attempts,
                                 baseline_attempts,
-                                "prompt variant regressed past the margin — stopped"
+                                "prompt experiment stopped; future attempts use the baseline"
                             );
-                            let _ = self.telemetry.emit(
-                                EventKind::ExperimentStopped {
-                                    template: template.clone(),
-                                    variant: variant.clone(),
-                                    variant_rate: *variant_rate,
-                                    baseline_rate: *baseline_rate,
-                                    variant_attempts: *variant_attempts,
-                                    baseline_attempts: *baseline_attempts,
-                                },
-                                chrono::Utc::now(),
+                            if previous_status
+                                != Some(crate::experiments::ExperimentStatus::Stopped)
+                            {
+                                let _ = self.telemetry.emit(
+                                    EventKind::ExperimentStopped {
+                                        template: template.clone(),
+                                        variant: variant.name.clone(),
+                                        variant_rate: candidate_rate,
+                                        baseline_rate,
+                                        variant_attempts: candidate_attempts,
+                                        baseline_attempts,
+                                    },
+                                    now,
+                                );
+                            }
+                        }
+                        crate::experiments::ExperimentStatus::Promotable => {
+                            tracing::info!(
+                                template = %template,
+                                variant = %variant.name,
+                                "prompt experiment is promotable; config promotion remains an operator action"
                             );
                         }
-                        Ok(false) => {}
-                        Err(e) => tracing::warn!(
-                            template = %template,
-                            variant = %variant,
-                            error = %e,
-                            "could not record the canary stop receipt"
-                        ),
-                    }
+                        crate::experiments::ExperimentStatus::Running
+                        | crate::experiments::ExperimentStatus::RolledBack => {}
+                    },
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        template = %template,
+                        variant = %variant.name,
+                        error = %error,
+                        "could not record prompt experiment state"
+                    ),
                 }
             }
         }
