@@ -8731,7 +8731,7 @@ mod tests {
             &crate::telemetry::test_utils::fixture_spec(),
         )
         .unwrap_or_else(|e| panic!("{label}: {e}"));
-        assert_eq!(row.data["schema_version"], 2, "{label}: schema_version");
+        assert_eq!(row.data["schema_version"], 3, "{label}: schema_version");
         assert_eq!(
             row.data["provisional"], true,
             "{label}: every row is provisional until N-T03"

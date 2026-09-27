@@ -49,6 +49,41 @@
       "type": "string",
       "description": "HEAD SHA captured before the agent ran, so downstream commits can be attributed to the attempt. Absent when the SHA could not be captured."
     },
+    "claim_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Backend bead revision observed immediately after the claim landed."
+    },
+    "assignee": {
+      "type": "string",
+      "description": "Exact assignee identity captured with the claim."
+    },
+    "claim_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Backend lease/fencing epoch captured with the claim."
+    },
+    "claim_handle": {
+      "type": "object",
+      "description": "Credential-free claim identity and negotiated lease facts at attempt resolution.",
+      "required": ["bead_id", "target_workspace_identity", "assignee", "protected"],
+      "properties": {
+        "bead_id": { "type": "string" },
+        "target_workspace_identity": { "type": "string" },
+        "assignee": { "type": "string" },
+        "starting_revision": { "type": ["integer", "null"] },
+        "current_revision": { "type": ["integer", "null"] },
+        "claim_epoch": { "type": ["integer", "null"] },
+        "lease_expires_at": { "type": ["string", "null"], "format": "date-time" },
+        "capabilities": { "type": "object" },
+        "protected": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "backend_capabilities": {
+      "type": "object",
+      "description": "Negotiated backend capability snapshot used by the attempt."
+    },
     "worker": {
       "type": "string",
       "description": "Worker identifier that ran the attempt."
@@ -56,6 +91,10 @@
     "adapter": {
       "type": "string",
       "description": "Agent adapter that executed the attempt (e.g. \"claude-code-glm-4.7\")."
+    },
+    "harness": {
+      "type": "string",
+      "description": "Adapter harness identity, when declared."
     },
     "model": {
       "type": "string",
@@ -166,6 +205,16 @@
     "exit_code": {
       "type": "integer",
       "description": "Agent process exit code. Observation only: it says what the process did, never whether the work was accepted \u2014 `outcome` carries that."
+    },
+    "wip_patch": {
+      "type": "object",
+      "description": "Durable working-tree recovery patch captured before a timeout, crash, or interruption release.",
+      "required": ["path", "bytes"],
+      "properties": {
+        "path": { "type": "string" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
     },
     "commits_before_deadline": {
       "type": [
