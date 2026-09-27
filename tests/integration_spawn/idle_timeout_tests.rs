@@ -554,13 +554,10 @@ async fn cancellation_kills_and_reaps_agent_without_timeout_reason() {
         wired_dispatcher(adapters, telemetry, 3600).with_cancellation_flag(cancellation.clone());
     let adapter = dispatcher.adapter("test-cancellation").unwrap().clone();
     let context = crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp"));
-    let dispatch = dispatcher.dispatch_with_context(
-        &BeadId::from("needle-cancellation"),
-        &test_prompt(),
-        &adapter,
-        Path::new("/tmp"),
-        &context,
-    );
+    let bead_id = BeadId::from("needle-cancellation");
+    let prompt = test_prompt();
+    let dispatch =
+        dispatcher.dispatch_with_context(&bead_id, &prompt, &adapter, Path::new("/tmp"), &context);
     tokio::pin!(dispatch);
 
     tokio::time::sleep(Duration::from_millis(100)).await;
