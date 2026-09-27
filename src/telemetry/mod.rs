@@ -993,6 +993,12 @@ pub enum EventKind {
     AgentTimeout {
         bead_id: BeadId,
         reason: crate::dispatch::TimeoutReason,
+        /// Wall-clock time from process spawn until the timeout fired.
+        elapsed_ms: u64,
+        /// Effective idle limit for this dispatch (zero means disabled).
+        idle_timeout_secs: u64,
+        /// Effective hard limit for this dispatch (zero means disabled).
+        hard_timeout_secs: u64,
     },
     RoutingDecision {
         bead_id: BeadId,
@@ -1022,6 +1028,7 @@ pub enum EventKind {
         bead_id: BeadId,
         outcome: String,
         exit_code: i32,
+        timeout_reason: Option<crate::dispatch::TimeoutReason>,
     },
     OutcomeHandled {
         bead_id: BeadId,
@@ -2794,10 +2801,20 @@ impl EventKind {
                     "rules_tried": rules_tried,
                 })
             }
-            EventKind::AgentTimeout { bead_id, reason } => {
+            EventKind::AgentTimeout {
+                bead_id,
+                reason,
+                elapsed_ms,
+                idle_timeout_secs,
+                hard_timeout_secs,
+            } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
-                    "reason": format!("{reason:?}"),
+                    "reason": reason.kind(),
+                    "reason_details": reason,
+                    "elapsed_ms": elapsed_ms,
+                    "idle_timeout_secs": idle_timeout_secs,
+                    "hard_timeout_secs": hard_timeout_secs,
                 })
             }
             EventKind::BuildTimeout {
@@ -2822,12 +2839,17 @@ impl EventKind {
                 bead_id,
                 outcome,
                 exit_code,
+                timeout_reason,
             } => {
-                serde_json::json!({
+                let mut data = serde_json::json!({
                     "bead_id": bead_id.as_ref(),
                     "outcome": outcome,
                     "exit_code": exit_code,
-                })
+                });
+                if let Some(reason) = timeout_reason {
+                    data["timeout_reason"] = serde_json::json!(reason.kind());
+                }
+                data
             }
             EventKind::OutcomeHandled {
                 bead_id,
@@ -4356,6 +4378,10 @@ impl EventKind {
     pub fn duration_ms(&self) -> Option<u64> {
         match self {
             EventKind::DispatchCompleted { duration_ms, .. }
+            | EventKind::AgentTimeout {
+                elapsed_ms: duration_ms,
+                ..
+            }
             | EventKind::BeadCompleted { duration_ms, .. }
             | EventKind::StrandEvaluated { duration_ms, .. }
             | EventKind::ResolveEvaluated { duration_ms, .. }
@@ -4527,7 +4553,6 @@ impl EventKind {
             | EventKind::IdleSleepEntered { .. }
             | EventKind::RoutingDecision { .. }
             | EventKind::RoutingFailed { .. }
-            | EventKind::AgentTimeout { .. }
             | EventKind::BeadStoreError { .. }
             | EventKind::WorkerFoundButExcluded { .. }
             | EventKind::EventDrivenWakeup { .. }
@@ -7486,6 +7511,51 @@ mod tests {
     }
 
     #[test]
+    fn timeout_event_preserves_reason_limits_and_elapsed_time() {
+        let kind = EventKind::AgentTimeout {
+            bead_id: BeadId::from("nd-timeout"),
+            reason: crate::dispatch::TimeoutReason::Idle {
+                timeout_secs: 5,
+                last_output_age_secs: 6,
+            },
+            elapsed_ms: 6_125,
+            idle_timeout_secs: 5,
+            hard_timeout_secs: 30,
+        };
+
+        assert_eq!(kind.event_type(), "agent.timeout");
+        assert_eq!(kind.duration_ms(), Some(6_125));
+        assert_eq!(
+            kind.to_data(),
+            serde_json::json!({
+                "bead_id": "nd-timeout",
+                "reason": "idle",
+                "reason_details": {
+                    "idle": {
+                        "timeout_secs": 5,
+                        "last_output_age_secs": 6
+                    }
+                },
+                "elapsed_ms": 6125,
+                "idle_timeout_secs": 5,
+                "hard_timeout_secs": 30
+            })
+        );
+    }
+
+    #[test]
+    fn outcome_classification_carries_timeout_reason() {
+        let kind = EventKind::OutcomeClassified {
+            bead_id: BeadId::from("nd-timeout"),
+            outcome: "timeout".to_string(),
+            exit_code: 124,
+            timeout_reason: Some(crate::dispatch::TimeoutReason::Hard { timeout_secs: 30 }),
+        };
+
+        assert_eq!(kind.to_data()["timeout_reason"], "hard");
+    }
+
+    #[test]
     fn telemetry_event_serializes_to_valid_json() {
         let event = TelemetryEvent {
             timestamp: Utc::now(),
@@ -8724,6 +8794,7 @@ mod tests {
                 bead_id: id.clone(),
                 outcome: "success".to_string(),
                 exit_code: 0,
+                timeout_reason: None,
             },
             EventKind::OutcomeHandled {
                 bead_id: id.clone(),

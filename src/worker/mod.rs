@@ -4658,6 +4658,11 @@ impl Worker {
                 started_at_wall: exec_result.as_ref().and(self.dispatch_started_at),
                 wip_patch: None,
             });
+        self.outcome_handler.set_timeout_reason(
+            exec_result
+                .as_ref()
+                .and_then(|result| result.timeout_reason.clone()),
+        );
 
         // Write trace files for stdout and stderr.
         // Errors are logged but don't fail the bead cycle — the output is

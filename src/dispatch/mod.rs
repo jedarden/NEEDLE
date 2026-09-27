@@ -180,6 +180,37 @@ pub enum TimeoutReason {
     },
 }
 
+impl TimeoutReason {
+    /// Stable wire/log name for the deadline that terminated the process.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Idle { .. } => "idle",
+            Self::Hard { .. } => "hard",
+            Self::Legacy { .. } => "legacy",
+        }
+    }
+
+    /// Configured limit associated with the deadline that fired.
+    pub const fn timeout_secs(&self) -> u64 {
+        match self {
+            Self::Idle { timeout_secs, .. }
+            | Self::Hard { timeout_secs }
+            | Self::Legacy { timeout_secs } => *timeout_secs,
+        }
+    }
+
+    /// Idle-only diagnostic, when the idle deadline fired.
+    pub const fn last_output_age_secs(&self) -> Option<u64> {
+        match self {
+            Self::Idle {
+                last_output_age_secs,
+                ..
+            } => Some(*last_output_age_secs),
+            Self::Hard { .. } | Self::Legacy { .. } => None,
+        }
+    }
+}
+
 /// Raw output from an agent process execution.
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -783,6 +814,33 @@ impl AgentAdapter {
             }
         } else {
             TimeoutPolicy::Global
+        }
+    }
+
+    /// Return the effective idle and hard limits used by one dispatch.
+    ///
+    /// The legacy and global policies apply one limit to both dimensions so
+    /// telemetry can report the complete configuration even though only one
+    /// timeout field was configured by the caller.
+    pub fn timeout_limits(&self, global_timeout_secs: u64) -> (u64, u64) {
+        match self.timeout_policy() {
+            TimeoutPolicy::Legacy => (self.timeout_secs, self.timeout_secs),
+            TimeoutPolicy::New {
+                idle_enabled,
+                hard_enabled,
+            } => (
+                if idle_enabled {
+                    self.idle_timeout_secs
+                } else {
+                    0
+                },
+                if hard_enabled {
+                    self.hard_timeout_secs
+                } else {
+                    0
+                },
+            ),
+            TimeoutPolicy::Global => (global_timeout_secs, global_timeout_secs),
         }
     }
 
@@ -1555,6 +1613,10 @@ impl Dispatcher {
             gen_ai.usage.output_tokens = tracing::field::Empty,
             needle.agent.pid = tracing::field::Empty,
             needle.agent.exit_code = tracing::field::Empty,
+            needle.agent.timeout_reason = tracing::field::Empty,
+            needle.agent.timeout.idle_secs = tracing::field::Empty,
+            needle.agent.timeout.hard_secs = tracing::field::Empty,
+            needle.agent.timeout.elapsed_ms = tracing::field::Empty,
         )
     )]
     pub async fn dispatch(
@@ -1695,10 +1757,24 @@ impl Dispatcher {
         let agent_name = adapter.name.clone();
         let agent_model = adapter.model.clone();
         let agent_provider = adapter.provider.clone();
+        let (idle_timeout_secs, hard_timeout_secs) =
+            adapter.timeout_limits(self.global_timeout_secs);
         match &result {
             Ok(exec) => {
                 tracing::Span::current().record("needle.agent.pid", i64::from(exec.pid));
                 tracing::Span::current().record("needle.agent.exit_code", exec.exit_code);
+
+                if let Some(reason) = exec.timeout_reason.as_ref() {
+                    tracing::Span::current().record("needle.agent.timeout_reason", reason.kind());
+                    tracing::Span::current()
+                        .record("needle.agent.timeout.idle_secs", idle_timeout_secs);
+                    tracing::Span::current()
+                        .record("needle.agent.timeout.hard_secs", hard_timeout_secs);
+                    tracing::Span::current().record(
+                        "needle.agent.timeout.elapsed_ms",
+                        exec.elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+                    );
+                }
 
                 // Extract token usage and set gen_ai.usage attributes
                 let usage = extract_tokens(&adapter.token_extraction, &exec.stdout, &exec.stderr);
@@ -1742,6 +1818,9 @@ impl Dispatcher {
                         EventKind::AgentTimeout {
                             bead_id: bead_id.clone(),
                             reason: reason.clone(),
+                            elapsed_ms: exec.elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+                            idle_timeout_secs,
+                            hard_timeout_secs,
                         },
                         chrono::Utc::now(),
                     );
@@ -4841,6 +4920,62 @@ output_transform: "needle-transform-custom"
             deserialized,
             TimeoutReason::Hard { timeout_secs: 120 }
         ));
+    }
+
+    #[test]
+    fn timeout_reason_exposes_stable_observability_fields() {
+        let idle = TimeoutReason::Idle {
+            timeout_secs: 7,
+            last_output_age_secs: 9,
+        };
+        assert_eq!(idle.kind(), "idle");
+        assert_eq!(idle.timeout_secs(), 7);
+        assert_eq!(idle.last_output_age_secs(), Some(9));
+
+        let hard = TimeoutReason::Hard { timeout_secs: 11 };
+        assert_eq!(hard.kind(), "hard");
+        assert_eq!(hard.timeout_secs(), 11);
+        assert_eq!(hard.last_output_age_secs(), None);
+    }
+
+    #[test]
+    fn timeout_limits_report_effective_legacy_new_and_global_values() {
+        let legacy = AgentAdapter {
+            name: "legacy".to_string(),
+            description: None,
+            agent_cli: "agent".to_string(),
+            version_command: None,
+            input_method: InputMethod::Stdin,
+            invoke_template: "agent".to_string(),
+            environment: HashMap::new(),
+            timeout_secs: 12,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: None,
+            model: None,
+            token_extraction: TokenExtraction::None,
+            usage_format: None,
+            output_transform: None,
+            harness: None,
+            harness_version: None,
+        };
+        assert_eq!(legacy.timeout_limits(99), (12, 12));
+
+        let split = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 3,
+            hard_timeout_secs: 20,
+            ..legacy.clone()
+        };
+        assert_eq!(split.timeout_limits(99), (3, 20));
+
+        let global = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            ..legacy
+        };
+        assert_eq!(global.timeout_limits(99), (99, 99));
     }
 
     // ── HardDeadlineTimer tests ──

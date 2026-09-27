@@ -1350,6 +1350,37 @@ mod tests {
     }
 
     #[test]
+    fn trace_metadata_records_structured_timeout_reason() {
+        let metadata = TraceMetadata {
+            bead_id: test_bead_id(),
+            agent: "test-agent".to_string(),
+            provider: None,
+            model: None,
+            exit_code: 124,
+            outcome: "timeout".to_string(),
+            duration_ms: 6_125,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now(),
+            trace_format: TraceFormat::RawText,
+            pruned: false,
+            template_version: None,
+            timeout_reason: Some(TimeoutReason::Hard { timeout_secs: 30 }),
+            terminal_reason: Some("timeout:hard".to_string()),
+            api_error_status: None,
+        };
+
+        let value = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(value["exit_code"], 124);
+        assert_eq!(value["duration_ms"], 6_125);
+        assert_eq!(value["timeout_reason"]["hard"]["timeout_secs"], 30);
+
+        let parsed: TraceMetadata = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.timeout_reason, metadata.timeout_reason);
+    }
+
+    #[test]
     fn metadata_written_before_the_envelope_fields_still_parses() {
         // cleanup_traces and prune_trace_data re-read metadata.json written by
         // older builds, which carry neither field. Deserialization must keep

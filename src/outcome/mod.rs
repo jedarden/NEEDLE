@@ -769,6 +769,10 @@ pub struct AttemptContext {
 pub struct OutcomeHandler {
     config: Config,
     telemetry: Telemetry,
+    /// Structured process timeout reason for the outcome currently being
+    /// handled. Set by the worker immediately after dispatch so outcome logs
+    /// retain why exit 124 happened instead of inferring it from the code.
+    timeout_reason: Arc<std::sync::Mutex<Option<crate::dispatch::TimeoutReason>>>,
     /// Dispatch context for the attempt in flight, set by the worker each
     /// cycle before it enters HANDLING. Held behind a mutex so the setter can
     /// take `&self` — the handler is owned by the worker but its handle
@@ -812,6 +816,7 @@ impl OutcomeHandler {
         OutcomeHandler {
             config,
             telemetry,
+            timeout_reason: Arc::new(std::sync::Mutex::new(None)),
             attempt_context: Arc::new(std::sync::Mutex::new(None)),
             ledger_row_emitted: Arc::new(std::sync::Mutex::new(None)),
             attempt_provenance: Arc::new(std::sync::Mutex::new(None)),
@@ -837,6 +842,18 @@ impl OutcomeHandler {
             .attempt_context
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(context);
+        *self
+            .timeout_reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Carry the dispatcher's structured timeout reason into outcome handling.
+    pub fn set_timeout_reason(&self, reason: Option<crate::dispatch::TimeoutReason>) {
+        *self
+            .timeout_reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = reason;
     }
 
     /// Bind claim-time provenance to the next ledger row.
@@ -1409,6 +1426,11 @@ impl OutcomeHandler {
         // bead's result — 341 claude-print watchdog kills on 2026-09-10 were
         // booked as bead failures before this existed.
         let attempt_context = self.peek_attempt_context();
+        let timeout_reason = self
+            .timeout_reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let attempt_provider = attempt_context.provider.clone();
         let adapter_name = attempt_context.adapter;
         let attempt_actor = attempt_context.actor;
@@ -1428,7 +1450,7 @@ impl OutcomeHandler {
         // Gate evidence is captured before the routing match below, which
         // moves the report into the terminal handlers (N-T16 ledger row).
         let gate_results = gate_result_entries(gate_report.as_ref());
-        let (resolved_outcome, resolved_reason) = match infra_fingerprint.as_deref() {
+        let (resolved_outcome, mut resolved_reason) = match infra_fingerprint.as_deref() {
             Some(fingerprint) => (
                 "infrastructure_failure".to_string(),
                 Some(format!("provider_degraded:{fingerprint}")),
@@ -1438,6 +1460,15 @@ impl OutcomeHandler {
                 terminal_reason(&outcome, output.exit_code, gate_report.as_ref()),
             ),
         };
+        if matches!(outcome, Outcome::Timeout) {
+            resolved_reason = Some(format!(
+                "timeout:{}",
+                timeout_reason
+                    .as_ref()
+                    .map(crate::dispatch::TimeoutReason::kind)
+                    .unwrap_or("unknown")
+            ));
+        }
         // The bounded failure text the *next* attempt is shown (R3). Taken
         // here, before the report moves, from the same evidence the ledger
         // summarizes as a name.
@@ -1506,6 +1537,10 @@ impl OutcomeHandler {
             exit_code = output.exit_code,
             verified,
             outcome = %outcome,
+            timeout_reason = timeout_reason
+                .as_ref()
+                .map(crate::dispatch::TimeoutReason::kind)
+                .unwrap_or("none"),
             "handling agent outcome"
         );
 
@@ -1516,6 +1551,7 @@ impl OutcomeHandler {
                 bead_id: bead.id.clone(),
                 outcome: outcome.as_str().to_string(),
                 exit_code: output.exit_code,
+                timeout_reason: timeout_reason.clone(),
             },
             Utc::now(),
         );
