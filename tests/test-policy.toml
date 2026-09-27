@@ -261,7 +261,10 @@ version = 1
 # +1 attempt-identity guard classification (needle-cafdd3af): each guard is
 # a releasable pre-spawn abort that spawns nothing. The guard and its error
 # type are private to src/dispatch/mod.rs.
-max_tests = 4011
+# +5 structured timeout-reason propagation contracts (needle-47b36f6b):
+# timeout reason metadata, effective timeout limits, timeout telemetry,
+# outcome propagation, and trace round-tripping.
+max_tests = 4016
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
