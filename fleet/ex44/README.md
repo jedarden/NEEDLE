@@ -1,13 +1,13 @@
 # ex44 NEEDLE fleet policy
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
-reproducible. It registers 35 workers across the Z.ai, OpenAI, and Anthropic
-provider pools; 32 can roam, while three workers remain scoped to their home
+reproducible. It registers 38 workers across the Z.ai, OpenAI, and Anthropic
+provider pools; 35 can roam, while three workers remain scoped to their home
 repositories: two to NEEDLE (`codex-luna-needle-01`, `claude-needle-01`) and
 `codex-luna-warp` to WARP. Every roaming worker tries its listed home
 workspace first, then may use the maintained-workspace frontier when that
 route has no eligible work. Eight workers use GLM-5.3, fourteen use
-GLM-5.3-Flash, eleven use Codex GPT-5.6 Luna, one uses Codex GPT-6 Luna, and
+GLM-5.3-Flash, fourteen use Codex GPT-5.6 Luna, one uses Codex GPT-6 Luna, and
 one uses Claude. Live-session concurrency is enforced separately from the
 number of registered workers.
 Codex instance environments disable the fleet-wide GLM evidence router so

@@ -13,12 +13,12 @@ grep -q 'leaves Explore.*workspace list empty' "$SRC_DIR/README.md"
 grep -q 'deliberate pinning exception' "$SRC_DIR/README.md"
 
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
-[[ "$(wc -l <<<"$rows")" -eq 35 ]]
-[[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 35 ]]
-[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 32 ]]
+[[ "$(wc -l <<<"$rows")" -eq 38 ]]
+[[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 38 ]]
+[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 35 ]]
 grep -q $'^codex-luna-tradegraph\t/home/coding/telegram-claude-bridge\t.*\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
-[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 11 ]]
+[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 14 ]]
 # The TradeGraph queue is owned by lab (needle-4164f30e): a codinghome worker
 # homed there can never Pluck (workspace_queue_owner_mismatch) and, with Explore
 # off, can never work at all. No roster row may name it.
@@ -33,6 +33,9 @@ grep -q $'^glm-roam-22\t/home/coding/coned-rate-optimizer\tclaude-code-glm-5.3-f
 # needle-182be85c Step 2: the OpenAI bucket must exceed the Codex roster (registered accounting).
 grep -A2 '^    openai:' "$SRC_DIR/bootstrap-lane.yaml" | grep -qx '      max_concurrent: 16'
 [[ "$(awk -F'\t' '$3 ~ /^codex-/ {n++} END {print n+0}' <<<"$rows")" -lt 16 ]]
+grep -q $'^codex-luna-twproxy\t/home/coding/twitterapi-proxy\tcodex-gpt-5.6-luna-xhigh\t420\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-pjp\t/home/coding/pjp-demo\tcodex-gpt-5.6-luna-xhigh\t435\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-skills\t/home/coding/jeds-curated-skills\tcodex-gpt-5.6-luna-xhigh\t450\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-argo\t/home/coding/argo-workflows-exporter\tcodex-gpt-5.6-luna-xhigh\t375\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-utilities\t/home/coding/utilities\tcodex-gpt-5.6-luna-xhigh\t390\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-clustertop\t/home/coding/clustertop\tcodex-gpt-5.6-luna-xhigh\t405\ttrue$' "$MANIFEST"
@@ -55,7 +58,7 @@ grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
 grep -qx 'NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE=6' "$SRC_DIR/fleet-policy.env"
 ! grep -q 'NEEDLE_STRANDS__GENERATION__ENABLED' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -qx 'NEEDLE_STRANDS__MITOSIS__TIMEOUT_TRIGGERED__AGENT_WALLCLOCK_TIMEOUT=true' "$SRC_DIR/fleet-policy.env"
-grep -qx 'NEEDLE_WORKER__MAX_WORKERS=35' "$SRC_DIR/fleet-policy.env"
+grep -qx 'NEEDLE_WORKER__MAX_WORKERS=38' "$SRC_DIR/fleet-policy.env"
 grep -qx 'FLEET_WORKER_TARGET=27' "$SRC_DIR/backlog-policy.env"
 grep -qx 'FLEET_ELIGIBLE_TARGET=108' "$SRC_DIR/backlog-policy.env"
 grep -qx 'FLEET_ELIGIBLE_MINIMUM=54' "$SRC_DIR/backlog-policy.env"
