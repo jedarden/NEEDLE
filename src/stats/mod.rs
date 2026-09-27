@@ -1679,7 +1679,7 @@ mod tests {
 
     #[test]
     fn compute_stats_by_adapter_aggregates_attempts() {
-        let events = vec![
+        let mut events = vec![
             attempt_row(
                 "adapter-a",
                 "verified_success",
@@ -1689,14 +1689,20 @@ mod tests {
             ),
             attempt_row("adapter-a", "work_failure", Some(200), Some(10), Some(0.02)),
             attempt_row("adapter-b", "verified_success", None, None, None),
-            // Dispatch-correlated events must not leak into attempt dimensions.
-            make_tel_event(
-                "agent.dispatched",
+        ];
+        let retried_attempt_id = events[0].data["attempt_id"].as_str().unwrap().to_string();
+        // A first dispatch, retry, and completion for one ledger row must
+        // not inflate the attempt dimension.
+        for event_type in ["agent.dispatched", "agent.dispatched", "agent.completed"] {
+            let mut event = make_tel_event(
+                event_type,
                 "needle-alpha",
                 Some("nd-1"),
                 serde_json::json!({"adapter": "adapter-a"}),
-            ),
-        ];
+            );
+            event.attempt_id = Some(retried_attempt_id.clone());
+            events.push(event);
+        }
 
         let rows = compute_stats(&events, StatsDimension::Adapter);
 
@@ -1720,17 +1726,38 @@ mod tests {
 
     #[test]
     fn compute_stats_by_outcome_counts_each_semantic_outcome() {
-        let events = vec![
+        let mut events = vec![
             attempt_row("adapter-a", "verified_success", Some(10), Some(5), None),
             attempt_row("adapter-a", "work_failure", None, None, None),
             attempt_row("adapter-b", "infrastructure_failure", None, None, None),
             attempt_row("adapter-b", "indeterminate", None, None, None),
             attempt_row("adapter-b", "cancelled", None, None, None),
         ];
+        let retried_attempt_id = events[0].data["attempt_id"].as_str().unwrap().to_string();
+        for event_type in ["agent.dispatched", "agent.dispatched", "agent.completed"] {
+            let mut event = make_tel_event(
+                event_type,
+                "needle-alpha",
+                Some("nd-1"),
+                serde_json::json!({"outcome": "verified_success"}),
+            );
+            event.attempt_id = Some(retried_attempt_id.clone());
+            events.push(event);
+        }
 
         let rows = compute_stats(&events, StatsDimension::Outcome);
 
         assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows.iter().map(|row| row.beads).sum::<u64>(),
+            5,
+            "counts come from five attempt.resolved rows, not their dispatch events"
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.provisional).sum::<u64>(),
+            5,
+            "provisional status follows the attempt.resolved rows"
+        );
         let success = rows.iter().find(|r| r.key == "verified_success").unwrap();
         assert_eq!(success.beads, 1);
         assert_eq!(success.pass, 1);

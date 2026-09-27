@@ -2566,7 +2566,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exported_log_record_carries_the_provisional_attempt_id() {
+    fn test_exported_log_records_carry_distinct_uuidv7_attempt_ids() {
         use opentelemetry_sdk::logs::{LogBatch, SdkLogRecord, SdkLoggerProvider};
 
         #[derive(Debug, Clone, Default)]
@@ -2593,30 +2593,43 @@ mod tests {
         // A dispatch-cycle event: the envelope's provisional attempt ID must
         // survive into the OTLP payload so an exported span and the JSONL rows
         // the dispatch produced join on one field (plan section 4.4 step 1).
-        let attempt_id = uuid::Uuid::now_v7().to_string();
-        let mut in_cycle = make_test_event("state.transition", None, serde_json::json!({}));
-        in_cycle.attempt_id = Some(attempt_id.clone());
-        sink.emit_log(&in_cycle)
-            .expect("log record should be emitted");
+        let attempt_ids = [crate::attempt::new_id(), crate::attempt::new_id()];
+        assert_ne!(attempt_ids[0], attempt_ids[1]);
+        for attempt_id in &attempt_ids {
+            let mut in_cycle = make_test_event("state.transition", None, serde_json::json!({}));
+            in_cycle.attempt_id = Some(attempt_id.clone());
+            sink.emit_log(&in_cycle)
+                .expect("log record should be emitted");
+        }
 
         let records = exporter
             .records
             .lock()
             .expect("log exporter mutex poisoned");
-        let attr = |name: &str| {
-            records[0]
-                .attributes_iter()
-                .find(|(key, _)| key.as_str() == name)
-                .and_then(|(_, value)| match value {
-                    AnyValue::String(value) => Some(value.as_str().to_string()),
-                    _ => None,
-                })
-        };
-        assert_eq!(
-            attr("attempt_id").as_deref(),
-            Some(attempt_id.as_str()),
-            "the OTLP log record must carry the dispatch's attempt ID"
-        );
+        assert_eq!(records.len(), attempt_ids.len());
+        let exported_ids: Vec<String> = records
+            .iter()
+            .map(|record| {
+                record
+                    .attributes_iter()
+                    .find(|(key, _)| key.as_str() == "attempt_id")
+                    .and_then(|(_, value)| match value {
+                        AnyValue::String(value) => Some(value.as_str().to_string()),
+                        _ => None,
+                    })
+                    .expect("the OTLP payload must carry the dispatch attempt ID")
+            })
+            .collect();
+        assert_eq!(exported_ids, attempt_ids);
+        assert_ne!(exported_ids[0], exported_ids[1]);
+        for attempt_id in &exported_ids {
+            assert_eq!(
+                uuid::Uuid::parse_str(attempt_id)
+                    .expect("attempt id must be a UUID")
+                    .get_version_num(),
+                7
+            );
+        }
         drop(records);
 
         // Outside a dispatch cycle there is no attempt ID, and the payload

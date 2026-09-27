@@ -561,6 +561,57 @@ mod tests {
     }
 
     #[test]
+    fn file_sink_pins_distinct_uuidv7_attempt_ids_per_dispatch_and_retry() {
+        let temp_dir = TempDir::new().unwrap();
+        let sink = FileSink::with_config(
+            temp_dir.path().to_path_buf(),
+            "test-worker",
+            "sess-attempts",
+            1024 * 1024,
+        )
+        .unwrap();
+
+        // Each cycle mints its ID through the production helper, as the worker
+        // does before claiming a dispatch. The second cycle models a retry.
+        let attempt_ids = [crate::attempt::new_id(), crate::attempt::new_id()];
+        assert_ne!(attempt_ids[0], attempt_ids[1]);
+        for (sequence, attempt_id) in attempt_ids.iter().enumerate() {
+            let mut event = create_test_event("test-worker");
+            event.event_type = "attempt.resolved".to_string();
+            event.sequence = sequence as u64;
+            event.data = serde_json::json!({
+                "attempt_id": attempt_id,
+                "provisional": true,
+            });
+            event.attempt_id = Some(attempt_id.clone());
+            sink.accept(&event).unwrap();
+        }
+        sink.flush(time::Duration::from_secs(5)).unwrap();
+
+        let content = fs::read_to_string(sink.path()).unwrap();
+        let rows: Vec<TelemetryEvent> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), attempt_ids.len());
+
+        let recorded_ids: Vec<&str> = rows
+            .iter()
+            .map(|row| row.attempt_id.as_deref().unwrap())
+            .collect();
+        let expected_ids: Vec<&str> = attempt_ids.iter().map(String::as_str).collect();
+        assert_eq!(recorded_ids, expected_ids);
+        assert_ne!(recorded_ids[0], recorded_ids[1]);
+        for (row, attempt_id) in rows.iter().zip(recorded_ids) {
+            assert_eq!(row.event_type, "attempt.resolved");
+            assert_eq!(row.data["attempt_id"], attempt_id);
+            assert_eq!(row.data["provisional"], true);
+            let uuid = uuid::Uuid::parse_str(attempt_id).unwrap();
+            assert_eq!(uuid.get_version_num(), 7);
+        }
+    }
+
+    #[test]
     fn test_file_sink_creates_log_directory() {
         let temp_dir = TempDir::new().unwrap();
         let log_dir = temp_dir.path().join("nested").join("logs");

@@ -270,7 +270,8 @@ version = 1
 # +7 renewable fenced claim-handle contracts (needle-cd169aa6): retained
 # identity/credential rotation and the guarded CLI mutation matrix. These
 # exercise the claim/store/outcome boundaries in-process.
-max_tests = 4027
+# +1 provisional attempt-ID sink and stats regression pin (needle-00fbe3bc).
+max_tests = 4028
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
