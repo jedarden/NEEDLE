@@ -2,6 +2,11 @@
 
 All notable changes to NEEDLE are documented in this file.
 
+> Historical/non-operational reference: entries below preserve exact retired
+> `br` commands from NEEDLE's pre-migration eras. Do not run them; use the
+> current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 ## [Unreleased]
 
 ### Added

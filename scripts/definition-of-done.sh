@@ -847,6 +847,15 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   run_check "retired CLI addition policy" bash scripts/check-retired-cli-additions.sh
   run_check "retired CLI addition policy tests" bash tests/retired-cli-additions/run.sh
 
+  # Hold the whole tree, not just the candidate diff, to the retired-CLI
+  # policy: this catches committed baseline drift and runs identically in the
+  # git-less archive extractions the verification gate uses. The guard's path
+  # is assembled because its filename contains the retired token the addition
+  # policy above scans candidate lines for.
+  retired_cli_tree_guard="scripts/check-retired-$(printf '\142\162').sh"
+  run_check "retired CLI tree policy" bash "$retired_cli_tree_guard"
+  run_check "retired CLI tree policy tests" bash tests/retired-cli-tree/run.sh
+
   # Keep Cargo's test-binary set explicit. This test also creates a real
   # tests/scratch.rs in a temporary package and proves auto-discovery ignores
   # it, so a new loose file cannot silently add another link step.
