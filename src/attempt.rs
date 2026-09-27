@@ -17,6 +17,9 @@ pub struct AttemptProvenance {
     pub assignee: Option<String>,
     /// Backend fencing/lease epoch returned with the claim.
     pub claim_epoch: Option<u64>,
+    /// Credential-free renewable claim metadata captured from the original
+    /// claim and refreshed only after an accepted compare-and-swap renewal.
+    pub claim_handle: Option<crate::claim::ClaimHandleMetadata>,
     /// Capability document negotiated for the target store.
     pub backend_capabilities: Option<serde_json::Value>,
     /// Adapter identity.

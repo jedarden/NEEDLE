@@ -3940,6 +3940,9 @@ pub enum BeadAction {
     Interrupted,
     /// Normal outcome handling failed; the worker must run release recovery.
     Errored,
+    /// The retained fenced handle was rejected or its lease could not be
+    /// renewed; ownership belongs to another actor and no mutation is safe.
+    Superseded,
 }
 
 impl fmt::Display for BeadAction {
@@ -3952,6 +3955,7 @@ impl fmt::Display for BeadAction {
             BeadAction::Quarantined => write!(f, "quarantined"),
             BeadAction::Interrupted => write!(f, "interrupted"),
             BeadAction::Errored => write!(f, "errored"),
+            BeadAction::Superseded => write!(f, "superseded"),
         }
     }
 }

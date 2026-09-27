@@ -122,7 +122,7 @@ use tokio::sync::watch;
 
 use crate::bead_store::spawn_with_etxtbsy_retry_child;
 use crate::bead_store::BeadStore;
-use crate::claim::{ClaimIdentity, ResolvedStoreContext};
+use crate::claim::{ClaimHandle, ClaimIdentity, ResolvedStoreContext};
 use crate::config::Config;
 use crate::process_guard::{ProcessGroupKillGuard, ProcessGuard};
 use crate::prompt::BuiltPrompt;
@@ -1343,6 +1343,7 @@ pub fn is_pre_spawn_abort(error: &anyhow::Error) -> bool {
 pub struct DispatchContext {
     target_store: ResolvedStoreContext,
     claim_identity: ClaimIdentity,
+    claim_handle: Option<Arc<tokio::sync::Mutex<ClaimHandle>>>,
     attempt_id: Option<String>,
 }
 
@@ -1361,6 +1362,9 @@ pub struct VerifiedTargetClaim {
     pub epoch: u64,
     /// The bead revision proven by the live store.
     pub revision: u64,
+    /// The exact retained opaque credential; its debug representation is
+    /// redacted and it is never reconstructed from `live`.
+    pub(crate) fencing_credential: Option<crate::claim::FencingCredential>,
 }
 
 impl DispatchContext {
@@ -1370,6 +1374,21 @@ impl DispatchContext {
         Self {
             target_store,
             claim_identity,
+            claim_handle: None,
+            attempt_id: None,
+        }
+    }
+
+    /// Bind the exact renewable handle returned by the successful claim.
+    pub fn new_with_claim_handle(
+        target_store: ResolvedStoreContext,
+        claim_identity: ClaimIdentity,
+        claim_handle: Arc<tokio::sync::Mutex<ClaimHandle>>,
+    ) -> Self {
+        Self {
+            target_store,
+            claim_identity,
+            claim_handle: Some(claim_handle),
             attempt_id: None,
         }
     }
@@ -1394,6 +1413,12 @@ impl DispatchContext {
     pub fn claim_identity(&self) -> &ClaimIdentity {
         &self.claim_identity
     }
+
+    /// The same handle retained by the worker, updated only after an accepted
+    /// compare-and-swap renewal.
+    pub fn claim_handle(&self) -> Option<&Arc<tokio::sync::Mutex<ClaimHandle>>> {
+        self.claim_handle.as_ref()
+    }
 }
 
 /// What authorizes a dispatch to create a child process.
@@ -1415,6 +1440,12 @@ impl<'a> SpawnAuthority<'a> {
             SpawnAuthority::Claim(context) => context,
             SpawnAuthority::UnclaimedAnalysis => None,
         }
+    }
+
+    async fn claim_handle_metadata(self) -> Option<crate::claim::ClaimHandleMetadata> {
+        let context = self.claim_context()?;
+        let handle = context.claim_handle()?.lock().await;
+        Some(handle.metadata())
     }
 }
 
@@ -1896,10 +1927,29 @@ impl Dispatcher {
         bead_id: &BeadId,
         context: &DispatchContext,
     ) -> Result<VerifiedTargetClaim> {
-        let expected = context.claim_identity();
+        let retained_handle = if let Some(handle) = context.claim_handle() {
+            Some(handle.lock().await.clone())
+        } else {
+            None
+        };
+        let expected_identity = retained_handle
+            .as_ref()
+            .map(ClaimHandle::claim_identity)
+            .unwrap_or_else(|| context.claim_identity().clone());
+        let expected = &expected_identity;
         let workspace = context.target_store().workspace().to_path_buf();
         let actor = expected.actor.clone();
         let store = context.target_store().store();
+
+        if let Some(handle) = retained_handle.as_ref() {
+            if handle.bead_id != *bead_id
+                || handle.target_workspace_identity != context.target_store().workspace_identity()
+            {
+                return Err(claim_verification_error(format!(
+                    "claim handle target identity mismatch for bead {bead_id}"
+                )));
+            }
+        }
 
         let emit_error = |category: crate::telemetry::ClaimVerifyErrorCategory, detail: String| {
             let _ = self.telemetry.emit(
@@ -2075,6 +2125,10 @@ impl Dispatcher {
             workspace: workspace.clone(),
             epoch,
             revision,
+            fencing_credential: retained_handle
+                .as_ref()
+                .and_then(ClaimHandle::fencing_credential)
+                .cloned(),
         };
         let _ = self.telemetry.emit(
             crate::telemetry::EventKind::ClaimVerificationPassed {
@@ -2132,6 +2186,12 @@ impl Dispatcher {
         // Sanitizer is cloned (Arc clone — cheap) and applied before every disk write.
         let mut trace_capture =
             TraceCapture::new_with_sanitizer(bead_id, workspace, self.sanitizer.clone());
+        if let (Some(capture), Some(metadata)) = (
+            trace_capture.as_mut(),
+            authority.claim_handle_metadata().await,
+        ) {
+            capture.bind_claim_handle(metadata);
+        }
         if let (Some(capture), Some(attempt_id)) =
             (trace_capture.as_mut(), self.telemetry.attempt_id())
         {
@@ -2243,7 +2303,11 @@ impl Dispatcher {
                 // final target-store read to the dispatched agent.
                 child_env.insert(
                     "NEEDLE_BEAD_FENCING_TOKEN".to_string(),
-                    verified.epoch.to_string(),
+                    verified
+                        .fencing_credential
+                        .as_ref()
+                        .map(|credential| credential.expose().to_string())
+                        .unwrap_or_else(|| verified.epoch.to_string()),
                 );
                 child_env.insert(
                     "NEEDLE_BEAD_REVISION".to_string(),
@@ -3009,7 +3073,7 @@ impl Dispatcher {
         }
 
         // Finalize trace capture.
-        let trace_path = if let Some(capture) = trace_capture {
+        let trace_path = if let Some(mut capture) = trace_capture {
             // Write stdout and stderr to trace files.
             if let Err(e) = capture.write_stdout(&stdout) {
                 tracing::warn!(
@@ -3060,6 +3124,9 @@ impl Dispatcher {
                 api_error_status,
                 ..
             } = parse_result_envelope(&stdout).unwrap_or_default();
+            if let Some(metadata) = authority.claim_handle_metadata().await {
+                capture.bind_claim_handle(metadata);
+            }
             let metadata = TraceMetadata {
                 bead_id: bead_id.clone(),
                 agent: adapter.name.clone(),

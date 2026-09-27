@@ -29,6 +29,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::cargo_test::TestMetrics;
+use crate::claim::ClaimHandleMetadata;
 use crate::dispatch::TimeoutReason;
 use crate::sanitize::Sanitizer;
 use crate::types::{BeadId, Outcome};
@@ -124,6 +125,8 @@ pub struct TraceCapture {
     sanitizer: Option<Arc<Sanitizer>>,
     /// Attempt identity bound before the adapter process starts.
     attempt_id: Option<String>,
+    /// Credential-free claim facts carried from the worker's retained handle.
+    claim_handle: Option<ClaimHandleMetadata>,
 }
 
 impl TraceCapture {
@@ -176,6 +179,7 @@ impl TraceCapture {
             enabled: true,
             sanitizer,
             attempt_id: None,
+            claim_handle: None,
         })
     }
 
@@ -187,6 +191,12 @@ impl TraceCapture {
     /// Bind the immutable attempt identity to this trace capture.
     pub fn bind_attempt_id(&mut self, attempt_id: impl Into<String>) {
         self.attempt_id = Some(attempt_id.into());
+    }
+
+    /// Bind only the redacted identity view; the fencing credential is never
+    /// serialized into trace files.
+    pub fn bind_claim_handle(&mut self, handle: ClaimHandleMetadata) {
+        self.claim_handle = Some(handle);
     }
 
     /// Write stdout to `stdout.txt`.
@@ -282,6 +292,10 @@ impl TraceCapture {
             serde_json::to_value(metadata).context("failed to serialize trace metadata")?;
         if let Some(attempt_id) = &self.attempt_id {
             value["attempt_id"] = serde_json::json!(attempt_id);
+        }
+        if let Some(claim_handle) = &self.claim_handle {
+            value["claim_handle"] = serde_json::to_value(claim_handle)
+                .context("failed to serialize redacted claim metadata")?;
         }
         let json =
             serde_json::to_string_pretty(&value).context("failed to serialize trace metadata")?;
@@ -1840,6 +1854,38 @@ mod tests {
         // document: parsing into the struct would silently drop the key.
         let raw = read_raw_metadata(&capture);
         assert_eq!(raw["attempt_id"], "0192-attempt-identity");
+    }
+
+    #[test]
+    fn trace_metadata_carries_only_redacted_claim_handle_facts() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
+
+        let mut capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        capture.bind_claim_handle(ClaimHandleMetadata {
+            bead_id: test_bead_id(),
+            target_workspace_identity: "workspace-sha256".to_string(),
+            assignee: "worker-a".to_string(),
+            starting_revision: Some(7),
+            current_revision: Some(8),
+            claim_epoch: Some(3),
+            lease_expires_at: Some(Utc::now() + chrono::Duration::seconds(60)),
+            capabilities: crate::claim::ClaimCapabilities {
+                fenced_claim: true,
+                renewable_lease: true,
+                guarded_mutations: true,
+                credential_stdin: true,
+            },
+            protected: true,
+        });
+        capture.write_metadata(&attempt_metadata()).unwrap();
+
+        let raw = read_raw_metadata(&capture);
+        assert_eq!(raw["claim_handle"]["bead_id"], test_bead_id().as_ref());
+        assert_eq!(raw["claim_handle"]["current_revision"], 8);
+        assert_eq!(raw["claim_handle"]["protected"], true);
+        assert!(raw["claim_handle"].get("fencing_credential").is_none());
     }
 
     #[test]

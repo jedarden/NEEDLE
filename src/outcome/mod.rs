@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::bead_store::{BeadStore, RETRY_COOLDOWN_LABEL_PREFIX};
+use crate::claim::ClaimHandle;
 use crate::config::{Config, GatesConfig};
 use crate::fingerprint::{
     append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
@@ -826,6 +827,9 @@ pub struct OutcomeHandler {
     /// callers remain source-compatible while real worker dispatches carry
     /// the stronger claim-time provenance.
     attempt_provenance: Arc<std::sync::Mutex<Option<crate::attempt::AttemptProvenance>>>,
+    /// Exact handle for the active worker attempt. Legacy direct callers leave
+    /// this unset and retain the explicitly unprotected compatibility path.
+    active_claim_handle: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Mutex<ClaimHandle>>>>>,
     /// Re-runs the verification commands a close reason claims, in a clean
     /// extraction of committed state, before the close is honoured
     /// ([`Self::verify_close_evidence`]).
@@ -853,6 +857,7 @@ impl OutcomeHandler {
             attempt_context: Arc::new(std::sync::Mutex::new(None)),
             ledger_row_emitted: Arc::new(std::sync::Mutex::new(None)),
             attempt_provenance: Arc::new(std::sync::Mutex::new(None)),
+            active_claim_handle: Arc::new(std::sync::Mutex::new(None)),
             close_verification: close_verification::CloseVerificationRuntime::production(),
             fallback_verification: fallback_verification::FallbackVerificationRuntime::production(),
         }
@@ -879,6 +884,20 @@ impl OutcomeHandler {
             .timeout_reason
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .active_claim_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Bind the exact handle retained by the worker to the next outcome. The
+    /// shared async mutex means an accepted renewal is visible atomically to
+    /// resolution without copying or reconstructing a newer token.
+    pub fn set_claim_handle(&self, handle: Option<Arc<tokio::sync::Mutex<ClaimHandle>>>) {
+        *self
+            .active_claim_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = handle;
     }
 
     /// Carry the dispatcher's structured timeout reason into outcome handling.
@@ -895,6 +914,22 @@ impl OutcomeHandler {
             .attempt_provenance
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(provenance);
+    }
+
+    /// Resolve an attempt as non-attributable when its retained claim handle
+    /// was rejected or its lease could not be renewed. This deliberately
+    /// skips gates, bead history, and backend resolution: the worker no longer
+    /// owns authority to mutate the target bead.
+    pub async fn handle_stale_ownership(&self, bead: &Bead, output: &AgentOutcome) {
+        let ledger = self.emit_attempt_resolved(
+            bead,
+            output,
+            "superseded".to_string(),
+            crate::telemetry::AttemptOutcome::StaleOwnership.as_str(),
+            Some("claim ownership was lost before attempt resolution".to_string()),
+            Vec::new(),
+        );
+        self.spool_attempt_archive(bead, &ledger).await;
     }
 
     /// Take the pending dispatch context, falling back to an all-unknown one.
@@ -1773,8 +1808,23 @@ impl OutcomeHandler {
         // gets the same outcome (bead-rs `resolve --action none`), which is
         // what its failure-tier scheduling and cross-host attempt history
         // read. Idempotent per attempt ID; best-effort.
-        self.record_backend_resolution(store, bead, &ledger, &attempt_actor)
+        let claim_resolution_rejected = self
+            .record_backend_resolution(store, bead, &ledger, &attempt_actor)
             .await;
+
+        // A protected attempt whose claim-owned resolution was rejected can
+        // no longer be attributed to this worker. Do not let the normal
+        // terminal action continue into release/close handling; the worker's
+        // state-machine choke point will record the superseded disposition
+        // without an unguarded fallback mutation.
+        if claim_resolution_rejected {
+            return Ok(HandlerResult {
+                outcome,
+                bead_action: BeadAction::Superseded,
+                telemetry_events,
+                budget_exhausted: false,
+            });
+        }
 
         // Plan section 4.4 step 1: the durable copy of the attempt lives off
         // the worker host. Bundle the attempt's trace into the spool the
@@ -1852,9 +1902,9 @@ impl OutcomeHandler {
         bead: &Bead,
         ledger: &crate::telemetry::AttemptResolvedFields,
         actor: &str,
-    ) {
+    ) -> bool {
         if !self.config.outcome.resolve_attempts_in_backend {
-            return;
+            return false;
         }
         let resolution = crate::bead_store::AttemptResolution {
             bead_id: bead.id.clone(),
@@ -1870,13 +1920,50 @@ impl OutcomeHandler {
             reason: ledger.terminal_reason.clone(),
             evidence_ref: ledger.commits.first().map(|sha| format!("commit:{sha}")),
         };
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            store.resolve_attempt(&resolution),
-        )
-        .await
-        {
-            Ok(Ok(Some(receipt))) => tracing::info!(
+        let active_handle = self
+            .active_claim_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let result = if let Some(handle) = active_handle {
+            let handle = handle.lock().await.clone();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                store.resolve_attempt_claim(&handle, &resolution),
+            )
+            .await
+            {
+                Ok(Ok((crate::bead_store::ClaimMutationResult::Applied, receipt))) => Ok(receipt),
+                Ok(Ok((crate::bead_store::ClaimMutationResult::LostOwnership, _))) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "claim-owned attempt resolution rejected: ownership was lost"
+                    );
+                    return true;
+                }
+                Ok(Ok((crate::bead_store::ClaimMutationResult::Unsupported, _))) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "claim-owned attempt resolution is unsupported; no unguarded fallback"
+                    );
+                    return true;
+                }
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(anyhow::anyhow!("backend attempt resolution timed out")),
+            }
+        } else {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                store.resolve_attempt(&resolution),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("backend attempt resolution timed out")),
+            }
+        };
+        match result {
+            Ok(Some(receipt)) => tracing::info!(
                 bead_id = %bead.id,
                 attempt_id = %resolution.attempt_id,
                 outcome = %resolution.outcome,
@@ -1885,21 +1972,51 @@ impl OutcomeHandler {
                 is_replay = receipt.is_replay,
                 "attempt outcome recorded in the bead backend"
             ),
-            Ok(Ok(None)) => tracing::debug!(
+            Ok(None) => tracing::debug!(
                 bead_id = %bead.id,
                 "backend does not advertise attempt outcomes; NEEDLE ledger row is the record"
             ),
-            Ok(Err(e)) => tracing::warn!(
+            Err(e) => tracing::warn!(
                 bead_id = %bead.id,
                 attempt_id = %resolution.attempt_id,
                 error = %e,
                 "backend refused the attempt resolution; NEEDLE ledger row is the record"
             ),
-            Err(_) => tracing::warn!(
-                bead_id = %bead.id,
-                "backend attempt resolution timed out; NEEDLE ledger row is the record"
-            ),
         }
+        false
+    }
+
+    /// Close the current bead only with the active claim handle. A protected
+    /// attempt never falls back to the unguarded legacy close command.
+    async fn close_for_attempt(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        reason: &str,
+    ) -> Result<Option<()>> {
+        let active_handle = self
+            .active_claim_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(handle) = active_handle {
+            let handle = handle.lock().await.clone();
+            return match self
+                .timeout_op(|| store.close_claim(&handle, reason), "close")
+                .await?
+            {
+                Some(crate::bead_store::ClaimMutationResult::Applied) => Ok(Some(())),
+                Some(
+                    crate::bead_store::ClaimMutationResult::LostOwnership
+                    | crate::bead_store::ClaimMutationResult::Unsupported,
+                ) => Err(anyhow::anyhow!(
+                    "claim-owned close was rejected or unsupported; no unguarded fallback"
+                )),
+                None => Ok(None),
+            };
+        }
+        self.timeout_op(|| store.close(&bead.id, reason), "close")
+            .await
     }
 
     /// Whether this attempt decomposed its bead instead of delivering it
@@ -2335,6 +2452,7 @@ impl OutcomeHandler {
             claim_revision: provenance.claim_revision,
             assignee: provenance.assignee,
             claim_epoch: provenance.claim_epoch,
+            claim_handle: provenance.claim_handle,
             backend_capabilities: provenance.backend_capabilities,
             worker: self.telemetry.worker_id().to_string(),
             adapter: provenance
@@ -2875,10 +2993,7 @@ impl OutcomeHandler {
                                 duration_ms: 0,
                             });
                             match self
-                                .timeout_op(
-                                    || store.close(&bead.id, SHIPPED_WORK_CLOSE_REASON),
-                                    "close",
-                                )
+                                .close_for_attempt(store, bead, SHIPPED_WORK_CLOSE_REASON)
                                 .await
                             {
                                 Ok(Some(())) => return Ok((BeadAction::Closed, events)),
@@ -5111,7 +5226,7 @@ mod tests {
 
         let bead = test_bead(BeadStatus::InProgress);
         let store = test_store(BeadStatus::Done);
-        handler
+        let _ = handler
             .handle(&store, &bead, &test_output(0), false)
             .await
             .unwrap();

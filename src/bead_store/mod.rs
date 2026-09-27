@@ -32,6 +32,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
+use crate::claim::{ClaimCapabilities, ClaimHandle, ClaimRenewal};
 use crate::process_guard::ProcessGuardSync;
 use crate::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
 use tracing::{debug, warn};
@@ -303,9 +304,10 @@ pub fn open_configured_with_transitions(
             )
         })?;
     verify_backend_identity(&backend, &binary, &workspace)?;
-    let (attempt_outcome_supported, manifest_supported) = if backend == crate::config::Backend::Bead
+    let (attempt_outcome_supported, manifest_supported, claim_capabilities) = if backend
+        == crate::config::Backend::Bead
     {
-        let (runtime_capabilities, attempt_outcome_supported) =
+        let (runtime_capabilities, attempt_outcome_supported, claim_capabilities) =
             verify_bead_rs_capabilities(&binary, &workspace)?;
         let manifest_supported = runtime_capabilities
             .commands
@@ -313,9 +315,18 @@ pub fn open_configured_with_transitions(
             .any(|command| command == "manifest");
         runtime_capabilities
             .ensure_transition_support(&capabilities::enabled_plan_transitions(transitions))?;
-        (attempt_outcome_supported, manifest_supported)
+        if transitions.fenced_claim.enabled && !claim_capabilities.fully_fenced() {
+            bail!(
+                "backend bead-rs does not provide a renewable fenced claim handle with stdin credential transport; refusing protected execution"
+            );
+        }
+        (
+            attempt_outcome_supported,
+            manifest_supported,
+            claim_capabilities,
+        )
     } else {
-        (false, false)
+        (false, false, ClaimCapabilities::default())
     };
 
     match backend {
@@ -334,7 +345,8 @@ pub fn open_configured_with_transitions(
                     harness_version,
                 )?
                 .with_attempt_outcome_support(attempt_outcome_supported)
-                .with_manifest_support(manifest_supported),
+                .with_manifest_support(manifest_supported)
+                .with_claim_capabilities(claim_capabilities),
             ))
         }
     }
@@ -532,7 +544,11 @@ fn derive_expected_backend_from_filename(binary: &Path) -> String {
 fn verify_bead_rs_capabilities(
     binary: &Path,
     workspace: &Path,
-) -> Result<(capabilities::BeadRuntimeCapabilities, bool)> {
+) -> Result<(
+    capabilities::BeadRuntimeCapabilities,
+    bool,
+    ClaimCapabilities,
+)> {
     // Derive expected backend from binary filename BEFORE probing capabilities
     let expected_backend = derive_expected_backend_from_filename(binary);
 
@@ -692,7 +708,20 @@ fn verify_bead_rs_capabilities(
     let attempt_outcome_supported = capabilities["attempt_outcome"]["supported"]
         .as_bool()
         .unwrap_or(false);
-    Ok((runtime_capabilities, attempt_outcome_supported))
+    let handle = &capabilities["claim_handle"];
+    let claim_capabilities = ClaimCapabilities {
+        fenced_claim: runtime_capabilities
+            .advertises(capabilities::TransitionCapability::ClaimFencing)
+            && handle["fenced_claim"].as_bool() == Some(true),
+        renewable_lease: handle["renewable_lease"].as_bool() == Some(true),
+        guarded_mutations: handle["guarded_mutations"].as_bool() == Some(true),
+        credential_stdin: handle["credential_transport"].as_str() == Some("stdin"),
+    };
+    Ok((
+        runtime_capabilities,
+        attempt_outcome_supported,
+        claim_capabilities,
+    ))
 }
 
 /// Load a target workspace's configuration and open only its explicitly bound
@@ -1379,7 +1408,6 @@ pub struct SyncRecoveryError {
 
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
-/// Filters applied when listing ready beads.
 /// One attempt's outcome as handed to the backend's attempt ledger
 /// (`bead resolve --action none`, attempt-outcome-v1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1399,6 +1427,26 @@ pub struct AttemptResolution {
     pub evidence_ref: Option<String>,
 }
 
+/// A claim result paired with the handle returned by the same claim request.
+/// Legacy stores return an explicitly unprotected handle; they never mint one
+/// from a subsequent query as if it were a fencing credential.
+#[derive(Debug)]
+pub struct ClaimAttemptResult {
+    pub result: ClaimResult,
+    pub handle: Option<ClaimHandle>,
+}
+
+/// Outcome of a claimant-owned conditional mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimMutationResult {
+    /// The operation committed under the supplied retained handle.
+    Applied,
+    /// The supplied handle no longer owns this claim.
+    LostOwnership,
+    /// This store does not implement the requested guarded operation.
+    Unsupported,
+}
+
 /// What the backend answered a resolution with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveReceipt {
@@ -1412,6 +1460,7 @@ pub struct ResolveReceipt {
     pub is_replay: bool,
 }
 
+/// Filters applied when listing ready beads.
 #[derive(Debug, Clone, Default)]
 pub struct Filters {
     /// Only return beads assigned to this actor. `None` = no filter.
@@ -1662,6 +1711,38 @@ pub trait BeadStore: Send + Sync {
     /// - `NotClaimable { reason }` — bead not in a claimable state.
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult>;
 
+    /// Claim one selected bead and return the ownership handle produced by
+    /// that same operation. `lease_ttl_secs` is a request, not an assertion:
+    /// the returned handle reports whether fencing and renewal were actually
+    /// negotiated. Older stores retain compatibility by returning an
+    /// explicitly unprotected handle.
+    async fn claim_with_lease(
+        &self,
+        id: &BeadId,
+        actor: &str,
+        target_workspace_identity: &str,
+        _lease_ttl_secs: u64,
+    ) -> Result<ClaimAttemptResult> {
+        let result = self.claim(id, actor).await?;
+        let handle = if matches!(result, ClaimResult::Claimed(_)) {
+            let status = self.claim_status(id).await?;
+            (status.status == BeadStatus::InProgress && status.assignee.as_deref() == Some(actor))
+                .then(|| {
+                    ClaimHandle::unprotected(
+                        id.clone(),
+                        target_workspace_identity.to_string(),
+                        actor.to_string(),
+                        status.revision,
+                        status.claim_epoch,
+                        ClaimCapabilities::default(),
+                    )
+                })
+        } else {
+            None
+        };
+        Ok(ClaimAttemptResult { result, handle })
+    }
+
     /// Atomically find and claim the next available bead (server-selected).
     ///
     /// This is the preferred method for multi-worker scenarios as it eliminates
@@ -1673,6 +1754,75 @@ pub trait BeadStore: Send + Sync {
     /// - `Claimed(bead)` — success, returns the full bead.
     /// - `NotClaimable { reason }` — no beads available to claim.
     async fn claim_auto(&self, actor: &str) -> Result<ClaimResult>;
+
+    /// Renew a protected claim with compare-and-swap against the exact
+    /// retained credential. Backends must not look up and adopt a current
+    /// owner's newer token when this operation is unsupported.
+    async fn renew_claim(
+        &self,
+        _handle: &ClaimHandle,
+        _lease_ttl_secs: u64,
+    ) -> Result<ClaimRenewal> {
+        Ok(ClaimRenewal::Unsupported)
+    }
+
+    /// Release under the provided handle. Legacy stores can run an explicitly
+    /// unprotected compatibility operation; a protected handle is never
+    /// downgraded to an unguarded release by this default.
+    async fn release_claim(&self, handle: &ClaimHandle) -> Result<ClaimMutationResult> {
+        if handle.is_protected() {
+            return Ok(ClaimMutationResult::Unsupported);
+        }
+        self.release(&handle.bead_id).await?;
+        Ok(ClaimMutationResult::Applied)
+    }
+
+    /// Close under the provided handle. Protected callers must use a backend
+    /// implementation that sends the exact credential as a guarded mutation.
+    async fn close_claim(&self, handle: &ClaimHandle, reason: &str) -> Result<ClaimMutationResult> {
+        if handle.is_protected() {
+            return Ok(ClaimMutationResult::Unsupported);
+        }
+        self.close(&handle.bead_id, reason).await?;
+        Ok(ClaimMutationResult::Applied)
+    }
+
+    /// Apply one backend-supported claim-owned update under the retained
+    /// handle. `fields` is the typed backend update payload, excluding the
+    /// credential itself.
+    async fn update_claim(
+        &self,
+        _handle: &ClaimHandle,
+        _fields: &serde_json::Value,
+    ) -> Result<ClaimMutationResult> {
+        Ok(ClaimMutationResult::Unsupported)
+    }
+
+    /// Apply an attempt resolution under the claim handle. A lost-ownership
+    /// result is terminal and must never trigger an unguarded retry.
+    async fn resolve_attempt_claim(
+        &self,
+        handle: &ClaimHandle,
+        resolution: &AttemptResolution,
+    ) -> Result<(ClaimMutationResult, Option<ResolveReceipt>)> {
+        if handle.is_protected() {
+            return Ok((ClaimMutationResult::Unsupported, None));
+        }
+        Ok((
+            ClaimMutationResult::Applied,
+            self.resolve_attempt(resolution).await?,
+        ))
+    }
+
+    /// Perform a resource lock change on behalf of the exact claim.
+    async fn resource_lock_claim(
+        &self,
+        _handle: &ClaimHandle,
+        _resource_key: &str,
+        _acquire: bool,
+    ) -> Result<ClaimMutationResult> {
+        Ok(ClaimMutationResult::Unsupported)
+    }
 
     /// Release a claimed bead back to open (e.g., after agent failure).
     async fn release(&self, id: &BeadId) -> Result<()>;

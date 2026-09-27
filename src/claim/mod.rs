@@ -288,6 +288,246 @@ impl ResolvedStoreContext {
     pub fn workspace(&self) -> &Path {
         &self.workspace
     }
+
+    /// Stable, non-path identifier used to bind a claim handle to this target
+    /// store without copying unrelated filesystem state into telemetry.
+    pub fn workspace_identity(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical =
+            std::fs::canonicalize(&self.workspace).unwrap_or_else(|_| self.workspace.clone());
+        let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+        format!("sha256:{digest:x}")
+    }
+}
+
+/// The secret fencing credential returned by a backend claim.
+///
+/// Its debug representation is always redacted. Do not add `Serialize` or a
+/// `Display` implementation: durable telemetry and prompts use
+/// [`ClaimHandleMetadata`] instead.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FencingCredential(String);
+
+impl FencingCredential {
+    /// Construct a credential from a claim or renewal response.
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the exact opaque credential for one guarded backend request.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for FencingCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FencingCredential(<redacted>)")
+    }
+}
+
+/// Negotiated claim protections for one target backend.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ClaimCapabilities {
+    /// The backend atomically issues fencing credentials with claims.
+    pub fenced_claim: bool,
+    /// The backend supports compare-and-swap lease renewal.
+    pub renewable_lease: bool,
+    /// Claim-owned writes reject stale fencing credentials.
+    pub guarded_mutations: bool,
+    /// Credentials can be sent to the backend without appearing in argv.
+    pub credential_stdin: bool,
+}
+
+impl ClaimCapabilities {
+    /// Whether the backend can safely keep this attempt protected for its
+    /// full lifetime, including non-argv credential transport.
+    pub fn fully_fenced(&self) -> bool {
+        self.fenced_claim && self.renewable_lease && self.guarded_mutations && self.credential_stdin
+    }
+}
+
+/// Safe, non-secret identity of one worker's claim, held from claim to outcome.
+///
+/// `starting_revision` never changes. `current_revision`, credential, and
+/// expiry change together only after the backend confirms a renewal using the
+/// previous credential as its compare-and-swap value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClaimHandle {
+    pub bead_id: BeadId,
+    pub target_workspace_identity: String,
+    pub assignee: String,
+    pub starting_revision: Option<u64>,
+    pub current_revision: Option<u64>,
+    pub claim_epoch: Option<u64>,
+    fencing_credential: Option<FencingCredential>,
+    pub lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub capabilities: ClaimCapabilities,
+}
+
+impl std::fmt::Debug for ClaimHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaimHandle")
+            .field("bead_id", &self.bead_id)
+            .field("target_workspace_identity", &self.target_workspace_identity)
+            .field("assignee", &self.assignee)
+            .field("starting_revision", &self.starting_revision)
+            .field("current_revision", &self.current_revision)
+            .field("claim_epoch", &self.claim_epoch)
+            .field("fencing_credential", &self.fencing_credential)
+            .field("lease_expires_at", &self.lease_expires_at)
+            .field("capabilities", &self.capabilities)
+            .finish()
+    }
+}
+
+impl ClaimHandle {
+    /// Create an explicitly unprotected legacy handle. The absence of fencing
+    /// is represented in capabilities and is never inferred from a later read.
+    pub fn unprotected(
+        bead_id: BeadId,
+        target_workspace_identity: String,
+        assignee: String,
+        revision: Option<u64>,
+        claim_epoch: Option<u64>,
+        capabilities: ClaimCapabilities,
+    ) -> Self {
+        Self {
+            bead_id,
+            target_workspace_identity,
+            assignee,
+            starting_revision: revision,
+            current_revision: revision,
+            claim_epoch,
+            fencing_credential: None,
+            lease_expires_at: None,
+            capabilities,
+        }
+    }
+
+    /// Construct a protected handle from the backend's successful claim
+    /// response, never from a later query for the current owner's token.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fenced(
+        bead_id: BeadId,
+        target_workspace_identity: String,
+        assignee: String,
+        revision: Option<u64>,
+        claim_epoch: Option<u64>,
+        fencing_credential: String,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+        capabilities: ClaimCapabilities,
+    ) -> Self {
+        Self {
+            bead_id,
+            target_workspace_identity,
+            assignee,
+            starting_revision: revision,
+            current_revision: revision,
+            claim_epoch,
+            fencing_credential: Some(FencingCredential::new(fencing_credential)),
+            lease_expires_at: Some(lease_expires_at),
+            capabilities,
+        }
+    }
+
+    /// Whether this handle is a negotiated, renewable fenced claim.
+    pub fn is_protected(&self) -> bool {
+        self.capabilities.fenced_claim
+            && self.capabilities.renewable_lease
+            && self.capabilities.guarded_mutations
+            && self.capabilities.credential_stdin
+            && self.fencing_credential.is_some()
+            && self.lease_expires_at.is_some()
+    }
+
+    /// The exact current credential for one guarded store operation.
+    pub(crate) fn fencing_credential(&self) -> Option<&FencingCredential> {
+        self.fencing_credential.as_ref()
+    }
+
+    /// Immutable, redacted fields suitable for prompt context, telemetry,
+    /// trace metadata, and attempt resolution.
+    pub fn metadata(&self) -> ClaimHandleMetadata {
+        ClaimHandleMetadata {
+            bead_id: self.bead_id.clone(),
+            target_workspace_identity: self.target_workspace_identity.clone(),
+            assignee: self.assignee.clone(),
+            starting_revision: self.starting_revision,
+            current_revision: self.current_revision,
+            claim_epoch: self.claim_epoch,
+            lease_expires_at: self.lease_expires_at,
+            capabilities: self.capabilities.clone(),
+            protected: self.is_protected(),
+        }
+    }
+
+    /// Identity fields shared with the pre-existing dispatch verifier.
+    pub fn claim_identity(&self) -> ClaimIdentity {
+        ClaimIdentity {
+            actor: self.assignee.clone(),
+            revision: self.current_revision,
+            claim_epoch: self.claim_epoch,
+        }
+    }
+
+    /// Compare the whole retained ownership identity before accepting a
+    /// renewed handle. The starting revision and backend identity cannot move.
+    pub fn accepts_renewal(&self, previous: &Self, expected_credential: &str) -> bool {
+        self.bead_id == previous.bead_id
+            && self.target_workspace_identity == previous.target_workspace_identity
+            && self.assignee == previous.assignee
+            && self.starting_revision == previous.starting_revision
+            && previous
+                .fencing_credential()
+                .is_some_and(|credential| credential.expose() == expected_credential)
+            && self.is_protected()
+    }
+
+    /// Build the next handle from a backend renewal receipt that was accepted
+    /// against this exact current credential.
+    pub(crate) fn renewed(
+        &self,
+        current_revision: u64,
+        claim_epoch: Option<u64>,
+        fencing_credential: String,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let mut renewed = self.clone();
+        renewed.current_revision = Some(current_revision);
+        if let Some(claim_epoch) = claim_epoch {
+            renewed.claim_epoch = Some(claim_epoch);
+        }
+        renewed.fencing_credential = Some(FencingCredential::new(fencing_credential));
+        renewed.lease_expires_at = Some(lease_expires_at);
+        renewed
+    }
+}
+
+/// Serializable, credential-free view of a [`ClaimHandle`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClaimHandleMetadata {
+    pub bead_id: BeadId,
+    pub target_workspace_identity: String,
+    pub assignee: String,
+    pub starting_revision: Option<u64>,
+    pub current_revision: Option<u64>,
+    pub claim_epoch: Option<u64>,
+    pub lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub capabilities: ClaimCapabilities,
+    pub protected: bool,
+}
+
+/// Result of compare-and-swap lease renewal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimRenewal {
+    /// Backend atomically renewed the exact previous handle.
+    Renewed(ClaimHandle),
+    /// Backend rejected renewal because ownership or the lease was lost.
+    LostOwnership,
+    /// Backend does not implement fenced lease renewal.
+    Unsupported,
 }
 
 /// The full claim identity captured when a claim landed, and the expected
@@ -397,6 +637,11 @@ pub struct Claimer {
     claim_errors: Arc<std::sync::Mutex<HashMap<BeadId, u32>>>,
     /// Track total claim events emitted per bead ID for circuit-breaking.
     claim_events: Arc<std::sync::Mutex<HashMap<BeadId, u32>>>,
+    /// Optional leased-claim request used by the worker's Pluck path.
+    claim_lease: std::sync::Mutex<Option<(u64, String)>>,
+    /// Handle returned by the exact successful claim call, consumed by the
+    /// worker before it starts dispatch.
+    last_claim_handle: std::sync::Mutex<Option<ClaimHandle>>,
 }
 
 impl Claimer {
@@ -423,7 +668,42 @@ impl Claimer {
             circuit: None,
             claim_errors: Arc::new(std::sync::Mutex::new(HashMap::new())),
             claim_events: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            claim_lease: std::sync::Mutex::new(None),
+            last_claim_handle: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Request a leased claim when the target backend negotiates fencing.
+    /// Older backends return an explicitly unprotected handle; they are never
+    /// described as protected execution.
+    pub fn set_claim_lease(&self, ttl_secs: u64, workspace_identity: String) {
+        *self
+            .claim_lease
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((ttl_secs, workspace_identity));
+    }
+
+    /// Take the exact handle returned by the most recent successful claim.
+    pub fn take_claim_handle(&self) -> Option<ClaimHandle> {
+        self.last_claim_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+
+    /// Clear the previous attempt's handle before selecting another bead.
+    pub fn clear_claim_handle(&self) {
+        *self
+            .last_claim_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+    }
+
+    fn requested_claim_lease(&self) -> Option<(u64, String)> {
+        self.claim_lease
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// Attach a claim-time build-status circuit breaker.
@@ -535,6 +815,7 @@ impl Claimer {
         exclusions: &HashSet<BeadId>,
         strand: &str,
     ) -> Result<ClaimOutcome> {
+        self.clear_claim_handle();
         let eligible: Vec<&Bead> = candidates
             .iter()
             .filter(|b| !exclusions.contains(&b.id))
@@ -662,7 +943,23 @@ impl Claimer {
             }
 
             // Attempt claim via store
-            let result = self.store.claim(bead_id, actor).await;
+            let requested_lease = self.requested_claim_lease();
+            let result = if let Some((lease_ttl_secs, workspace_identity)) = requested_lease {
+                self.store
+                    .claim_with_lease(bead_id, actor, &workspace_identity, lease_ttl_secs)
+                    .await
+                    .map(|attempt| {
+                        if matches!(attempt.result, ClaimResult::Claimed(_)) {
+                            *self
+                                .last_claim_handle
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner()) = attempt.handle;
+                        }
+                        attempt.result
+                    })
+            } else {
+                self.store.claim(bead_id, actor).await
+            };
             drop(lock_file);
 
             match result {
@@ -3415,5 +3712,44 @@ mod tests {
             matches!(result, ClaimResult::NotClaimable { .. }),
             "a bead whose workspace is the gated workspace is gated, got {result:?}"
         );
+    }
+
+    #[test]
+    fn claim_handle_renewal_rotates_only_after_matching_the_retained_credential() {
+        let capabilities = ClaimCapabilities {
+            fenced_claim: true,
+            renewable_lease: true,
+            guarded_mutations: true,
+            credential_stdin: true,
+        };
+        let now = Utc::now();
+        let initial = ClaimHandle::fenced(
+            BeadId::from("needle-handle-test"),
+            "workspace-sha256".to_string(),
+            "worker-a".to_string(),
+            Some(7),
+            Some(3),
+            "initial-secret-credential".to_string(),
+            now + chrono::Duration::seconds(60),
+            capabilities,
+        );
+        let renewed = initial.renewed(
+            8,
+            Some(3),
+            "rotated-secret-credential".to_string(),
+            now + chrono::Duration::seconds(180),
+        );
+
+        assert!(renewed.accepts_renewal(&initial, "initial-secret-credential"));
+        assert!(!renewed.accepts_renewal(&initial, "another-workers-credential"));
+        assert_eq!(renewed.starting_revision, Some(7));
+        assert_eq!(renewed.current_revision, Some(8));
+
+        let debug = format!("{renewed:?}");
+        let metadata = serde_json::to_string(&renewed.metadata()).unwrap();
+        for secret in ["initial-secret-credential", "rotated-secret-credential"] {
+            assert!(!debug.contains(secret));
+            assert!(!metadata.contains(secret));
+        }
     }
 }

@@ -625,6 +625,23 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         "manual_blocked" => &["limit"],
         "claim" => &["id", "actor"],
         "claim_auto" => &["actor", "model", "harness", "harness_version"],
+        "claim_fenced" | "renew_claim_fenced" => &["id", "actor", "lease_ttl"],
+        "release_fenced" => &["id", "if_revision"],
+        "update_fenced" => &["id", "status", "if_revision"],
+        "close_fenced" => &["id", "reason", "if_revision"],
+        "resolve_fenced" => &[
+            "id",
+            "attempt_id",
+            "outcome",
+            "actor",
+            "model",
+            "harness",
+            "harness_version",
+            "resolve_reason",
+            "evidence_ref",
+            "if_revision",
+        ],
+        "resource_lock_fenced" => &["id", "resource_key", "resource_action"],
         "label_add" | "label_remove" => &["id", "label"],
         "create" => &[
             "title",
@@ -872,6 +889,135 @@ fn builtin_bead_rs() -> BeadBackend {
             &["claim", "--assignee", "{actor}", "--json"],
             Some("atomic_subcommand"),
             Some(ParseShape::JsonObject),
+        ),
+    );
+    // Renewable fenced claims are negotiated as a separate capability. The
+    // credentials travel over stdin using the bead-rs contract, never as an
+    // argv placeholder. Older binaries do not advertise this operation and
+    // NEEDLE uses the visible legacy policy instead.
+    operations.insert(
+        "claim_fenced".into(),
+        operation(
+            &[
+                "claim",
+                "{id}",
+                "--assignee",
+                "{actor}",
+                "--lease-ttl",
+                "{lease_ttl}",
+                "--json",
+            ],
+            None,
+            Some(ParseShape::JsonObject),
+        ),
+    );
+    operations.insert(
+        "renew_claim_fenced".into(),
+        operation(
+            &[
+                "claim",
+                "{id}",
+                "--assignee",
+                "{actor}",
+                "--renew-lease",
+                "--lease-ttl",
+                "{lease_ttl}",
+                "--fencing-token-stdin",
+                "--json",
+            ],
+            None,
+            Some(ParseShape::JsonObject),
+        ),
+    );
+    operations.insert(
+        "release_fenced".into(),
+        operation(
+            &[
+                "release",
+                "{id}",
+                "--if-revision",
+                "{if_revision}",
+                "--fencing-token-stdin",
+            ],
+            None,
+            None,
+        ),
+    );
+    operations.insert(
+        "update_fenced".into(),
+        operation(
+            &[
+                "update",
+                "{id}",
+                "--status",
+                "{status}",
+                "--if-revision",
+                "{if_revision}",
+                "--fencing-token-stdin",
+            ],
+            None,
+            None,
+        ),
+    );
+    operations.insert(
+        "close_fenced".into(),
+        operation(
+            &[
+                "close",
+                "{id}",
+                "--reason",
+                "{reason}",
+                "--if-revision",
+                "{if_revision}",
+                "--fencing-token-stdin",
+            ],
+            None,
+            None,
+        ),
+    );
+    operations.insert(
+        "resolve_fenced".into(),
+        operation(
+            &[
+                "resolve",
+                "{id}",
+                "--attempt-id",
+                "{attempt_id}",
+                "--outcome",
+                "{outcome}",
+                "--action",
+                "none",
+                "--actor",
+                "{actor}",
+                "--reason",
+                "{resolve_reason}",
+                "--evidence-ref",
+                "{evidence_ref}",
+                "--if-revision",
+                "{if_revision}",
+                "--fencing-token-stdin",
+                "--format",
+                "json",
+            ],
+            None,
+            Some(ParseShape::JsonObject),
+        ),
+    );
+    operations.insert(
+        "resource_lock_fenced".into(),
+        operation(
+            &[
+                "resource",
+                "lock",
+                "{id}",
+                "--key",
+                "{resource_key}",
+                "--action",
+                "{resource_action}",
+                "--fencing-token-stdin",
+            ],
+            None,
+            None,
         ),
     );
     operations.insert(

@@ -183,6 +183,8 @@ pub struct AttemptResolvedFields {
     /// Assignee/fencing identity captured at claim time.
     pub assignee: Option<String>,
     pub claim_epoch: Option<u64>,
+    /// Credential-free claim handle snapshot at attempt resolution.
+    pub claim_handle: Option<crate::claim::ClaimHandleMetadata>,
     /// Negotiated backend capability snapshot used by the attempt.
     pub backend_capabilities: Option<serde_json::Value>,
     pub worker: String,
@@ -4276,6 +4278,7 @@ impl EventKind {
                     claim_revision,
                     assignee,
                     claim_epoch,
+                    claim_handle,
                     backend_capabilities,
                     worker,
                     adapter,
@@ -4338,6 +4341,9 @@ impl EventKind {
                 }
                 if let Some(epoch) = claim_epoch {
                     data["claim_epoch"] = serde_json::json!(epoch);
+                }
+                if let Some(handle) = claim_handle {
+                    data["claim_handle"] = serde_json::json!(handle);
                 }
                 if let Some(capabilities) = backend_capabilities {
                     data["backend_capabilities"] = capabilities.clone();
@@ -7711,6 +7717,7 @@ mod tests {
             claim_revision: Some(17),
             assignee: Some("needle-test".to_string()),
             claim_epoch: Some(3),
+            claim_handle: None,
             backend_capabilities: Some(serde_json::json!({"atomic_claim": true})),
             worker: "needle-test".to_string(),
             adapter: "claude-code-glm-5.3-flash".to_string(),

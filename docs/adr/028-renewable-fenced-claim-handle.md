@@ -95,6 +95,31 @@ authority.
 
 ## Implementation and verification
 
+### NEEDLE capability contract
+
+The native-v1 capability document must advertise both
+`transitions.claim_fencing: true` and a `claim_handle` object with
+`fenced_claim`, `renewable_lease`, and `guarded_mutations` set to `true`, plus
+`credential_transport: "stdin"`. NEEDLE reports `protected_execution: true`
+only when all four facts are present. An enabled
+`transitions.fenced_claim` setting fails backend startup when any fact is
+missing. When the transition is disabled, older backends continue in a
+visibly unprotected compatibility mode; their handles have no credential or
+lease and are never labelled protected.
+
+Fenced claim responses carry the bead ID, assignee, revision, claim epoch,
+fencing credential, and lease expiry in the same successful mutation response.
+Renewal takes the retained credential as a compare-and-swap input and returns
+the replacement credential and expiry. Mutating commands that require the
+credential declare `--fencing-token-stdin` and read one newline-terminated
+opaque value from stdin. Credentials must not appear in argv, environment
+diagnostics, prompts, trace metadata, or telemetry. Trace and attempt records
+carry only the credential-free `ClaimHandleMetadata` view.
+
+If a renewal or guarded operation reports a conflict, NEEDLE marks the attempt
+`stale_ownership`, terminates any active child, and performs no fallback
+release, close, or resolution against the bead.
+
 1. bead-rs `beadrs-8c343a7c` makes each claim epoch fenced and requires its
    credential on claimant mutations.
 2. NEEDLE `needle-cd169aa6` introduces the renewable `ClaimHandle` and carries

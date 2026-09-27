@@ -62,6 +62,23 @@
       "minimum": 0,
       "description": "Backend lease/fencing epoch captured with the claim."
     },
+    "claim_handle": {
+      "type": "object",
+      "description": "Credential-free claim identity and negotiated lease facts at attempt resolution.",
+      "required": ["bead_id", "target_workspace_identity", "assignee", "protected"],
+      "properties": {
+        "bead_id": { "type": "string" },
+        "target_workspace_identity": { "type": "string" },
+        "assignee": { "type": "string" },
+        "starting_revision": { "type": ["integer", "null"] },
+        "current_revision": { "type": ["integer", "null"] },
+        "claim_epoch": { "type": ["integer", "null"] },
+        "lease_expires_at": { "type": ["string", "null"], "format": "date-time" },
+        "capabilities": { "type": "object" },
+        "protected": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
     "backend_capabilities": {
       "type": "object",
       "description": "Negotiated backend capability snapshot used by the attempt."

@@ -35,7 +35,7 @@ use crate::bead_store::{operation_failed_with, BeadStore, RecoveryReleaseOutcome
 use crate::build_status::BuildStatusChecker;
 use crate::canary::CanaryRunner;
 use crate::ci::{self, RegistrationResult};
-use crate::claim::{CircuitGate, ClaimIdentity, Claimer, ResolvedStoreContext};
+use crate::claim::{CircuitGate, ClaimHandle, ClaimIdentity, Claimer, ResolvedStoreContext};
 use crate::clock::{Clock, TokioClock};
 use crate::commit_hook;
 use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
@@ -66,6 +66,36 @@ use crate::validation::worker_config::{validate_idle_action_config, WorkerConfig
 // ──────────────────────────────────────────────────────────────────────────────
 // Helper functions
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Lease duration requested for Pluck attempts on fencing-capable backends.
+/// Renewal is scheduled with substantial headroom before this expiry.
+const PLUCK_CLAIM_LEASE_TTL_SECS: u64 = 120;
+
+/// Atomically replace the retained claim only if the response was derived
+/// from the exact handle the renewal began with. A delayed/stale renewal can
+/// therefore never overwrite a newer accepted handle.
+async fn accept_claim_renewal(
+    retained: &Arc<tokio::sync::Mutex<ClaimHandle>>,
+    expected: &ClaimHandle,
+    renewed: ClaimHandle,
+) -> bool {
+    let Some(expected_credential) = expected
+        .fencing_credential()
+        .map(|credential| credential.expose().to_string())
+    else {
+        return false;
+    };
+    if !renewed.accepts_renewal(expected, &expected_credential) {
+        return false;
+    }
+    let mut current = retained.lock().await;
+    if *current == *expected {
+        *current = renewed;
+        true
+    } else {
+        false
+    }
+}
 
 /// Safely truncate a string to at most N characters for display.
 ///
@@ -790,6 +820,8 @@ enum ClaimRelease {
     /// The claim had already left `in_progress` (a bead-rs conflict): there was
     /// nothing to release, and the state that replaced it is preserved.
     AlreadyLeft,
+    /// A guarded operation rejected or could not confirm the retained handle.
+    Superseded,
 }
 
 /// The NEEDLE worker — owns and drives the full state machine.
@@ -819,6 +851,15 @@ pub struct Worker {
     /// Dispatch must compare the live store with this claim-time snapshot;
     /// reconstructing it later would miss a release/re-claim by the same actor.
     claim_identity: Option<ClaimIdentity>,
+    /// Full claim-time handle shared with dispatch and retained until outcome.
+    /// The handle changes only after a successful CAS renewal.
+    claim_handle: Option<Arc<tokio::sync::Mutex<ClaimHandle>>>,
+    /// Renewal runs from a successful protected claim through terminal
+    /// resolution. Loss cancels dispatch and forbids success attribution.
+    claim_ownership_lost: Arc<AtomicBool>,
+    claim_renewal_cancel: Option<tokio::sync::watch::Sender<bool>>,
+    claim_renewal_task: Option<tokio::task::JoinHandle<()>>,
+    claim_superseded: bool,
     /// The one identity minted before the claim mutation for this cycle.
     attempt_id: Option<String>,
     /// Claim and execution provenance carried into the terminal ledger row.
@@ -1395,6 +1436,11 @@ impl Worker {
             store,
             target_store: None,
             claim_identity: None,
+            claim_handle: None,
+            claim_ownership_lost: Arc::new(AtomicBool::new(false)),
+            claim_renewal_cancel: None,
+            claim_renewal_task: None,
+            claim_superseded: false,
             attempt_id: None,
             attempt_provenance: AttemptProvenance::default(),
             telemetry,
@@ -1809,9 +1855,11 @@ impl Worker {
                 if let Some(ref bead) = self.current_bead {
                     let bead_id = bead.id.clone();
                     tracing::warn!(bead_id = %bead_id, "best-effort bead release due to watchdog timeout");
-                    let _ =
-                        tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead_id))
-                            .await;
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(30),
+                        self.release_terminal_claim(&bead_id),
+                    )
+                    .await;
                 }
                 // Clear the watchdog trigger and force transition to LOGGING.
                 self.watchdog_triggered.store(false, Ordering::Release);
@@ -1848,13 +1896,18 @@ impl Worker {
                 }
                 WorkerState::Handling => {
                     let action = self.do_handle().instrument(lifecycle_span.clone()).await;
+                    let superseded = action == BeadAction::Superseded;
                     // Always perform the post-dispatch audit, even when the
                     // ordinary action failed to apply. A failed release is
                     // precisely one way a completed Pluck can leave its
                     // claim behind, and Resolve must get a chance to recover
                     // it before this cycle can reach LOGGING/SELECTING.
                     let action_result = self.apply_bead_action(action).await;
-                    let resolution_result = self.run_post_dispatch_resolution().await;
+                    let resolution_result = if superseded {
+                        Ok(())
+                    } else {
+                        self.run_post_dispatch_resolution().await
+                    };
                     action_result?;
                     resolution_result?;
                 }
@@ -2922,10 +2975,20 @@ impl Worker {
 
     /// Restore the home workspace store if it was swapped for a remote bead.
     fn restore_home_store(&mut self) {
+        if let Some(cancel) = self.claim_renewal_cancel.take() {
+            let _ = cancel.send(true);
+        }
+        if let Some(task) = self.claim_renewal_task.take() {
+            task.abort();
+        }
         // The resolved store context belongs to the cycle being torn down;
         // the next selection captures a fresh one.
         self.target_store = None;
         self.claim_identity = None;
+        self.claim_handle = None;
+        self.outcome_handler.set_claim_handle(None);
+        self.claim_superseded = false;
+        self.claim_ownership_lost = Arc::new(AtomicBool::new(false));
         if !Arc::ptr_eq(&self.store, &self.home_store) {
             tracing::debug!("restoring home workspace store");
             self.store = self.home_store.clone();
@@ -2954,6 +3017,114 @@ impl Worker {
             {
                 tracing::warn!(error = %e, "failed to update registry workspace");
             }
+        }
+    }
+
+    /// Start periodic compare-and-swap renewal for a protected claim. Renewal
+    /// is scheduled 30 seconds before expiry and updates the shared handle in
+    /// one lock operation only after the backend confirms the previous token.
+    async fn start_claim_renewal(
+        &mut self,
+        target: &ResolvedStoreContext,
+        handle: Arc<tokio::sync::Mutex<ClaimHandle>>,
+    ) {
+        let (protected, bead_id) = {
+            let retained = handle.lock().await;
+            (retained.is_protected(), retained.bead_id.clone())
+        };
+        if !protected {
+            tracing::warn!(
+                bead_id = %bead_id,
+                protected_execution = false,
+                "backend lacks negotiated renewable fencing; attempt is unprotected"
+            );
+            return;
+        }
+        if let Some(cancel) = self.claim_renewal_cancel.take() {
+            let _ = cancel.send(true);
+        }
+        if let Some(task) = self.claim_renewal_task.take() {
+            task.abort();
+        }
+
+        let store = target.store();
+        let target_workspace = target.workspace().display().to_string();
+        let telemetry = self.telemetry.clone();
+        let lost = self.claim_ownership_lost.clone();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            loop {
+                let before = handle.lock().await.clone();
+                let Some(expires) = before.lease_expires_at else {
+                    lost.store(true, Ordering::Release);
+                    break;
+                };
+                let deadline = expires - chrono::Duration::seconds(30);
+                let wait = (deadline - Utc::now()).to_std().unwrap_or(Duration::ZERO);
+                tokio::select! {
+                    changed = cancel_rx.changed() => {
+                        if changed.is_err() || *cancel_rx.borrow() { break; }
+                    }
+                    () = tokio::time::sleep(wait) => {}
+                }
+                if *cancel_rx.borrow() {
+                    break;
+                }
+
+                let expected = handle.lock().await.clone();
+                let result = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    store.renew_claim(&expected, PLUCK_CLAIM_LEASE_TTL_SECS),
+                )
+                .await;
+                let ownership_kept = match result {
+                    Ok(Ok(crate::claim::ClaimRenewal::Renewed(next))) => {
+                        accept_claim_renewal(&handle, &expected, next).await
+                    }
+                    Ok(Ok(crate::claim::ClaimRenewal::LostOwnership))
+                    | Ok(Ok(crate::claim::ClaimRenewal::Unsupported)) => false,
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            bead_id = %expected.bead_id,
+                            error = %crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
+                            "claim lease renewal failed; terminating attempt"
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(bead_id = %expected.bead_id,
+                            "claim lease renewal timed out; terminating attempt");
+                        false
+                    }
+                };
+                if !ownership_kept {
+                    lost.store(true, Ordering::Release);
+                    let _ = telemetry.emit_try_lock(
+                        EventKind::ClaimVerifyError {
+                            bead_id: expected.bead_id.clone(),
+                            expected_actor: expected.assignee.clone(),
+                            stage: "lease_renewal".to_string(),
+                            target_workspace: Some(target_workspace.clone()),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::ClaimMismatch,
+                            detail: "claim ownership was lost or renewal could not be confirmed"
+                                .to_string(),
+                        },
+                        Utc::now(),
+                    );
+                    break;
+                }
+            }
+        });
+        self.claim_renewal_cancel = Some(cancel_tx);
+        self.claim_renewal_task = Some(task);
+    }
+
+    async fn stop_claim_renewal(&mut self) {
+        if let Some(cancel) = self.claim_renewal_cancel.take() {
+            let _ = cancel.send(true);
+        }
+        if let Some(task) = self.claim_renewal_task.take() {
+            let _ = task.await;
         }
     }
 
@@ -3222,6 +3393,14 @@ impl Worker {
         // needle.claim.result there) still resolves to this span.
         claim_span.record("needle.claim.retry_number", 1u32);
 
+        let claim_target = self.target_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("claiming {} without a resolved target store", bead_id)
+        })?;
+        self.claimer.set_claim_lease(
+            PLUCK_CLAIM_LEASE_TTL_SECS,
+            claim_target.workspace_identity(),
+        );
+
         let claim = self
             .claimer
             .claim_one(&bead_id, &self.qualified_id(), &exclusions, Some(strand))
@@ -3230,12 +3409,11 @@ impl Worker {
 
         match claim {
             ClaimResult::Claimed(mut bead) => {
-                // Read the full identity back through the exact store the
-                // claim landed in. This snapshot must be taken now, not just
-                // before dispatch: a release/re-claim by the same actor can
-                // otherwise look indistinguishable from the original claim.
+                // The handle comes from the successful claim operation. A
+                // later status query may observe a replacement worker's epoch
+                // and must never be adopted as this attempt's credential.
                 let target_store = match Self::resolve_target_store(&self.target_store, &bead.id) {
-                    Ok(target_store) => target_store,
+                    Ok(target_store) => target_store.clone(),
                     Err(error) => {
                         let error = error.context(format!(
                             "failed to capture claim identity for bead {}",
@@ -3271,17 +3449,22 @@ impl Worker {
                         return Err(error);
                     }
                 };
-                let identity = match ClaimIdentity::capture(
-                    target_store.store().as_ref(),
-                    &bead.id,
-                    &self.qualified_id(),
-                )
-                .await
-                {
-                    Ok(identity) => identity,
-                    Err(error) => {
+                let claim_handle = match self.claimer.take_claim_handle() {
+                    Some(handle)
+                        if handle.bead_id == bead.id
+                            && handle.assignee == self.qualified_id()
+                            && handle.target_workspace_identity
+                                == target_store.workspace_identity() =>
+                    {
+                        handle
+                    }
+                    Some(_) | None => {
+                        let error = anyhow::anyhow!(
+                            "successful claim for {} did not return its matching claim handle",
+                            bead.id
+                        );
                         let error = error.context(format!(
-                            "failed to capture claim identity for bead {}",
+                            "failed to retain claim handle for bead {}",
                             bead.id
                         ));
                         cleanup_unverifiable_claim_context(
@@ -3313,12 +3496,23 @@ impl Worker {
                         return Err(error);
                     }
                 };
+                let identity = claim_handle.claim_identity();
+                let claim_handle_metadata = claim_handle.metadata();
+                let claim_handle = Arc::new(tokio::sync::Mutex::new(claim_handle));
                 self.attempt_provenance.claim_revision = identity.revision;
                 self.attempt_provenance.claim_epoch = identity.claim_epoch;
                 self.attempt_provenance.backend_capabilities =
                     target_store.store().negotiated_capabilities();
                 self.attempt_provenance.assignee = Some(identity.actor.clone());
+                self.attempt_provenance.claim_handle = Some(claim_handle_metadata);
                 self.claim_identity = Some(identity);
+                self.claim_handle = Some(claim_handle.clone());
+                self.outcome_handler.set_claim_handle(Some(claim_handle));
+                self.claim_ownership_lost.store(false, Ordering::Release);
+                self.claim_superseded = false;
+                if let Some(handle) = self.claim_handle.clone() {
+                    self.start_claim_renewal(&target_store, handle).await;
+                }
 
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
                 self.consecutive_race_lost = 0;
@@ -4461,28 +4655,41 @@ impl Worker {
                     .await;
                     bail!("dispatch context lost attempt identity");
                 };
-                let dispatch_context =
-                    DispatchContext::new((*target_store).clone(), claim_identity.clone())
-                        .with_attempt_id(attempt_id);
+                let dispatch_context = match self.claim_handle.clone() {
+                    Some(handle) => DispatchContext::new_with_claim_handle(
+                        (*target_store).clone(),
+                        claim_identity.clone(),
+                        handle,
+                    ),
+                    None => DispatchContext::new((*target_store).clone(), claim_identity.clone()),
+                }
+                .with_attempt_id(attempt_id);
 
                 self.exec_started_at = Some(self.clock.now());
                 self.agent_process_active = true;
-                let dispatch_result = self
-                    .dispatcher
-                    .dispatch_with_context(
-                        &bead.id,
-                        &prompt,
-                        &adapter,
-                        dispatch_ws,
-                        &dispatch_context,
-                    )
-                    .await;
+                let dispatch_future = self.dispatcher.dispatch_with_context(
+                    &bead.id,
+                    &prompt,
+                    &adapter,
+                    dispatch_ws,
+                    &dispatch_context,
+                );
+                tokio::pin!(dispatch_future);
+                let ownership_lost = self.claim_ownership_lost.clone();
+                let dispatch_result = tokio::select! {
+                    result = &mut dispatch_future => Some(result),
+                    () = async move {
+                        while !ownership_lost.load(Ordering::Acquire) {
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                    } => None,
+                };
                 self.agent_process_active = false;
                 let result = match dispatch_result {
-                    Ok(result) => result,
+                    Some(Ok(result)) => result,
                     // A pre-spawn abort (claim check or attempt-identity
                     // guard) ran no agent and left the claim held.
-                    Err(error) if dispatch::is_pre_spawn_abort(&error) => {
+                    Some(Err(error)) if dispatch::is_pre_spawn_abort(&error) => {
                         cleanup_unverifiable_claim_context(
                             &cleanup_telemetry,
                             &cleanup_fallback_actor,
@@ -4500,7 +4707,21 @@ impl Worker {
                         .await;
                         return Err(error);
                     }
-                    Err(error) => return Err(error),
+                    Some(Err(error)) => return Err(error),
+                    None => {
+                        // Dropping the dispatch future drops its process-group
+                        // guard, terminating the child before outcome handling.
+                        self.claim_superseded = true;
+                        crate::dispatch::ExecutionResult {
+                            exit_code: 125,
+                            stdout: String::new(),
+                            stderr: "claim ownership lost; child terminated".to_string(),
+                            elapsed: Duration::ZERO,
+                            pid: 0,
+                            trace_path: None,
+                            timeout_reason: None,
+                        }
+                    }
                 };
 
                 // Set span status based on exit code: 0 = Ok, non-zero = Error
@@ -4681,6 +4902,12 @@ impl Worker {
                 started_at_wall: exec_result.as_ref().and(self.dispatch_started_at),
                 wip_patch: None,
             });
+        if let Some(handle) = self.claim_handle.as_ref() {
+            self.attempt_provenance.claim_handle = Some(handle.lock().await.metadata());
+            self.outcome_handler
+                .set_attempt_provenance(self.attempt_provenance.clone());
+            self.outcome_handler.set_claim_handle(Some(handle.clone()));
+        }
         self.outcome_handler.set_timeout_reason(
             exec_result
                 .as_ref()
@@ -4788,6 +5015,16 @@ impl Worker {
                 return BeadAction::Errored;
             }
         };
+
+        if self.claim_ownership_lost.load(Ordering::Acquire) {
+            self.outcome_handler
+                .handle_stale_ownership(&bead, &output)
+                .await;
+            self.last_outcome = Some("stale_ownership".to_string());
+            self.exec_started_at = None;
+            self.claim_superseded = true;
+            return BeadAction::Superseded;
+        }
 
         // Emit an initial heartbeat event to signal we've entered HANDLING state.
         // This provides immediate visibility in the JSONL log when handling starts.
@@ -5079,6 +5316,16 @@ impl Worker {
             cancelled.store(true, Ordering::Release);
             heartbeat_task.abort();
             return BeadAction::Errored;
+        }
+
+        // A guarded resolution can discover that this claim was superseded
+        // after the child already exited. Stop all post-handler work (mitosis,
+        // CI registration, and commit attribution) before the state-machine
+        // choke point records the non-attributable disposition.
+        if handler_result.bead_action == BeadAction::Superseded {
+            cancelled.store(true, Ordering::Release);
+            heartbeat_task.abort();
+            return BeadAction::Superseded;
         }
 
         // HOOP Hook 2 (event tap): emit the outcome as a single terminal
@@ -5450,7 +5697,15 @@ impl Worker {
     /// every ordinary release. At this point the agent process has been
     /// awaited, the normal action has run, and only an actually stranded claim
     /// can enter this path.
-    fn claim_belongs_to_dispatch(&self, status: &ClaimStatus) -> bool {
+    async fn claim_belongs_to_dispatch(&self, status: &ClaimStatus) -> bool {
+        if let Some(handle) = self.claim_handle.as_ref() {
+            return handle
+                .lock()
+                .await
+                .claim_identity()
+                .mismatches(status)
+                .is_empty();
+        }
         match &self.claim_identity {
             Some(identity) => identity.mismatches(status).is_empty(),
             None => {
@@ -5535,7 +5790,7 @@ impl Worker {
             }
         };
 
-        if !self.claim_belongs_to_dispatch(&claim_status) {
+        if !self.claim_belongs_to_dispatch(&claim_status).await {
             // The agent or the normal handler already completed the lifecycle,
             // or another worker owns it now. This dispatch must not mutate it.
             let _ = self.telemetry.emit_try_lock(
@@ -5749,7 +6004,7 @@ impl Worker {
                     .await;
             }
         };
-        if self.claim_belongs_to_dispatch(&post_apply_status) {
+        if self.claim_belongs_to_dispatch(&post_apply_status).await {
             return self
                 .record_resolution_failure(
                     &current,
@@ -5865,6 +6120,47 @@ impl Worker {
                 bead.id
             );
         };
+        let store = target_store.store();
+        if let Some(handle) = self.claim_handle.as_ref() {
+            let handle = handle.lock().await.clone();
+            if handle.bead_id != bead.id {
+                emit_cleanup_skipped(
+                    "retained claim handle names a different bead; leaving claim untouched"
+                        .to_string(),
+                );
+                bail!(
+                    "post-dispatch resolution claim handle does not match {}",
+                    bead.id
+                );
+            }
+            return match tokio::time::timeout(Duration::from_secs(30), store.release_claim(&handle))
+                .await
+            {
+                Ok(Ok(crate::bead_store::ClaimMutationResult::Applied)) => {
+                    let _ = self.telemetry.emit_try_lock(
+                        EventKind::BeadReleased {
+                            bead_id: bead.id.clone(),
+                            reason: reason.to_string(),
+                        },
+                        Utc::now(),
+                    );
+                    Ok(())
+                }
+                Ok(Ok(
+                    crate::bead_store::ClaimMutationResult::LostOwnership
+                    | crate::bead_store::ClaimMutationResult::Unsupported,
+                )) => {
+                    emit_cleanup_skipped(
+                        "retained claim was rejected or guarded release is unsupported; no unguarded fallback"
+                            .to_string(),
+                    );
+                    Ok(())
+                }
+                Ok(Err(error)) => Err(error).context("post-dispatch guarded release failed"),
+                Err(_) => bail!("post-dispatch guarded release timed out"),
+            };
+        }
+
         let Some(claim_identity) = self.claim_identity.as_ref() else {
             emit_cleanup_skipped(
                 "held claim identity is unavailable; leaving claim untouched".to_string(),
@@ -5876,7 +6172,6 @@ impl Worker {
         };
 
         let expected = claim_identity.as_claim_status();
-        let store = target_store.store();
         match tokio::time::timeout(
             Duration::from_secs(30),
             store.release_recovery(&bead.id, &expected),
@@ -6275,6 +6570,45 @@ impl Worker {
     /// conflict (the failed-attempt accounting in the `Errored` branch) can
     /// tell a released live claim from a claim that had already gone.
     async fn release_terminal_claim(&self, bead_id: &BeadId) -> Result<ClaimRelease> {
+        if let Some(handle) = self.claim_handle.as_ref() {
+            let handle = handle.lock().await.clone();
+            if handle.is_protected() {
+                if handle.bead_id != *bead_id {
+                    self.claim_ownership_lost.store(true, Ordering::Release);
+                    return Ok(ClaimRelease::Superseded);
+                }
+                let store = self
+                    .target_store
+                    .as_ref()
+                    .map(ResolvedStoreContext::store)
+                    .unwrap_or_else(|| self.store.clone());
+                let result =
+                    tokio::time::timeout(Duration::from_secs(30), store.release_claim(&handle))
+                        .await;
+                return match result {
+                    Ok(Ok(crate::bead_store::ClaimMutationResult::Applied)) => {
+                        Ok(ClaimRelease::Released)
+                    }
+                    Ok(Ok(
+                        crate::bead_store::ClaimMutationResult::LostOwnership
+                        | crate::bead_store::ClaimMutationResult::Unsupported,
+                    ))
+                    | Err(_) => {
+                        self.claim_ownership_lost.store(true, Ordering::Release);
+                        Ok(ClaimRelease::Superseded)
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            bead_id = %bead_id,
+                            error = %crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
+                            "guarded claim release failed; leaving bead state untouched"
+                        );
+                        self.claim_ownership_lost.store(true, Ordering::Release);
+                        Ok(ClaimRelease::Superseded)
+                    }
+                };
+            }
+        }
         match tokio::time::timeout(Duration::from_secs(30), self.store.release(bead_id)).await {
             Ok(Ok(())) => Ok(ClaimRelease::Released),
             Ok(Err(error)) if operation_failed_with(&error, "release", 4) => {
@@ -6288,6 +6622,18 @@ impl Worker {
             Ok(Err(error)) => Err(error),
             Err(_) => bail!("release of {bead_id} timed out"),
         }
+    }
+
+    async fn finish_superseded(&mut self, bead_id: &BeadId) -> Result<()> {
+        self.stop_claim_renewal().await;
+        self.last_cycle_closed = false;
+        self.last_outcome = Some("stale_ownership".to_string());
+        self.claim_superseded = true;
+        tracing::warn!(
+            bead_id = %bead_id,
+            "claim ownership was superseded; leaving the new owner's state untouched"
+        );
+        self.set_state(WorkerState::Logging)
     }
 
     /// Whether the store still shows `bead_id` in progress under this worker's
@@ -6363,6 +6709,10 @@ impl Worker {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("applying bead action without current_bead"))?;
 
+        if action == BeadAction::Superseded || self.claim_ownership_lost.load(Ordering::Acquire) {
+            return self.finish_superseded(&bead.id).await;
+        }
+
         if let Some(reason) = self.store.workspace_pause_reason() {
             tracing::warn!(workspace = %bead.workspace.display(), bead_id = %bead.id,
                 reason = %reason, "preserving bead state while workspace synchronization is paused");
@@ -6395,7 +6745,11 @@ impl Worker {
                                 "agent reported closed but bead is not closed; releasing to enforce postcondition"
                             );
                             // Force release to enforce postcondition
-                            self.release_terminal_claim(&bead.id).await?;
+                            if self.release_terminal_claim(&bead.id).await?
+                                == ClaimRelease::Superseded
+                            {
+                                return self.finish_superseded(&bead.id).await;
+                            }
                         } else {
                             self.last_cycle_closed = true;
                         }
@@ -6422,7 +6776,9 @@ impl Worker {
             }
             BeadAction::Released(release_reason) => {
                 // Release the bead back to open status.
-                self.release_terminal_claim(&bead.id).await?;
+                if self.release_terminal_claim(&bead.id).await? == ClaimRelease::Superseded {
+                    return self.finish_superseded(&bead.id).await;
+                }
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -6441,7 +6797,9 @@ impl Worker {
                 // the ADR-022 expiring form (N-T26); the permanent bare
                 // `deferred` label is operator territory and nothing automatic
                 // may add it.
-                self.release_terminal_claim(&bead.id).await?;
+                if self.release_terminal_claim(&bead.id).await? == ClaimRelease::Superseded {
+                    return self.finish_superseded(&bead.id).await;
+                }
                 self.apply_deferral_hold(&bead).await;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
@@ -6453,7 +6811,9 @@ impl Worker {
             }
             BeadAction::Alerted => {
                 // Release after creating an alert bead.
-                self.release_terminal_claim(&bead.id).await?;
+                if self.release_terminal_claim(&bead.id).await? == ClaimRelease::Superseded {
+                    return self.finish_superseded(&bead.id).await;
+                }
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -6469,7 +6829,9 @@ impl Worker {
                 // `quarantine-until:*` labels.  Release ownership so the bead
                 // becomes eligible automatically after that timestamp; a
                 // permanent manual block would make the expiry meaningless.
-                self.release_terminal_claim(&bead.id).await?;
+                if self.release_terminal_claim(&bead.id).await? == ClaimRelease::Superseded {
+                    return self.finish_superseded(&bead.id).await;
+                }
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
                     self.store.add_label(&bead.id, "cycling"),
@@ -6485,7 +6847,9 @@ impl Worker {
             }
             BeadAction::Interrupted => {
                 // Release due to worker interruption.
-                self.release_terminal_claim(&bead.id).await?;
+                if self.release_terminal_claim(&bead.id).await? == ClaimRelease::Superseded {
+                    return self.finish_superseded(&bead.id).await;
+                }
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -6502,6 +6866,9 @@ impl Worker {
                 let held_live_claim = self.holds_live_claim(&bead.id).await;
                 // Release after handler error.
                 let release = self.release_terminal_claim(&bead.id).await?;
+                if release == ClaimRelease::Superseded {
+                    return self.finish_superseded(&bead.id).await;
+                }
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -6513,6 +6880,7 @@ impl Worker {
                     self.penalize_errored_release(&bead).await;
                 }
             }
+            BeadAction::Superseded => {}
         }
 
         tracing::debug!(
@@ -6529,7 +6897,8 @@ impl Worker {
             | BeadAction::Deferred
             | BeadAction::Alerted
             | BeadAction::Quarantined
-            | BeadAction::Errored => self.set_state(WorkerState::Logging)?,
+            | BeadAction::Errored
+            | BeadAction::Superseded => self.set_state(WorkerState::Logging)?,
         }
 
         Ok(())
@@ -9424,6 +9793,54 @@ mod tests {
     use async_trait::async_trait;
     use std::io::Write;
     use std::sync::Mutex;
+
+    fn protected_handle(token: &str, revision: u64) -> ClaimHandle {
+        ClaimHandle::fenced(
+            BeadId::from("needle-worker-renewal-test"),
+            "workspace-sha256".to_string(),
+            "worker-a".to_string(),
+            Some(7),
+            Some(3),
+            token.to_string(),
+            Utc::now() + chrono::Duration::seconds(120),
+            crate::claim::ClaimCapabilities {
+                fenced_claim: true,
+                renewable_lease: true,
+                guarded_mutations: true,
+                credential_stdin: true,
+            },
+        )
+        .renewed(
+            revision,
+            Some(3),
+            token.to_string(),
+            Utc::now() + chrono::Duration::seconds(120),
+        )
+    }
+
+    #[tokio::test]
+    async fn renewal_replaces_only_the_exact_current_handle() {
+        let initial = protected_handle("claim-epoch-3", 7);
+        let retained = Arc::new(tokio::sync::Mutex::new(initial.clone()));
+        let renewed = initial.renewed(
+            8,
+            Some(3),
+            "rotated-claim-epoch-3".to_string(),
+            Utc::now() + chrono::Duration::seconds(240),
+        );
+
+        assert!(accept_claim_renewal(&retained, &initial, renewed.clone()).await);
+        assert_eq!(*retained.lock().await, renewed);
+
+        let delayed = initial.renewed(
+            9,
+            Some(3),
+            "late-claim-epoch-3".to_string(),
+            Utc::now() + chrono::Duration::seconds(360),
+        );
+        assert!(!accept_claim_renewal(&retained, &initial, delayed).await);
+        assert_eq!(*retained.lock().await, renewed);
+    }
 
     #[test]
     fn handling_watchdog_timeout_scales_with_configured_outcome_timeout() {

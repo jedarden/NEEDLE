@@ -13,13 +13,14 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fmt;
 
+use crate::claim::{ClaimCapabilities, ClaimHandle, ClaimRenewal};
 use crate::process_runner::{ProcessRequest, ProcessRunner, TokioProcessRunner};
 use crate::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
 
 use super::{
     execute_create_id_strategy, execute_labels_strategy, validate_strategy_name, BeadBackend,
-    BeadOperationSpec, BeadStore, ClaimStrategy, Filters, NewChild, ParseShape, ParsedStrategy,
-    RecoveryReleaseOutcome, RepairReport,
+    BeadOperationSpec, BeadStore, ClaimAttemptResult, ClaimMutationResult, ClaimStrategy, Filters,
+    NewChild, ParseShape, ParsedStrategy, RecoveryReleaseOutcome, RepairReport,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -60,6 +61,87 @@ pub(crate) fn operation_failed_with(
     })
 }
 
+struct ParsedFencedClaim {
+    bead_id: BeadId,
+    assignee: String,
+    revision: u64,
+    claim_epoch: Option<u64>,
+    fencing_token: String,
+    lease_expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn value_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a serde_json::Value> {
+    keys.iter().find_map(|key| {
+        if key.starts_with('/') {
+            value.pointer(key)
+        } else {
+            value.get(*key)
+        }
+    })
+}
+
+fn parse_fenced_claim_response(value: &serde_json::Value) -> Result<ParsedFencedClaim> {
+    let text = |keys: &[&str], field: &str| -> Result<String> {
+        value_at(value, keys)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("leased claim response omitted {field}"))
+    };
+    let integer = |keys: &[&str], field: &str| -> Result<u64> {
+        value_at(value, keys)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("leased claim response omitted {field}"))
+    };
+    let token_value = value_at(
+        value,
+        &[
+            "fencing_token",
+            "/lease/fencing_token",
+            "/claim_handle/fencing_token",
+        ],
+    )
+    .ok_or_else(|| anyhow::anyhow!("leased claim response omitted fencing_token"))?;
+    let fencing_token = token_value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| token_value.as_u64().map(|token| token.to_string()))
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("leased claim response had an invalid fencing_token"))?;
+    let expiry = text(
+        &[
+            "lease_expires_at",
+            "/lease/expires_at",
+            "/claim_handle/lease_expires_at",
+        ],
+        "lease expiry",
+    )?;
+    let lease_expires_at = chrono::DateTime::parse_from_rfc3339(&expiry)
+        .map_err(|_| anyhow::anyhow!("leased claim response had an invalid lease expiry"))?
+        .with_timezone(&chrono::Utc);
+    let bead_id = text(&["bead_id", "id", "/lease/issue_id"], "bead id")?;
+    let assignee = text(&["assignee", "/lease/assignee"], "assignee")?;
+    let revision = integer(
+        &[
+            "starting_revision",
+            "revision",
+            "/claim_handle/starting_revision",
+        ],
+        "starting revision",
+    )?;
+    let claim_epoch =
+        value_at(value, &["claim_epoch", "/lease/claim_epoch"]).and_then(serde_json::Value::as_u64);
+
+    Ok(ParsedFencedClaim {
+        bead_id: BeadId::from(bead_id),
+        assignee,
+        revision,
+        claim_epoch,
+        fencing_token,
+        lease_expires_at,
+    })
+}
+
 /// One descriptor-bound CLI store. The descriptor and binary are inseparable.
 pub struct CliBeadStore {
     backend: BeadBackend,
@@ -74,6 +156,8 @@ pub struct CliBeadStore {
     /// lets the backend-neutral `BeadStore` API present only credentials this
     /// process actually acquired.
     claim_tokens: std::sync::Mutex<HashMap<String, String>>,
+    /// Exact runtime claim protections negotiated for this workspace.
+    claim_capabilities: ClaimCapabilities,
     /// Whether `bead resolve` (attempt-outcome-v1) is available.
     attempt_outcome_supported: bool,
     /// Whether the selected runtime advertised the bead-rs manifest command.
@@ -107,6 +191,7 @@ impl CliBeadStore {
             harness_version,
             sync_pause: std::sync::Mutex::new(None),
             claim_tokens: std::sync::Mutex::new(HashMap::new()),
+            claim_capabilities: ClaimCapabilities::default(),
             attempt_outcome_supported: false,
             manifest_supported,
             process_runner: std::sync::Arc::new(TokioProcessRunner),
@@ -132,6 +217,12 @@ impl CliBeadStore {
     /// `resolve` command, and NEEDLE must not fail an attempt over it.
     pub fn with_attempt_outcome_support(mut self, supported: bool) -> Self {
         self.attempt_outcome_supported = supported;
+        self
+    }
+
+    /// Bind the claim protections explicitly advertised by the runtime.
+    pub fn with_claim_capabilities(mut self, capabilities: ClaimCapabilities) -> Self {
+        self.claim_capabilities = capabilities;
         self
     }
 
@@ -355,6 +446,26 @@ impl CliBeadStore {
         self.run_argv(name, &args, timeout_secs).await
     }
 
+    /// Run a descriptor operation with its fencing credential over stdin.
+    /// The credential is deliberately not inserted into `values`, rendered
+    /// argv, the environment, or any diagnostic string.
+    async fn run_operation_with_fencing_stdin(
+        &self,
+        name: &str,
+        values: &HashMap<&str, String>,
+        credential: &str,
+    ) -> Result<String> {
+        let rendered_values = Self::values_with_explicit_query_limit(name, values);
+        let args = self.render_operation(name, &rendered_values)?;
+        self.validate_explicit_query_limit(name, &args)?;
+        let timeout_secs = self
+            .operation(name)?
+            .timeout_secs
+            .unwrap_or(DEFAULT_TIMEOUT_SECS);
+        self.run_argv_with_fencing_stdin(name, &args, timeout_secs, credential)
+            .await
+    }
+
     fn values_with_claim_token<'a>(
         &self,
         values: &HashMap<&'a str, String>,
@@ -416,6 +527,49 @@ impl CliBeadStore {
         result
     }
 
+    async fn run_argv_with_fencing_stdin(
+        &self,
+        name: &str,
+        args: &[String],
+        timeout_secs: u64,
+        credential: &str,
+    ) -> Result<String> {
+        let guard = if super::sync_guard::guarded_operation(name) {
+            self.prepare_checkpoint().await?
+        } else {
+            None
+        };
+        let result = self
+            .run_argv_unchecked_with_fencing_stdin(name, args, timeout_secs, credential)
+            .await;
+        if guard.is_some() && name == "flush" {
+            match result {
+                Ok(output) => {
+                    if let Err(error) = self.verify_checkpoint_published().await {
+                        self.set_sync_pause(Some(format!("{error:#}")));
+                        return Err(error);
+                    }
+                    return Ok(output);
+                }
+                Err(error) => {
+                    self.set_sync_pause(Some(format!("{error:#}")));
+                    return Err(error);
+                }
+            }
+        }
+        if let Err(error) = &result {
+            let text = format!("{error:#}");
+            if text.contains("checkpoint_integrity_failure")
+                || text.contains("checkpoint_remote_advanced")
+                || text.contains("covered-ahead integrity failure")
+                || text.contains("checkpoint publication failed")
+            {
+                self.set_sync_pause(Some(text));
+            }
+        }
+        result
+    }
+
     pub(super) async fn run_argv_unchecked(
         &self,
         name: &str,
@@ -449,6 +603,53 @@ impl CliBeadStore {
                 operation: name.to_string(),
                 exit_code: output.exit_code.unwrap_or(-1),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }
+            .into());
+        }
+        Ok(stdout)
+    }
+
+    async fn run_argv_unchecked_with_fencing_stdin(
+        &self,
+        name: &str,
+        args: &[String],
+        timeout_secs: u64,
+        credential: &str,
+    ) -> Result<String> {
+        let mut input = credential.as_bytes().to_vec();
+        input.push(b'\n');
+        let request = ProcessRequest::new(self.binary.clone())
+            .args(args)
+            .current_dir(self.workspace.clone())
+            .stdin(input);
+        let output = self
+            .process_runner
+            .output(request, Duration::from_secs(timeout_secs))
+            .await
+            .with_context(|| {
+                format!(
+                    "backend '{}' operation '{}' failed using {}",
+                    self.backend.name,
+                    name,
+                    self.binary.display()
+                )
+            })?;
+        let stdout = String::from_utf8(output.stdout).with_context(|| {
+            format!(
+                "backend '{}' operation '{}' stdout was not UTF-8",
+                self.backend.name, name
+            )
+        })?;
+        if !output.success {
+            let stderr = String::from_utf8_lossy(&output.stderr)
+                .replace(credential, "<redacted>")
+                .trim()
+                .to_string();
+            return Err(CliOperationFailure {
+                backend: self.backend.name.clone(),
+                operation: name.to_string(),
+                exit_code: output.exit_code.unwrap_or(-1),
+                stderr,
             }
             .into());
         }
@@ -613,6 +814,13 @@ impl BeadStore for CliBeadStore {
             "velocity_metadata": self.backend.capabilities.velocity_metadata,
             "attempt_resolution": self.attempt_outcome_supported,
             "manifest": self.manifest_supported,
+            "claim_handle": {
+                "fenced_claim": self.claim_capabilities.fenced_claim,
+                "renewable_lease": self.claim_capabilities.renewable_lease,
+                "guarded_mutations": self.claim_capabilities.guarded_mutations,
+                "credential_transport": if self.claim_capabilities.credential_stdin { "stdin" } else { "unsupported" },
+                "protected_execution": self.claim_capabilities.fully_fenced(),
+            },
         }))
     }
 
@@ -1113,8 +1321,344 @@ impl BeadStore for CliBeadStore {
         }
     }
 
+    async fn claim_with_lease(
+        &self,
+        id: &BeadId,
+        actor: &str,
+        target_workspace_identity: &str,
+        lease_ttl_secs: u64,
+    ) -> Result<ClaimAttemptResult> {
+        if !self.claim_capabilities.fully_fenced() || self.operation("claim_fenced").is_err() {
+            let result = self.claim(id, actor).await?;
+            let handle = if matches!(result, ClaimResult::Claimed(_)) {
+                let status = self.claim_status(id).await?;
+                (status.status == BeadStatus::InProgress
+                    && status.assignee.as_deref() == Some(actor))
+                .then(|| {
+                    ClaimHandle::unprotected(
+                        id.clone(),
+                        target_workspace_identity.to_string(),
+                        actor.to_string(),
+                        status.revision,
+                        status.claim_epoch,
+                        self.claim_capabilities.clone(),
+                    )
+                })
+            } else {
+                None
+            };
+            return Ok(ClaimAttemptResult { result, handle });
+        }
+
+        let values = HashMap::from([
+            ("id", id.to_string()),
+            ("actor", actor.to_string()),
+            ("lease_ttl", lease_ttl_secs.to_string()),
+        ]);
+        let output = match self.run_operation("claim_fenced", &values).await {
+            Ok(output) => output,
+            Err(error) if operation_failed_with(&error, "claim_fenced", 4) => {
+                return Ok(ClaimAttemptResult {
+                    result: ClaimResult::NotClaimable {
+                        reason: "leased claim lost its compare-and-swap race".to_string(),
+                    },
+                    handle: None,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).context("leased claim returned invalid JSON")?;
+        if response.as_object().is_some_and(serde_json::Map::is_empty) {
+            return Ok(ClaimAttemptResult {
+                result: ClaimResult::NotClaimable {
+                    reason: "no bead available for leased claim".to_string(),
+                },
+                handle: None,
+            });
+        }
+        let parsed = parse_fenced_claim_response(&response)?;
+        anyhow::ensure!(
+            parsed.bead_id == *id && parsed.assignee == actor,
+            "leased claim response did not match the requested bead and assignee"
+        );
+        let handle = ClaimHandle::fenced(
+            parsed.bead_id.clone(),
+            target_workspace_identity.to_string(),
+            parsed.assignee,
+            Some(parsed.revision),
+            parsed.claim_epoch,
+            parsed.fencing_token,
+            parsed.lease_expires_at,
+            self.claim_capabilities.clone(),
+        );
+        let bead = self.show(id).await?;
+        Ok(ClaimAttemptResult {
+            result: ClaimResult::Claimed(bead),
+            handle: Some(handle),
+        })
+    }
+
     async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
         self.claim_auto_inner(actor).await
+    }
+
+    async fn renew_claim(&self, handle: &ClaimHandle, lease_ttl_secs: u64) -> Result<ClaimRenewal> {
+        if !handle.is_protected()
+            || !self.claim_capabilities.fully_fenced()
+            || self.operation("renew_claim_fenced").is_err()
+        {
+            return Ok(ClaimRenewal::Unsupported);
+        }
+        let Some(credential) = handle.fencing_credential() else {
+            return Ok(ClaimRenewal::Unsupported);
+        };
+        let Some(revision) = handle.current_revision else {
+            return Ok(ClaimRenewal::Unsupported);
+        };
+        let token = credential.expose();
+        let values = HashMap::from([
+            ("id", handle.bead_id.to_string()),
+            ("actor", handle.assignee.clone()),
+            ("lease_ttl", lease_ttl_secs.to_string()),
+            ("if_revision", revision.to_string()),
+        ]);
+        let output = match self
+            .run_operation_with_fencing_stdin("renew_claim_fenced", &values, token)
+            .await
+        {
+            Ok(output) => output,
+            Err(error) if operation_failed_with(&error, "renew_claim_fenced", 4) => {
+                return Ok(ClaimRenewal::LostOwnership)
+            }
+            Err(error) => return Err(error),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(output.trim()).context("lease renewal returned invalid JSON")?;
+        let parsed = parse_fenced_claim_response(&value)?;
+        let current_revision = value_at(
+            &value,
+            &[
+                "current_revision",
+                "revision",
+                "/claim_handle/current_revision",
+            ],
+        )
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("lease renewal response omitted current revision"))?;
+        if parsed.bead_id != handle.bead_id || parsed.assignee != handle.assignee {
+            return Ok(ClaimRenewal::LostOwnership);
+        }
+        let renewed = handle.renewed(
+            current_revision,
+            parsed.claim_epoch,
+            parsed.fencing_token,
+            parsed.lease_expires_at,
+        );
+        if !renewed.accepts_renewal(handle, token) {
+            return Ok(ClaimRenewal::LostOwnership);
+        }
+        Ok(ClaimRenewal::Renewed(renewed))
+    }
+
+    async fn release_claim(&self, handle: &ClaimHandle) -> Result<ClaimMutationResult> {
+        if !handle.is_protected() {
+            self.release(&handle.bead_id).await?;
+            return Ok(ClaimMutationResult::Applied);
+        }
+        let Some(credential) = handle.fencing_credential() else {
+            return Ok(ClaimMutationResult::Unsupported);
+        };
+        let Some(revision) = handle.current_revision else {
+            return Ok(ClaimMutationResult::Unsupported);
+        };
+        if !self.claim_capabilities.fully_fenced() || self.operation("release_fenced").is_err() {
+            return Ok(ClaimMutationResult::Unsupported);
+        }
+        let values = HashMap::from([
+            ("id", handle.bead_id.to_string()),
+            ("if_revision", revision.to_string()),
+        ]);
+        match self
+            .run_operation_with_fencing_stdin("release_fenced", &values, credential.expose())
+            .await
+        {
+            Ok(_) => Ok(ClaimMutationResult::Applied),
+            Err(error) if operation_failed_with(&error, "release_fenced", 4) => {
+                Ok(ClaimMutationResult::LostOwnership)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn close_claim(&self, handle: &ClaimHandle, reason: &str) -> Result<ClaimMutationResult> {
+        if !handle.is_protected() {
+            self.close(&handle.bead_id, reason).await?;
+            return Ok(ClaimMutationResult::Applied);
+        }
+        let Some(credential) = handle.fencing_credential() else {
+            return Ok(ClaimMutationResult::Unsupported);
+        };
+        let Some(revision) = handle.current_revision else {
+            return Ok(ClaimMutationResult::Unsupported);
+        };
+        if !self.claim_capabilities.fully_fenced() || self.operation("close_fenced").is_err() {
+            return Ok(ClaimMutationResult::Unsupported);
+        }
+        let values = HashMap::from([
+            ("id", handle.bead_id.to_string()),
+            ("reason", reason.to_string()),
+            ("if_revision", revision.to_string()),
+        ]);
+        match self
+            .run_operation_with_fencing_stdin("close_fenced", &values, credential.expose())
+            .await
+        {
+            Ok(_) => Ok(ClaimMutationResult::Applied),
+            Err(error) if operation_failed_with(&error, "close_fenced", 4) => {
+                Ok(ClaimMutationResult::LostOwnership)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn update_claim(
+        &self,
+        handle: &ClaimHandle,
+        fields: &serde_json::Value,
+    ) -> Result<ClaimMutationResult> {
+        if !handle.is_protected() {
+            return Ok(ClaimMutationResult::Unsupported);
+        }
+        let Some(credential) = handle.fencing_credential() else {
+            return Ok(ClaimMutationResult::Unsupported);
+        };
+        let Some(revision) = handle.current_revision else {
+            return Ok(ClaimMutationResult::Unsupported);
+        };
+        let Some(status) = fields.get("status").and_then(serde_json::Value::as_str) else {
+            return Ok(ClaimMutationResult::Unsupported);
+        };
+        if !self.claim_capabilities.fully_fenced() || self.operation("update_fenced").is_err() {
+            return Ok(ClaimMutationResult::Unsupported);
+        }
+        let values = HashMap::from([
+            ("id", handle.bead_id.to_string()),
+            ("status", status.to_string()),
+            ("if_revision", revision.to_string()),
+        ]);
+        match self
+            .run_operation_with_fencing_stdin("update_fenced", &values, credential.expose())
+            .await
+        {
+            Ok(_) => Ok(ClaimMutationResult::Applied),
+            Err(error) if operation_failed_with(&error, "update_fenced", 4) => {
+                Ok(ClaimMutationResult::LostOwnership)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn resolve_attempt_claim(
+        &self,
+        handle: &ClaimHandle,
+        resolution: &super::AttemptResolution,
+    ) -> Result<(ClaimMutationResult, Option<super::ResolveReceipt>)> {
+        if !handle.is_protected() {
+            return Ok((
+                ClaimMutationResult::Applied,
+                self.resolve_attempt(resolution).await?,
+            ));
+        }
+        let Some(credential) = handle.fencing_credential() else {
+            return Ok((ClaimMutationResult::Unsupported, None));
+        };
+        let Some(revision) = handle.current_revision else {
+            return Ok((ClaimMutationResult::Unsupported, None));
+        };
+        if !self.claim_capabilities.fully_fenced() || self.operation("resolve_fenced").is_err() {
+            return Ok((ClaimMutationResult::Unsupported, None));
+        }
+        let values = HashMap::from([
+            ("id", resolution.bead_id.to_string()),
+            ("attempt_id", resolution.attempt_id.clone()),
+            ("outcome", resolution.outcome.clone()),
+            ("actor", resolution.actor.clone()),
+            (
+                "resolve_reason",
+                resolution.reason.clone().unwrap_or_default(),
+            ),
+            (
+                "evidence_ref",
+                resolution.evidence_ref.clone().unwrap_or_default(),
+            ),
+            ("if_revision", revision.to_string()),
+        ]);
+        let output = match self
+            .run_operation_with_fencing_stdin("resolve_fenced", &values, credential.expose())
+            .await
+        {
+            Ok(output) => output,
+            Err(error) if operation_failed_with(&error, "resolve_fenced", 4) => {
+                return Ok((ClaimMutationResult::LostOwnership, None))
+            }
+            Err(error) => return Err(error),
+        };
+        let value: serde_json::Value = serde_json::from_str(output.trim())
+            .context("fenced resolve returned non-JSON output")?;
+        let field = |name: &str| value.get(name).and_then(|v| v.as_str()).map(str::to_owned);
+        Ok((
+            ClaimMutationResult::Applied,
+            Some(super::ResolveReceipt {
+                receipt_id: field("receipt_id").unwrap_or_default(),
+                resulting_state: field("resulting_state"),
+                resulting_attempt_tier: value
+                    .get("resulting_attempt_tier")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|tier| tier as u32),
+                is_replay: value
+                    .get("is_replay")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            }),
+        ))
+    }
+
+    async fn resource_lock_claim(
+        &self,
+        handle: &ClaimHandle,
+        resource_key: &str,
+        acquire: bool,
+    ) -> Result<ClaimMutationResult> {
+        if !handle.is_protected() {
+            return Ok(ClaimMutationResult::Unsupported);
+        }
+        let Some(credential) = handle.fencing_credential() else {
+            return Ok(ClaimMutationResult::Unsupported);
+        };
+        if !self.claim_capabilities.fully_fenced()
+            || self.operation("resource_lock_fenced").is_err()
+        {
+            return Ok(ClaimMutationResult::Unsupported);
+        }
+        let values = HashMap::from([
+            ("id", handle.bead_id.to_string()),
+            ("resource_key", resource_key.to_string()),
+            (
+                "resource_action",
+                if acquire { "acquire" } else { "release" }.to_string(),
+            ),
+        ]);
+        match self
+            .run_operation_with_fencing_stdin("resource_lock_fenced", &values, credential.expose())
+            .await
+        {
+            Ok(_) => Ok(ClaimMutationResult::Applied),
+            Err(error) if operation_failed_with(&error, "resource_lock_fenced", 4) => {
+                Ok(ClaimMutationResult::LostOwnership)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn release(&self, id: &BeadId) -> Result<()> {
@@ -1729,7 +2273,8 @@ fn is_optional_placeholder(name: &str) -> bool {
 #[cfg(test)]
 mod process_runner_tests {
     use super::{super::builtin_bead_backends, CliBeadStore, EXPLICIT_QUERY_LIMIT};
-    use crate::bead_store::{BeadStore as _, Filters, RecoveryReleaseOutcome};
+    use crate::bead_store::{BeadStore as _, ClaimMutationResult, Filters, RecoveryReleaseOutcome};
+    use crate::claim::{ClaimCapabilities, ClaimHandle};
     use crate::process_runner::{FakeProcessRunner, ProcessOutput, ProcessRequest, ProcessRunner};
     use crate::types::{BeadId, BeadStatus, ClaimStatus};
     use anyhow::Result;
@@ -2196,6 +2741,103 @@ mod process_runner_tests {
         assert!(error.to_string().contains("observed claim epoch"));
         assert_eq!(runner.requests().len(), 2, "no unfenced mutation is safe");
     }
+
+    #[tokio::test]
+    async fn stale_claim_handle_guards_every_claimant_mutation_without_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let runner = Arc::new(FakeProcessRunner::new());
+        for _ in 0..5 {
+            runner.push_output(ProcessOutput::failure(
+                Some(4),
+                b"claim ownership conflict".to_vec(),
+            ));
+        }
+        let capabilities = ClaimCapabilities {
+            fenced_claim: true,
+            renewable_lease: true,
+            guarded_mutations: true,
+            credential_stdin: true,
+        };
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner.clone())
+        .with_claim_capabilities(capabilities.clone());
+        let handle = ClaimHandle::fenced(
+            BeadId::from("needle-stale-owner"),
+            "workspace-sha256".to_string(),
+            "worker-a".to_string(),
+            Some(11),
+            Some(3),
+            "stale-opaque-credential".to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(60),
+            capabilities,
+        );
+
+        assert_eq!(
+            store.release_claim(&handle).await.unwrap(),
+            ClaimMutationResult::LostOwnership
+        );
+        assert_eq!(
+            store.close_claim(&handle, "done").await.unwrap(),
+            ClaimMutationResult::LostOwnership
+        );
+        assert_eq!(
+            store
+                .update_claim(&handle, &serde_json::json!({"status":"open"}))
+                .await
+                .unwrap(),
+            ClaimMutationResult::LostOwnership
+        );
+        let (mutation, receipt) = store
+            .resolve_attempt_claim(
+                &handle,
+                &super::super::AttemptResolution {
+                    bead_id: handle.bead_id.clone(),
+                    attempt_id: "0192-attempt".to_string(),
+                    outcome: "work_failure".to_string(),
+                    actor: handle.assignee.clone(),
+                    reason: None,
+                    evidence_ref: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(mutation, ClaimMutationResult::LostOwnership);
+        assert!(receipt.is_none());
+        assert_eq!(
+            store
+                .resource_lock_claim(&handle, "resource-key", true)
+                .await
+                .unwrap(),
+            ClaimMutationResult::LostOwnership
+        );
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 5, "a rejected stale token is never retried");
+        for request in requests {
+            assert!(request
+                .arguments()
+                .iter()
+                .all(|argument| { argument.to_string_lossy() != "stale-opaque-credential" }));
+            assert_eq!(
+                request.standard_input(),
+                Some(b"stale-opaque-credential\n".as_slice())
+            );
+        }
+    }
 }
 
 fn placeholders(template: &str) -> Result<Vec<String>> {
@@ -2367,7 +3009,8 @@ fn parse_beads_with_claim_history(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_beads, parse_beads_with_claim_history, CliBeadStore, ParseShape, EXPLICIT_QUERY_LIMIT,
+        parse_beads, parse_beads_with_claim_history, parse_fenced_claim_response, CliBeadStore,
+        ParseShape, EXPLICIT_QUERY_LIMIT,
     };
     use std::collections::HashMap;
 
@@ -2974,5 +3617,45 @@ mod tests {
 
         assert_eq!(revision, None);
         assert_eq!(claim_epoch, None);
+    }
+
+    #[test]
+    fn fenced_claim_parser_keeps_credential_in_the_ephemeral_handle() {
+        let value = serde_json::json!({
+            "bead_id": "needle-parser-test",
+            "assignee": "worker-a",
+            "revision": 12,
+            "claim_epoch": 4,
+            "lease": {
+                "fencing_token": "opaque-test-credential",
+                "expires_at": "2026-09-27T18:00:00Z"
+            }
+        });
+
+        let parsed = parse_fenced_claim_response(&value).expect("parse fenced claim");
+        assert_eq!(parsed.bead_id.as_ref(), "needle-parser-test");
+        assert_eq!(parsed.assignee, "worker-a");
+        assert_eq!(parsed.revision, 12);
+        assert_eq!(parsed.claim_epoch, Some(4));
+        assert_eq!(parsed.fencing_token, "opaque-test-credential");
+        assert_eq!(
+            parsed.lease_expires_at.to_rfc3339(),
+            "2026-09-27T18:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn fenced_claim_parser_rejects_a_lease_without_its_claim_credential() {
+        let value = serde_json::json!({
+            "bead_id": "needle-parser-test",
+            "assignee": "worker-a",
+            "revision": 12,
+            "lease": { "expires_at": "2026-09-27T18:00:00Z" }
+        });
+
+        let error = parse_fenced_claim_response(&value)
+            .err()
+            .expect("missing credential is rejected");
+        assert!(format!("{error:#}").contains("fencing_token"));
     }
 }

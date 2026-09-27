@@ -267,7 +267,10 @@ version = 1
 # +4 pre-deadline attempt commit accounting (needle-4c146cc6): zero, one,
 # multiple and at/after-boundary counts, plus OutcomeHandler ledger emission.
 # All exercise the pure outcome accounting path or its in-process ledger.
-max_tests = 4020
+# +7 renewable fenced claim-handle contracts (needle-cd169aa6): retained
+# identity/credential rotation and the guarded CLI mutation matrix. These
+# exercise the claim/store/outcome boundaries in-process.
+max_tests = 4027
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -930,6 +933,12 @@ owner = "component:definition-of-done"
 [[artifact]]
 pattern = "tests/dod-modes/*"
 owner = "component:definition-of-done"
+
+# Mutation suite for scripts/check-doc-links.sh (needle-a66631da): the
+# documentation navigation guard wired into the definition-of-done fast lane.
+[[artifact]]
+pattern = "tests/doc-links/*"
+owner = "component:doc-navigation"
 
 [[artifact]]
 pattern = "tests/msrv-drift/*"

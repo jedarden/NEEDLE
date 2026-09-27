@@ -11,6 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 /// One captured process invocation.
 ///
@@ -22,6 +23,7 @@ pub struct ProcessRequest {
     args: Vec<OsString>,
     current_dir: Option<PathBuf>,
     env: Vec<(OsString, OsString)>,
+    stdin: Option<Vec<u8>>,
 }
 
 impl ProcessRequest {
@@ -31,6 +33,7 @@ impl ProcessRequest {
             args: Vec::new(),
             current_dir: None,
             env: Vec::new(),
+            stdin: None,
         }
     }
 
@@ -55,6 +58,14 @@ impl ProcessRequest {
         self
     }
 
+    /// Feed a short-lived secret or structured request over a pipe instead of
+    /// exposing it in argv or the process environment. The request type does
+    /// not implement `Debug`, and callers must not log these bytes.
+    pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(bytes.into());
+        self
+    }
+
     pub fn program(&self) -> &Path {
         &self.program
     }
@@ -65,6 +76,11 @@ impl ProcessRequest {
 
     pub fn working_directory(&self) -> Option<&Path> {
         self.current_dir.as_deref()
+    }
+
+    /// Borrow pipe input for test runners without formatting or logging it.
+    pub fn standard_input(&self) -> Option<&[u8]> {
+        self.stdin.as_deref()
     }
 }
 
@@ -122,6 +138,9 @@ impl ProcessRunner for TokioProcessRunner {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true);
+            if request.stdin.is_some() {
+                command.stdin(std::process::Stdio::piped());
+            }
             if let Some(current_dir) = &request.current_dir {
                 command.current_dir(current_dir);
             }
@@ -156,6 +175,18 @@ impl ProcessRunner for TokioProcessRunner {
                 }
             }
         };
+        let mut child = child;
+        if let Some(input) = request.stdin.as_deref() {
+            let mut stdin = child
+                .stdin
+                .take()
+                .context("captured child was spawned without piped stdin")?;
+            stdin
+                .write_all(input)
+                .await
+                .context("failed writing captured child stdin")?;
+        }
+        drop(child.stdin.take());
         let output = tokio::time::timeout(timeout, child.wait_with_output())
             .await
             .with_context(|| {
@@ -277,6 +308,37 @@ mod tests {
         assert!(!output.success);
         assert_eq!(output.exit_code, Some(4));
         assert_eq!(output.stderr, b"conflict");
+    }
+
+    #[tokio::test]
+    async fn process_runner_keeps_piped_credentials_out_of_argv() {
+        let runner = FakeProcessRunner::new();
+        runner.push_output(ProcessOutput::success(b"ok".to_vec()));
+
+        runner
+            .output(
+                ProcessRequest::new("bead")
+                    .args(["claim", "needle-test", "--fencing-token-stdin"])
+                    .stdin(b"opaque-claim-credential\n".to_vec()),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].arguments(),
+            ["claim", "needle-test", "--fencing-token-stdin"]
+        );
+        assert_eq!(
+            requests[0].standard_input(),
+            Some(b"opaque-claim-credential\n".as_slice())
+        );
+        assert!(requests[0]
+            .arguments()
+            .iter()
+            .all(|arg| arg.to_string_lossy() != "opaque-claim-credential"));
     }
 
     #[tokio::test]
