@@ -603,9 +603,21 @@ const RACE_LOST_EXCLUSION_TTL: Duration = Duration::from_secs(30);
 /// Timeout for HANDLING state watchdog.
 ///
 /// If the worker remains in HANDLING state for longer than this duration,
-/// the watchdog thread will force a recovery. This is longer than the
-/// inner timeouts (50s, 60s, 90s) to allow normal recovery to work first.
-const HANDLING_WATCHDOG_TIMEOUT_SECS: u64 = 120;
+/// the watchdog thread will force a recovery. Must always exceed every
+/// inner timeout it backstops (`validation.outcome_timeout_seconds` and the
+/// derived middle/outer wraps below), or a legitimately slow but correctly
+/// *configured* verification gate gets killed by a stale hardcoded ceiling
+/// before its own configured budget elapses -- this margin, not a fixed
+/// number, is what "longer than the inner timeouts" has to mean once the
+/// inner timeout is configurable (GitHub issue jedarden/NEEDLE#8). 120s
+/// preserves the previous default's margin over the old hardcoded 60s/90s
+/// inner layers for workspaces that never override outcome_timeout_seconds.
+fn handling_watchdog_timeout_secs(config: &Config) -> u64 {
+    config
+        .validation
+        .outcome_timeout_seconds
+        .saturating_add(120)
+}
 
 /// The metadata used to detect changes to the global configuration file.
 ///
@@ -1532,6 +1544,7 @@ impl Worker {
         let handling_state_entered_at_ptr =
             &self.handling_state_entered_at as *const Option<Instant> as usize;
         let (watchdog_control, watchdog_commands) = std::sync::mpsc::channel();
+        let watchdog_timeout_secs = handling_watchdog_timeout_secs(&self.config);
 
         let handle = std::thread::spawn(move || {
             loop {
@@ -1554,7 +1567,7 @@ impl Worker {
 
                 if let Some(entry_time) = entered_at {
                     let elapsed = entry_time.elapsed().as_secs();
-                    if elapsed >= HANDLING_WATCHDOG_TIMEOUT_SECS {
+                    if elapsed >= watchdog_timeout_secs {
                         tracing::error!(
                             elapsed_secs = elapsed,
                             "HANDLING state watchdog triggered - forcing recovery"
@@ -1786,7 +1799,7 @@ impl Worker {
                         operation: "watchdog".to_string(),
                         error: format!(
                             "HANDLING state exceeded {}s timeout",
-                            HANDLING_WATCHDOG_TIMEOUT_SECS
+                            handling_watchdog_timeout_secs(&self.config)
                         ),
                     },
                     Utc::now(),
@@ -4803,11 +4816,23 @@ impl Worker {
             needle.outcome = tracing::field::Empty, // Will be set based on handler result
             needle.outcome.action = tracing::field::Empty, // Will be set based on handler result
         );
+        // This wrap used to be a bare `Duration::from_secs(60)` "workaround"
+        // safety net around the handler's OWN configurable timeout
+        // (`validation.outcome_timeout_seconds`, enforced inside
+        // `handle_with_cancellation`). Because 60 < any workspace's real
+        // override (e.g. a full monorepo build+test gate needing 30 min),
+        // this outer wrap always fired first and silently capped every
+        // workspace at 60s regardless of its own configured value -- the
+        // handler-level fix for GitHub issue jedarden/NEEDLE#8 never reached
+        // the code path the worker loop actually calls. Backstop margin
+        // (+30s) keeps this a genuine "the inner timeout itself is stuck"
+        // safety net rather than a competing, shorter timeout.
+        let outer_handler_timeout_secs = self
+            .config
+            .validation
+            .outcome_timeout_seconds
+            .saturating_add(30);
         let handling_future = async {
-            // Wrap the outcome handler in a 60-second timeout to prevent indefinite hangs.
-            // The health monitor's background thread writes heartbeat files based on
-            // shared state, so external monitoring can detect hangs via stale heartbeats.
-
             let handler_future = self.outcome_handler.handle_with_cancellation(
                 self.store.as_ref(),
                 &bead,
@@ -4816,7 +4841,12 @@ impl Worker {
                 cancelled.clone(),
             );
 
-            match tokio::time::timeout(std::time::Duration::from_secs(60), handler_future).await {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(outer_handler_timeout_secs),
+                handler_future,
+            )
+            .await
+            {
                 Ok(Ok(result)) => {
                     // Handler completed successfully - stop heartbeat and continue.
                     // Record the outcome and action on the bead.outcome span.
@@ -4862,43 +4892,57 @@ impl Worker {
                     // Abort the heartbeat task to prevent it from continuing in the background.
                     heartbeat_task.abort();
                     // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
-                    let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
-                        bead_id: bead_id_clone.clone(),
-                        outcome: "unknown".to_string(),
-                        operation: "handle".to_string(),
-                        error: e.to_string(),
-                    }, chrono::Utc::now());
+                    let _ = telemetry_clone.emit_try_lock(
+                        EventKind::WorkerHandlingTimeout {
+                            bead_id: bead_id_clone.clone(),
+                            outcome: "unknown".to_string(),
+                            operation: "handle".to_string(),
+                            error: e.to_string(),
+                        },
+                        chrono::Utc::now(),
+                    );
                     Err(anyhow::anyhow!("handler failed: {}", e))
                 }
                 Err(_) => {
-                    // Timeout after 60 seconds. Return an explicit recovery
-                    // action; the state-machine caller must apply it.
+                    // Outer backstop timeout elapsed. Return an explicit
+                    // recovery action; the state-machine caller must apply it.
                     tracing::error!(
                         bead_id = %bead.id,
-                        "outcome handler timed out after 60s, routing through explicit error recovery"
+                        timeout_secs = outer_handler_timeout_secs,
+                        "outcome handler timed out, routing through explicit error recovery"
                     );
                     // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                     cancelled.store(true, Ordering::Release);
                     // Abort the heartbeat task to prevent it from continuing in the background.
                     heartbeat_task.abort();
                     // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
-                    let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
-                        bead_id: bead_id_clone.clone(),
-                        outcome: "unknown".to_string(),
-                        operation: "handle".to_string(),
-                        error: "timeout after 60s".to_string(),
-                    }, chrono::Utc::now());
-                    Err(anyhow::anyhow!("handler timed out after 60s"))
+                    let _ = telemetry_clone.emit_try_lock(
+                        EventKind::WorkerHandlingTimeout {
+                            bead_id: bead_id_clone.clone(),
+                            outcome: "unknown".to_string(),
+                            operation: "handle".to_string(),
+                            error: format!("timeout after {outer_handler_timeout_secs}s"),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    Err(anyhow::anyhow!(
+                        "handler timed out after {outer_handler_timeout_secs}s"
+                    ))
                 }
             }
         }
         .instrument(outcome_span);
 
-        // The watchdog thread above covers a genuinely wedged runtime. Keep the
-        // 90-second async safety net cancellable so a successful handler does
-        // not leave a sleeping blocking task that delays runtime shutdown.
+        // The watchdog thread above covers a genuinely wedged runtime. Keep this
+        // async safety net cancellable so a successful handler does not leave a
+        // sleeping blocking task that delays runtime shutdown. Must exceed
+        // `outer_handler_timeout_secs` (itself derived from the configured
+        // `validation.outcome_timeout_seconds`) or it fires first and, again,
+        // silently caps every workspace at a hardcoded ceiling regardless of
+        // configuration -- the same class of bug this whole layer stack had.
+        let async_safety_net_secs = outer_handler_timeout_secs.saturating_add(30);
         let timeout_clock = self.clock.clone();
-        let timeout = timeout_clock.sleep(std::time::Duration::from_secs(90));
+        let timeout = timeout_clock.sleep(std::time::Duration::from_secs(async_safety_net_secs));
         tokio::pin!(timeout);
 
         // Use tokio::select! to race between the handling future and the timeout signal.
@@ -4933,10 +4977,11 @@ impl Worker {
                 }
             }
             _ = &mut timeout => {
-                // Outer timeout fired after 90 seconds - this is a critical failure.
+                // Outer async safety net fired - this is a critical failure.
                 tracing::error!(
                     bead_id = %bead.id,
-                    "HANDLING state timed out after 90s, forcing recovery"
+                    timeout_secs = async_safety_net_secs,
+                    "HANDLING state timed out, forcing recovery"
                 );
                 // Set cancellation flag to stop all async operations.
                 cancelled.store(true, Ordering::Release);
@@ -4946,7 +4991,7 @@ impl Worker {
                     bead_id: bead_id_clone.clone(),
                     outcome: "unknown".to_string(),
                     operation: "handling_state".to_string(),
-                    error: "critical timeout after 90s".to_string(),
+                    error: format!("critical timeout after {async_safety_net_secs}s"),
                 }, chrono::Utc::now());
                 return BeadAction::Errored;
             }
@@ -4971,7 +5016,7 @@ impl Worker {
                     operation: "watchdog".to_string(),
                     error: format!(
                         "HANDLING state exceeded {}s timeout",
-                        HANDLING_WATCHDOG_TIMEOUT_SECS
+                        handling_watchdog_timeout_secs(&self.config)
                     ),
                 },
                 Utc::now(),
@@ -9333,6 +9378,36 @@ mod tests {
     use async_trait::async_trait;
     use std::io::Write;
     use std::sync::Mutex;
+
+    #[test]
+    fn handling_watchdog_timeout_scales_with_configured_outcome_timeout() {
+        // Regression test for the bug this fix closes: the worker-level
+        // HANDLING-state safety nets (this watchdog, and the middle/outer
+        // wraps in do_handle around `handler_future`) used to be bare
+        // hardcoded constants (60s, 90s, 120s) instead of deriving from
+        // `validation.outcome_timeout_seconds`. A workspace that configured
+        // a real value (e.g. 1800s for a monorepo build+test gate) had every
+        // attempt killed by these unrelated, un-overridable ceilings before
+        // its own configured budget ever elapsed -- the GitHub issue
+        // jedarden/NEEDLE#8 fix never reached the code path the worker loop
+        // actually calls (`Worker::do_handle`, not `handle_with_timeout`
+        // directly). The watchdog must always stay longer than the value a
+        // workspace configures, not just longer than the old 50s default.
+        let mut config = Config::default();
+        config.validation.outcome_timeout_seconds = 50;
+        assert_eq!(handling_watchdog_timeout_secs(&config), 170);
+
+        config.validation.outcome_timeout_seconds = 1800;
+        assert_eq!(
+            handling_watchdog_timeout_secs(&config),
+            1920,
+            "a workspace's real configured timeout must not be capped by a stale hardcoded watchdog ceiling"
+        );
+
+        // saturating_add must not panic or wrap on a pathological config value.
+        config.validation.outcome_timeout_seconds = u64::MAX;
+        assert_eq!(handling_watchdog_timeout_secs(&config), u64::MAX);
+    }
 
     #[test]
     fn freshness_never_treats_an_unknown_commit_as_stale() {

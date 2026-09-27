@@ -246,7 +246,12 @@ version = 1
 # src/worker/mod.rs (a live claim is counted; an already-closed bead and a
 # claim another worker holds are not). The worker's Errored branch and the
 # handler's penalty method are private, so only the unit tier reaches them.
-max_tests = 4006
+# +1 HANDLING-watchdog timeout scaling regression (needle-a374d4f4): proves
+# handling_watchdog_timeout_secs derives from the configured
+# validation.outcome_timeout_seconds instead of a stale hardcoded 120s
+# ceiling. The function is private to src/worker/mod.rs, so only the unit
+# tier reaches it.
+max_tests = 4007
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
