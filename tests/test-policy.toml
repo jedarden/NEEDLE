@@ -350,7 +350,7 @@ contract = 208
 # +4 isolated adapter smoke contracts (needle-7a93d078): recorded CLI flag
 # fixtures, README/registry parity, ready probes for each built-in adapter,
 # and fail-closed checks for the generic placeholder and unknown names.
-e2e = 864
+e2e = 865
 soak = 0
 fuzz = 0
 

@@ -19,6 +19,19 @@
 //!    and Aider adapters, the routed adapter dispatches its own CLI with the
 //!    prompt delivered by its input method, and unmatched models fall back
 //!    to the configured default adapter.
+//! 5. **Environment passing** — the child sees the adapter's own
+//!    `environment` map entries plus the dispatcher-issued claim credentials
+//!    (`NEEDLE_ATTEMPT_ID`, `NEEDLE_BEAD_REVISION`,
+//!    `NEEDLE_BEAD_FENCING_TOKEN` from the verified claim), while both
+//!    stdout and stderr markers are captured on the same run; an unclaimed
+//!    analysis dispatch strips the fencing credentials even when the
+//!    adapter's static environment (or the worker's own parent environment)
+//!    supplies them.
+//! 6. **Idle timeout** — a silent agent is killed with exit 124 and a
+//!    structured `TimeoutReason::Idle`.
+//! 7. **Termination** — a hard-deadline kill takes down the agent's whole
+//!    process group, including background children the agent CLI spawned
+//!    itself, instead of only the shell leader.
 //!
 //! The fake CLIs resolve through `PATH`, so tests that prepend a fake bin
 //! directory serialize on a shared mutex: concurrent `set_var` from sibling
@@ -29,6 +42,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tempfile::TempDir;
@@ -51,6 +65,9 @@ const MATRIX_WORKER: &str = "matrix-test";
 /// Claim revision and epoch the matrix store reports for every bead.
 const MATRIX_REVISION: u64 = 11;
 const MATRIX_EPOCH: u64 = 4;
+/// Attempt id the matrix dispatch context carries, so the environment
+/// contract can assert `NEEDLE_ATTEMPT_ID` reaches the child.
+const MATRIX_ATTEMPT: &str = "matrix-attempt-1";
 
 /// Serializes PATH mutation among the tests in this module.
 static FAKE_PATH_LOCK: Mutex<()> = Mutex::const_new(());
@@ -203,13 +220,24 @@ struct FakeCli {
 impl FakeCli {
     /// Create the bin dir and write a fake script for each agent name.
     ///
-    /// Each script appends one record per invocation — `cwd=`, then one
-    /// `arg=` line per argv entry, then `file_content=` for any
-    /// `--prompt-file <path>` pair — prints a marker line, and exits with
-    /// [`EXIT_ENV`] (default 0).
+    /// Each script appends one record per invocation — the `env_*` prologue
+    /// (see [`RECORD_ENV`]'s contract surface), `cwd=`, then one `arg=` line
+    /// per argv entry, then `file_content=` for any `--prompt-file <path>`
+    /// pair — prints a marker line to stdout and a `-stderr` marker to
+    /// stderr, and exits with [`EXIT_ENV`] (default 0).
     fn new() -> Self {
         let bin_dir = tempfile::tempdir().expect("create fake bin dir");
         let log = bin_dir.path().join("invocations.log");
+        // Shared prologue: record the environment contract the child process
+        // actually observed. `missing` is the sentinel for a credential the
+        // dispatcher must not issue; `unset` for a probe variable absent from
+        // the adapter's environment map.
+        const RECORD_ENV: &str = concat!(
+            "printf 'env_probe=%s\\n' \"${NEEDLE_FAKE_AGENT_PROBE:-unset}\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+            "printf 'env_fencing=%s\\n' \"${NEEDLE_BEAD_FENCING_TOKEN:-missing}\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+            "printf 'env_revision=%s\\n' \"${NEEDLE_BEAD_REVISION:-missing}\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+            "printf 'env_attempt=%s\\n' \"${NEEDLE_ATTEMPT_ID:-missing}\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+        );
         // Shared prologue: record cwd and every argv entry.
         const RECORD_ARGS: &str = "printf 'cwd=%s\\n' \"$PWD\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n\
              for a in \"$@\"; do printf 'arg=%s\\n' \"$a\" >> \"$NEEDLE_FAKE_AGENT_LOG\"; done\n\
@@ -286,8 +314,25 @@ impl FakeCli {
             ),
         ];
         for (name, marker, output, record) in agents {
+            // `timeout` stays silent for the full 10s so idle/hard deadlines
+            // fire; `hang-group` additionally parks a quiet 30s background
+            // child in the same process group and logs both PIDs, so the
+            // termination contract can prove a kill reached the group and
+            // not just the shell leader. The background child redirects its
+            // output, so it never holds the stdout/stderr pipes open.
             let script = format!(
-                "#!/usr/bin/env bash\n{record}{output}\nif [ \"${{NEEDLE_FAKE_AGENT_MODE:-success}}\" = timeout ]; then sleep 10; fi\necho '{marker}'\nexit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
+                "#!/usr/bin/env bash\n{RECORD_ENV}{record}{output}\n\
+case \"${{NEEDLE_FAKE_AGENT_MODE:-success}}\" in\n\
+  timeout) sleep 10 ;;\n\
+  hang-group)\n\
+    printf 'leader_pid=%s\\n' \"$$\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n\
+    sleep 30 >/dev/null 2>&1 &\n\
+    printf 'child_pid=%s\\n' \"$!\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n\
+    sleep 10 ;;\n\
+esac\n\
+echo '{marker}'\n\
+echo '{marker}-stderr' >&2\n\
+exit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
             );
             let path = bin_dir.path().join(name);
             fs::write(&path, script).expect("write fake CLI script");
@@ -424,9 +469,13 @@ async fn dispatch_adapter(
     let mut adapters = HashMap::new();
     adapters.insert(name.to_string(), adapter);
 
-    let dispatcher =
-        Dispatcher::with_adapters(adapters, Telemetry::new(MATRIX_WORKER.to_string()), 3600)
-            .with_worker_id(MATRIX_WORKER.to_string());
+    // The dispatcher's pre-spawn gate requires the telemetry's active attempt
+    // identity to equal the context's — mirror the worker, which sets its
+    // attempt on telemetry before every claimed dispatch.
+    let telemetry = Telemetry::new(MATRIX_WORKER.to_string());
+    telemetry.set_attempt_id(MATRIX_ATTEMPT);
+    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600)
+        .with_worker_id(MATRIX_WORKER.to_string());
 
     let adapter_ref = dispatcher.adapter(name).expect("adapter wired");
     dispatcher
@@ -435,7 +484,44 @@ async fn dispatch_adapter(
             &test_prompt(bead_id),
             adapter_ref,
             workspace,
-            &matrix_context(workspace),
+            &matrix_context(workspace).with_attempt_id(MATRIX_ATTEMPT),
+        )
+        .await
+}
+
+/// Dispatch a fixture adapter through the claim-free analysis spawn path.
+///
+/// Mirrors [`dispatch_adapter`] except the dispatch carries no claim context:
+/// the contract under test is that no fencing credential reaches the child.
+async fn dispatch_unclaimed(
+    mut adapter: AgentAdapter,
+    name: &str,
+    fake: &FakeCli,
+    extra_env: &[(&str, String)],
+    bead_id: &str,
+    workspace: &Path,
+) -> anyhow::Result<ExecutionResult> {
+    adapter
+        .environment
+        .insert(LOG_ENV.to_string(), fake.log.display().to_string());
+    for (key, value) in extra_env {
+        adapter.environment.insert(key.to_string(), value.clone());
+    }
+
+    let mut adapters = HashMap::new();
+    adapters.insert(name.to_string(), adapter);
+
+    let dispatcher =
+        Dispatcher::with_adapters(adapters, Telemetry::new(MATRIX_WORKER.to_string()), 3600)
+            .with_worker_id(MATRIX_WORKER.to_string());
+
+    let adapter_ref = dispatcher.adapter(name).expect("adapter wired");
+    dispatcher
+        .dispatch_unclaimed_analysis(
+            &BeadId::from(bead_id),
+            &test_prompt(bead_id),
+            adapter_ref,
+            workspace,
         )
         .await
 }
@@ -484,6 +570,47 @@ fn value_after_flag<'a>(args: &'a [&'a str], flag: &str) -> Option<&'a str> {
 
 fn unique_workspace() -> TempDir {
     tempfile::tempdir().expect("create workspace dir")
+}
+
+/// Whether the process `pid` is dead: either fully reaped (ESRCH on
+/// signal 0) or a zombie still awaiting reaping.
+///
+/// The group kill reparents the agent's orphaned children to init, and how
+/// fast they are reaped varies by host (and by whether a container's pid 1
+/// reaps at all) — a zombie state already proves the kill reached them.
+fn process_is_dead(pid: u32) -> bool {
+    let reaped = unsafe { libc::kill(pid as libc::pid_t, 0) == -1 }
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    if reaped {
+        return true;
+    }
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        // Raced with the final reap between the two checks.
+        return true;
+    };
+    // "<pid> (<comm>) <state> …" — the state follows the last ')' so a
+    // comm containing parens cannot shift it.
+    stat.rsplit_once(')')
+        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+}
+
+/// Poll [`process_is_dead`] for up to ten seconds; reaping timing varies.
+fn wait_until_dead(pid: u32) -> bool {
+    for _ in 0..100 {
+        if process_is_dead(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// The most recently logged value of `key=` parsed as a PID.
+fn logged_pid(lines: &[String], key: &str) -> u32 {
+    log_values(lines, key)
+        .last()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("{key} missing from the fake CLI log"))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -997,6 +1124,206 @@ async fn documented_adapters_enforce_the_configured_timeout() {
             result.timeout_reason,
             Some(needle::dispatch::TimeoutReason::Hard { timeout_secs: 1 }),
             "{name} timeout reason"
+        );
+    }
+}
+
+#[tokio::test]
+async fn documented_adapters_enforce_the_idle_timeout() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+
+    for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
+        let workspace = unique_workspace();
+        let mut adapter = documented_adapter(name);
+        // Idle-only mode: the fake produces its output and then goes silent
+        // well past the 1s idle deadline, so only an activity-resetting idle
+        // timer can fire here.
+        adapter.timeout_secs = 0;
+        adapter.idle_timeout_secs = 1;
+        adapter.hard_timeout_secs = 0;
+        let result = dispatch_adapter(
+            adapter,
+            name,
+            &fake,
+            &[("NEEDLE_FAKE_AGENT_MODE", "timeout".to_string())],
+            &format!("needle-matrix-{name}-idle"),
+            workspace.path(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name} idle dispatch should complete: {e:#}"));
+
+        assert_eq!(result.exit_code, 124, "{name} idle timeout exit code");
+        match result.timeout_reason {
+            Some(needle::dispatch::TimeoutReason::Idle {
+                timeout_secs: 1, ..
+            }) => {}
+            other => panic!("{name} must report an idle timeout reason, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn documented_adapter_timeout_kills_the_whole_process_group() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+
+    for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
+        let workspace = unique_workspace();
+        let mut adapter = documented_adapter(name);
+        adapter.timeout_secs = 0;
+        adapter.hard_timeout_secs = 1;
+        let result = dispatch_adapter(
+            adapter,
+            name,
+            &fake,
+            &[("NEEDLE_FAKE_AGENT_MODE", "hang-group".to_string())],
+            &format!("needle-matrix-{name}-group-kill"),
+            workspace.path(),
+        )
+        .await
+        .expect("timed-out agent is still a completed dispatch");
+
+        assert_eq!(result.exit_code, 124, "{name} hard timeout exit code");
+        assert_eq!(
+            result.timeout_reason,
+            Some(needle::dispatch::TimeoutReason::Hard { timeout_secs: 1 }),
+            "{name} hard timeout reason"
+        );
+        assert!(
+            result.elapsed < Duration::from_secs(9),
+            "{name} must die at the 1s deadline (elapsed {:?}), not run out its 10s sleep",
+            result.elapsed
+        );
+
+        // The kill must reach the process group: the fake's own background
+        // child (same pgroup, output redirected so it holds no pipe) dies
+        // with the leader instead of outliving the dispatch by 29 seconds.
+        let lines = read_log(&fake);
+        let leader = logged_pid(&lines, "leader_pid");
+        let child = logged_pid(&lines, "child_pid");
+        assert!(
+            wait_until_dead(leader),
+            "{name} group leader must be dead after the timeout kill"
+        );
+        assert!(
+            wait_until_dead(child),
+            "{name} background child must die with the process group, not outlive the leader"
+        );
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Environment passing and output capture
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn documented_adapters_pass_environment_and_claim_credentials() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+
+    for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
+        let workspace = unique_workspace();
+        let probe = format!("probe-{name}");
+        let result = dispatch_adapter(
+            documented_adapter(name),
+            name,
+            &fake,
+            &[("NEEDLE_FAKE_AGENT_PROBE", probe.clone())],
+            &format!("needle-matrix-{name}-env"),
+            workspace.path(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name} dispatch should succeed: {e:#}"));
+
+        assert_eq!(result.exit_code, 0, "{name} success exit code");
+        // Output capture is a both-streams contract on the same run.
+        assert!(
+            result.stdout.contains(&format!("fake-{name}-ok")),
+            "{name} stdout marker must be captured"
+        );
+        assert!(
+            result.stderr.contains(&format!("fake-{name}-ok-stderr")),
+            "{name} stderr marker must be captured"
+        );
+
+        let lines = read_log(&fake);
+        let expected_revision = MATRIX_REVISION.to_string();
+        let expected_epoch = MATRIX_EPOCH.to_string();
+        assert_eq!(
+            log_values(&lines, "env_probe").last().copied(),
+            Some(probe.as_str()),
+            "{name} must pass its adapter environment map to the child"
+        );
+        assert_eq!(
+            log_values(&lines, "env_attempt").last().copied(),
+            Some(MATRIX_ATTEMPT),
+            "{name} child must see the dispatch attempt id"
+        );
+        assert_eq!(
+            log_values(&lines, "env_revision").last().copied(),
+            Some(expected_revision.as_str()),
+            "{name} child must see the verified claim revision"
+        );
+        assert_eq!(
+            log_values(&lines, "env_fencing").last().copied(),
+            Some(expected_epoch.as_str()),
+            "{name} child must see the verified claim fencing epoch"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unclaimed_analysis_strips_claim_credentials_from_documented_adapters() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+
+    for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
+        let workspace = unique_workspace();
+        let probe = format!("probe-{name}");
+        let mut adapter = documented_adapter(name);
+        // A stale credential planted in the adapter's own static environment
+        // (and anything inherited from the worker's parent) must not survive
+        // the claim-free path: the child holds no bead lifecycle credential.
+        adapter
+            .environment
+            .insert("NEEDLE_BEAD_FENCING_TOKEN".to_string(), "99".to_string());
+        adapter
+            .environment
+            .insert("NEEDLE_BEAD_REVISION".to_string(), "99".to_string());
+
+        let result = dispatch_unclaimed(
+            adapter,
+            name,
+            &fake,
+            &[("NEEDLE_FAKE_AGENT_PROBE", probe.clone())],
+            &format!("needle-matrix-{name}-unclaimed"),
+            workspace.path(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name} unclaimed dispatch should succeed: {e:#}"));
+
+        assert_eq!(result.exit_code, 0, "{name} success exit code");
+
+        let lines = read_log(&fake);
+        assert_eq!(
+            log_values(&lines, "env_probe").last().copied(),
+            Some(probe.as_str()),
+            "{name} adapter environment still passes on the claim-free path"
+        );
+        assert_eq!(
+            log_values(&lines, "env_fencing").last().copied(),
+            Some("missing"),
+            "{name} unclaimed analysis must not carry a fencing token"
+        );
+        assert_eq!(
+            log_values(&lines, "env_revision").last().copied(),
+            Some("missing"),
+            "{name} unclaimed analysis must not carry a claim revision"
         );
     }
 }
