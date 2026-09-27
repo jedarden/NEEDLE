@@ -10,8 +10,9 @@ agent:
 bead_cli:
   backend: bead-rs
 worker:
-  # NEEDLE is build-heavy: one worker, launched with -w /home/coding/NEEDLE.
-  max_workers: 1
+  # Match the three source-controlled NEEDLE-homed fleet workers. Atomic bead
+  # claims, resource keys, and dependency edges exclude overlapping work.
+  max_workers: 3
   launch_stagger_seconds: 2
   idle_timeout: 60
   idle_action: wait
@@ -25,9 +26,9 @@ workspace:
   default: /home/coding/NEEDLE
   home: /home/coding/.needle
   labels: []
-  # Only one live worker identity may hold an in-progress NEEDLE bead across
-  # home and roaming workers.
-  max_workers: 1
+  # Admit the three homed workers concurrently; bead-level exclusion remains
+  # the authority for same-task and same-resource conflicts.
+  max_workers: 3
 strands:
   pluck:
     exclude_labels: []
