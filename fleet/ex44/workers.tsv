@@ -1,5 +1,13 @@
 # codinghome/ex44 fleet membership. This is the only source-controlled roster.
 #
+# 2026-09 note: the TradeGraph queue is owned by lab (queue.owner_host=lab, see
+# needle-4164f30e), so no row may name /home/coding/tradegraph-platform here.
+# The identifiers glm53-tgplat, codex-luna-tgplat-01/-02, glm-roam-22,
+# codex-roam-01/-02 and codex-luna-tradegraph are historical names: they were
+# repointed (needle-182be85c) to unstaffed, quiet, bead-rs homes with a deep
+# enough ready queue that Pluck finds work without Explore. codex-luna-adc is
+# deliberately left on the roam-only home as a canary for Explore recovery.
+#
 # Columns (tab-separated):
 #   identifier  workspace  agent  start_delay_seconds  explore_enabled
 # Every worker keeps its listed workspace as the Pluck-first home route, then
@@ -11,8 +19,8 @@ glm-armor	/home/coding/ARMOR	claude-code-glm-5.3-flash	30	true
 glm-mta	/home/coding/mta-my-way	claude-code-glm-5.3-flash	45	true
 glm-pdftract	/home/coding/pdftract	claude-code-glm-5.3	60	true
 glm-spaxel	/home/coding/spaxel	claude-code-glm-5.3-flash	75	true
-codex-luna-tradegraph	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	90	true
-glm53-tgplat	/home/coding/tradegraph-platform	claude-code-glm-5.3	105	true
+codex-luna-tradegraph	/home/coding/telegram-claude-bridge	codex-gpt-5.6-luna-xhigh	90	true
+glm53-tgplat	/home/coding/TWILL	claude-code-glm-5.3	105	true
 glm53-cgraph2	/home/coding/commitgraph	claude-code-glm-5.3	120	true
 codex-luna-adc	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	135	true
 glm53-ibkr	/home/coding/ibkr-mcp	claude-code-glm-5.3	150	true
@@ -27,13 +35,13 @@ glm-roam-18	/home/coding/jedarden.com	claude-code-glm-5.3-flash	270	true
 glm-roam-19	/home/coding/ytt	claude-code-glm-5.3-flash	285	true
 glm-roam-20	/home/coding/bead-rs	claude-code-glm-5.3-flash	300	true
 glm-roam-21	/home/coding/FABRIC	claude-code-glm-5.3-flash	30	true
-glm-roam-22	/home/coding/tradegraph-platform	claude-code-glm-5.3-flash	60	true
+glm-roam-22	/home/coding/coned-rate-optimizer	claude-code-glm-5.3-flash	60	true
 glm-roam-23	/home/coding/reddit-media-player	claude-code-glm-5.3-flash	90	true
 glm-roam-24	/home/coding/claude-print	claude-code-glm-5.3-flash	120	true
-codex-roam-01	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	0	true
-codex-roam-02	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	15	true
+codex-roam-01	/home/coding/bootstrap	codex-gpt-5.6-luna-xhigh	0	true
+codex-roam-02	/home/coding/git-activity-exporter	codex-gpt-5.6-luna-xhigh	15	true
 codex-luna-needle-01	/home/coding/NEEDLE	codex-gpt-6-luna-xhigh	315	false
 claude-needle-01	/home/coding/NEEDLE	claude-print	330	false
 codex-luna-warp	/home/coding/WARP	codex-gpt-5.6-luna-xhigh	45	false
-codex-luna-tgplat-01	/home/coding/tradegraph-platform	codex-gpt-5.6-luna-xhigh	345	false
-codex-luna-tgplat-02	/home/coding/tradegraph-platform	codex-gpt-5.6-luna-xhigh	360	false
+codex-luna-tgplat-01	/home/coding/TWILL	codex-gpt-5.6-luna-xhigh	345	true
+codex-luna-tgplat-02	/home/coding/brand-kit	codex-gpt-5.6-luna-xhigh	360	true

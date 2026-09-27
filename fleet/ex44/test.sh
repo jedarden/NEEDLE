@@ -15,14 +15,28 @@ grep -q 'deliberate pinning exception' "$SRC_DIR/README.md"
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 32 ]]
 [[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 32 ]]
-[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 27 ]]
-grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
+[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 29 ]]
+grep -q $'^codex-luna-tradegraph\t/home/coding/telegram-claude-bridge\t.*\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 [[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 8 ]]
-[[ "$(awk -F'\t' '$1 ~ /^codex-luna-tgplat-0[12]$/ && $2 == "/home/coding/tradegraph-platform" && $5 == "false" {n++} END {print n+0}' <<<"$rows")" -eq 2 ]]
+# The TradeGraph queue is owned by lab (needle-4164f30e): a codinghome worker
+# homed there can never Pluck (workspace_queue_owner_mismatch) and, with Explore
+# off, can never work at all. No roster row may name it.
+! grep -q $'\t/home/coding/tradegraph-platform\t' <<<"$rows"
+# needle-182be85c: the repointed slots keep their historical identifiers.
+grep -q $'^glm53-tgplat\t/home/coding/TWILL\tclaude-code-glm-5.3\t105\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-tgplat-01\t/home/coding/TWILL\tcodex-gpt-5.6-luna-xhigh\t345\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-tgplat-02\t/home/coding/brand-kit\tcodex-gpt-5.6-luna-xhigh\t360\ttrue$' "$MANIFEST"
+grep -q $'^codex-roam-01\t/home/coding/bootstrap\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
+grep -q $'^codex-roam-02\t/home/coding/git-activity-exporter\tcodex-gpt-5.6-luna-xhigh\t15\ttrue$' "$MANIFEST"
+grep -q $'^glm-roam-22\t/home/coding/coned-rate-optimizer\tclaude-code-glm-5.3-flash\t60\ttrue$' "$MANIFEST"
+# At most two workers per repointed home (shared checkout: duplicate claims are the failure mode).
+[[ "$(awk -F'\t' '$2 == "/home/coding/TWILL" {n++} END {print n+0}' <<<"$rows")" -eq 2 ]]
+# codex-luna-adc is the only worker left on the roam-only home (Explore-recovery canary).
+[[ "$(awk -F'\t' '$2 == "/home/coding/.needle/roam-only" {print $1}' <<<"$rows")" == codex-luna-adc ]]
 [[ "$(awk -F'\t' '$3 == "codex-gpt-6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
 grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
-grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-tradegraph\t/home/coding/telegram-claude-bridge\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t135\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-needle-01\t/home/coding/NEEDLE\tcodex-gpt-6-luna-xhigh\t315\tfalse$' "$MANIFEST"
 grep -q $'^codex-luna-warp\t/home/coding/WARP\tcodex-gpt-5.6-luna-xhigh\t45\tfalse$' "$MANIFEST"

@@ -2,9 +2,9 @@
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
 reproducible. It registers 32 workers across the Z.ai, OpenAI, and Anthropic
-provider pools; 28 can roam, while four workers remain scoped to their home
-repositories: two to NEEDLE and two (`codex-luna-tgplat-01`/`-02`) to
-tradegraph-platform, both build-heavy. Every roaming worker tries its listed home
+provider pools; 29 can roam, while three workers remain scoped to their home
+repositories: two to NEEDLE (`codex-luna-needle-01`, `claude-needle-01`) and
+`codex-luna-warp` to WARP. Every roaming worker tries its listed home
 workspace first, then may use the maintained-workspace frontier when that
 route has no eligible work. Eight workers use GLM-5.3, fourteen use
 GLM-5.3-Flash, eight use Codex GPT-5.6 Luna, one uses Codex GPT-6 Luna, and
@@ -126,6 +126,31 @@ harness: `codex-luna-tradegraph`, `codex-luna-adc`, and
 `codex-luna-needle-01`. Existing role suffixes keep the operational purpose
 visible; the `codex-luna-*` prefix prevents dashboards and operators from
 mistaking these workers for Z.ai-backed GLM capacity.
+
+## Home routing after the TradeGraph cutover
+
+The TradeGraph queue moved to lab (`queue.owner_host=lab`, needle-4164f30e), so
+a codinghome worker homed on `/home/coding/tradegraph-platform` fails Pluck with
+`workspace_queue_owner_mismatch`; with Explore off (`codex-luna-tgplat-01`/`-02`
+before needle-182be85c) it could never work at all. No roster row may name that
+path (`test.sh` asserts it), and the backlog SLO must not count it as a pool.
+
+The four roam-only Codex workers were also idle: Explore exceeds its 120 s
+wall-clock budget on every cycle and reports no work, and no Codex worker made a
+single off-home claim in a full day. Pluck against a home queue does not have
+that dependency, so needle-182be85c gave those workers, the two former
+TradeGraph GLM slots and `glm-roam-22` real homes. Homes were chosen because
+they are unstaffed, roam-accessible, hold at least seven eligible beads, have no
+in-progress bead or live process, have been quiet for an hour, and are under
+1 GB. `codex-luna-adc` stays on the roam-only home as a canary: if it ever starts
+claiming work, Explore has recovered. Identifiers are unchanged (they name the
+slot's history, not its home), so unit names, logs and claim history stay
+continuous.
+
+Z.ai saturation guard: the productive GLM fleet (~19 workers) sits at the
+throughput knee of about 16 concurrent sessions (roughly 80% of plateau throughput
+at 13-15 sessions, 97% at 15-17). Roster changes must keep GLM mean concurrent
+sessions at or above 15.5 and GLM launch-admission holds under 3% of time.
 
 ## Luna model comparison
 
