@@ -770,6 +770,16 @@ fn install_rebuilt_component<T>(
     }
 }
 
+/// What `Worker::release_terminal_claim` did to a claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimRelease {
+    /// The store released the claim.
+    Released,
+    /// The claim had already left `in_progress` (a bead-rs conflict): there was
+    /// nothing to release, and the state that replaced it is preserved.
+    AlreadyLeft,
+}
+
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
     /// Worker-policy time source. Production uses Tokio; deterministic tests
@@ -6170,19 +6180,74 @@ impl Worker {
     /// audit trail), none of which lost real work but every one of which
     /// cost a full boot cycle. Mirrors the conflict-as-success handling
     /// `release_recovery` already applies elsewhere in this file.
-    async fn release_terminal_claim(&self, bead_id: &BeadId) -> Result<()> {
+    ///
+    /// Reports which of the two it was so a caller that must not act on a
+    /// conflict (the failed-attempt accounting in the `Errored` branch) can
+    /// tell a released live claim from a claim that had already gone.
+    async fn release_terminal_claim(&self, bead_id: &BeadId) -> Result<ClaimRelease> {
         match tokio::time::timeout(Duration::from_secs(30), self.store.release(bead_id)).await {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => Ok(ClaimRelease::Released),
             Ok(Err(error)) if operation_failed_with(&error, "release", 4) => {
                 tracing::debug!(
                     bead_id = %bead_id,
                     error = %error,
                     "release conflict on terminal action; claim already left in_progress, treating as satisfied"
                 );
-                Ok(())
+                Ok(ClaimRelease::AlreadyLeft)
             }
             Ok(Err(error)) => Err(error),
             Err(_) => bail!("release of {bead_id} timed out"),
+        }
+    }
+
+    /// Whether the store still shows `bead_id` in progress under this worker's
+    /// own identity — a live claim this worker is entitled to give up.
+    ///
+    /// Anything else (already closed by the agent, released, or taken over by
+    /// another worker) is not this worker's failed attempt, and so is never
+    /// counted as one. An unreadable bead is reported as not held: an unknown
+    /// state must not be penalised.
+    async fn holds_live_claim(&self, bead_id: &BeadId) -> bool {
+        match tokio::time::timeout(Duration::from_secs(30), self.store.show(bead_id)).await {
+            Ok(Ok(current)) => {
+                current.status == crate::types::BeadStatus::InProgress
+                    && current.assignee.as_deref() == Some(self.qualified_id.as_str())
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(bead_id = %bead_id, error = %error, "could not read the bead before error recovery; not counting a failed attempt");
+                false
+            }
+            Err(_) => {
+                tracing::warn!(bead_id = %bead_id, "show() timed out before error recovery; not counting a failed attempt");
+                false
+            }
+        }
+    }
+
+    /// Count an `Errored` recovery release as one failed attempt.
+    ///
+    /// Without this a handler error or timeout released the bead with no
+    /// failure count and no cooldown, so pluck's failure sort and the
+    /// quarantine ceiling never engaged and the same bead was re-claimed
+    /// indefinitely (needle-3ee2edc8). Accounting is best effort: the release
+    /// has already happened, so a store error here is logged, never fatal.
+    async fn penalize_errored_release(&self, bead: &crate::types::Bead) {
+        match self
+            .outcome_handler
+            .penalize_errored_release(self.store.as_ref(), bead)
+            .await
+        {
+            Ok(penalty) => tracing::warn!(
+                bead_id = %bead.id,
+                failure_count = penalty.failure_count,
+                quarantined = penalty.quarantined,
+                "handler error released a live claim; counted it as a failed attempt"
+            ),
+            Err(error) => tracing::warn!(
+                bead_id = %bead.id,
+                error = %error,
+                "failed to count a handler-error release as a failed attempt; the bead remains eligible"
+            ),
         }
     }
 
@@ -6340,8 +6405,13 @@ impl Worker {
                 )?;
             }
             BeadAction::Errored => {
+                // Read the claim BEFORE releasing it: only a live claim still
+                // held by this worker earns a failed attempt (needle-3ee2edc8).
+                // A bead the agent already closed, or one another worker now
+                // holds, is not this bead's failure.
+                let held_live_claim = self.holds_live_claim(&bead.id).await;
                 // Release after handler error.
-                self.release_terminal_claim(&bead.id).await?;
+                let release = self.release_terminal_claim(&bead.id).await?;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -6349,6 +6419,9 @@ impl Worker {
                     },
                     chrono::Utc::now(),
                 )?;
+                if held_live_claim && release == ClaimRelease::Released {
+                    self.penalize_errored_release(&bead).await;
+                }
             }
         }
 
@@ -12677,6 +12750,105 @@ mod tests {
         let current = store.show(&bead.id).await.unwrap();
         assert_eq!(current.status, BeadStatus::Open);
         assert_eq!(current.assignee, None);
+    }
+
+    /// Build a worker whose current bead is `bead`, held under `assignee`
+    /// (`None` means "this worker's own identity") in the given status.
+    async fn errored_recovery_fixture(
+        id: &str,
+        status: BeadStatus,
+        assignee: Option<&str>,
+    ) -> (Worker, Arc<MockStore>, Bead) {
+        let mut bead = make_test_bead(id);
+        bead.status = status;
+        let store = Arc::new(MockStore::new(vec![bead.clone()]));
+        let mut worker = make_worker(store.clone());
+        worker.boot().await.unwrap();
+        let holder = assignee
+            .map(str::to_string)
+            .unwrap_or_else(|| worker.qualified_id());
+        bead.assignee = Some(holder.clone());
+        store
+            .beads
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|candidate| candidate.id == bead.id)
+            .unwrap()
+            .assignee = Some(holder);
+        worker.state = WorkerState::Handling;
+        worker.current_bead = Some(bead.clone());
+        (worker, store, bead)
+    }
+
+    #[tokio::test]
+    async fn errored_release_counts_a_failed_attempt_for_a_live_claim() {
+        // needle-3ee2edc8: a handler error or timeout that leaves this
+        // worker's own claim in progress is a failed attempt, so the failure
+        // count, soft cooldown and quarantine ceiling can bound the retries.
+        let (mut worker, store, bead) =
+            errored_recovery_fixture("needle-errored-live", BeadStatus::InProgress, None).await;
+
+        worker.apply_bead_action(BeadAction::Errored).await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Logging);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Open);
+        assert_eq!(current.assignee, None);
+        assert!(
+            current
+                .labels
+                .iter()
+                .any(|label| label == "failure-count:1"),
+            "a released live claim must count as a failed attempt: {:?}",
+            current.labels
+        );
+        assert!(
+            current
+                .labels
+                .iter()
+                .any(|label| label.starts_with("retry-cooldown-until:")),
+            "and rotate behind other work: {:?}",
+            current.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn errored_release_does_not_count_a_bead_the_agent_already_closed() {
+        // The agent closed the bead before the outer handler timed out
+        // (needle-e2e00151's production evidence): that is not a failure.
+        let (mut worker, store, bead) =
+            errored_recovery_fixture("needle-errored-closed", BeadStatus::Closed, None).await;
+
+        worker.apply_bead_action(BeadAction::Errored).await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Logging);
+        let current = store.show(&bead.id).await.unwrap();
+        assert!(
+            current.labels.is_empty(),
+            "a closed bead must earn no failure accounting: {:?}",
+            current.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn errored_release_does_not_count_a_claim_another_worker_holds() {
+        let (mut worker, store, bead) = errored_recovery_fixture(
+            "needle-errored-taken-over",
+            BeadStatus::InProgress,
+            Some("some-other-worker"),
+        )
+        .await;
+
+        worker.apply_bead_action(BeadAction::Errored).await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Logging);
+        let current = store.show(&bead.id).await.unwrap();
+        assert!(
+            current.labels.is_empty(),
+            "another worker's claim is not this worker's failed attempt: {:?}",
+            current.labels
+        );
     }
 
     #[tokio::test]

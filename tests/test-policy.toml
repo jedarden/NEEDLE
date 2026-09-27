@@ -240,7 +240,13 @@ version = 1
 # replaces its predecessor without touching quarantine-until, is pruned by a
 # quarantine, and is cleared on success). The unit tier is the only home: the
 # preference helper and the handler's label bookkeeping are private.
-max_tests = 4000
+# +6 Errored-release failure accounting (needle-3ee2edc8): 3 in
+# src/outcome/mod.rs (a failed attempt is counted with a soft cooldown, the
+# ceiling quarantines, a disabled ceiling never does) and 3 in
+# src/worker/mod.rs (a live claim is counted; an already-closed bead and a
+# claim another worker holds are not). The worker's Errored branch and the
+# handler's penalty method are private, so only the unit tier reaches them.
+max_tests = 4006
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

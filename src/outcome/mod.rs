@@ -40,6 +40,15 @@ pub(crate) mod fallback_verification;
 const RETRY_COOLDOWN_BASE_SECS: u64 = 5 * 60;
 const RETRY_COOLDOWN_MAX_SECS: u64 = 30 * 60;
 
+/// The failure accounting one `Errored` recovery release earned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ErroredReleasePenalty {
+    /// The bead's failure count after this attempt.
+    pub(crate) failure_count: u32,
+    /// Whether this attempt reached the ceiling and quarantined the bead.
+    pub(crate) quarantined: bool,
+}
+
 /// Provenance captured when validation gates are resolved for one bead.
 ///
 /// The summary travels with every gate state transition so telemetry can
@@ -4600,6 +4609,51 @@ impl OutcomeHandler {
         Ok(())
     }
 
+    /// Count an `Errored` recovery release of a live claim as a failed attempt.
+    ///
+    /// A handler error or timeout ends the attempt without an outcome
+    /// classification, and the worker releases the claim. That release used to
+    /// leave no failure count and no cooldown, so pluck's failure-count sort and
+    /// the quarantine ceiling never engaged and one bead could be re-claimed
+    /// indefinitely (needle-3ee2edc8). This routes it through the same
+    /// accounting as an ordinary failure: the count is incremented, a soft retry
+    /// cooldown is installed below the ceiling, and the bead is quarantined at
+    /// it.
+    ///
+    /// The caller must only call this for a claim it actually released; a bead
+    /// the agent already closed is not a failure.
+    pub(crate) async fn penalize_errored_release(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+    ) -> Result<ErroredReleasePenalty> {
+        let failure_count = self.increment_failure_count(store, bead).await?;
+        let threshold = self.config.outcome.quarantine_after_failures;
+        if threshold == 0 || failure_count < threshold {
+            return Ok(ErroredReleasePenalty {
+                failure_count,
+                quarantined: false,
+            });
+        }
+
+        for event in self
+            .quarantine_bead(store, bead, failure_count, threshold)
+            .await?
+        {
+            if let Err(error) = self.telemetry.emit(event, Utc::now()) {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "failed to emit the quarantine event for a handler-error release"
+                );
+            }
+        }
+        Ok(ErroredReleasePenalty {
+            failure_count,
+            quarantined: true,
+        })
+    }
+
     /// Reset failure and retry state after verified shipped work.
     ///
     /// Called on success to clear the failure counter so the bead starts fresh
@@ -6202,6 +6256,121 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, StoreAction::RemoveLabel(_, label) if *label == soft)),
             "success must clear the soft retry window"
+        );
+    }
+
+    // ── Errored recovery accounting (needle-3ee2edc8) ──
+
+    #[tokio::test]
+    async fn errored_release_penalty_counts_a_failed_attempt_and_installs_a_soft_cooldown() {
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let penalty = handler
+            .penalize_errored_release(&store, &bead)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            penalty,
+            ErroredReleasePenalty {
+                failure_count: 1,
+                quarantined: false
+            }
+        );
+        let actions = store.actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
+            ),
+            "the first errored release must count as failure 1: {actions:?}"
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                StoreAction::AddLabel(_, label) if label.starts_with("retry-cooldown-until:")
+            )),
+            "a below-ceiling errored release must install the soft cooldown: {actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "quarantined")),
+            "one failure must not quarantine: {actions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn errored_release_penalty_quarantines_at_the_failure_ceiling() {
+        // Default quarantine_after_failures is 5: failure-count:4 crosses it.
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:4".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let penalty = handler
+            .penalize_errored_release(&store, &bead)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            penalty,
+            ErroredReleasePenalty {
+                failure_count: 5,
+                quarantined: true
+            }
+        );
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "quarantined")),
+            "the ceiling must quarantine the bead: {actions:?}"
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                StoreAction::AddLabel(_, label) if label.starts_with("quarantine-until:")
+            )),
+            "a quarantine must carry an expiry: {actions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn errored_release_penalty_never_quarantines_when_the_ceiling_is_disabled() {
+        let mut config = Config::default();
+        config.outcome.quarantine_after_failures = 0;
+        let handler = test_handler_with_config(config);
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:99".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let penalty = handler
+            .penalize_errored_release(&store, &bead)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            penalty,
+            ErroredReleasePenalty {
+                failure_count: 100,
+                quarantined: false
+            }
+        );
+        let actions = store.actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "quarantined")),
+            "a disabled ceiling must never quarantine: {actions:?}"
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                StoreAction::AddLabel(_, label) if label.starts_with("retry-cooldown-until:")
+            )),
+            "the soft cooldown still applies: {actions:?}"
         );
     }
 
