@@ -305,6 +305,59 @@ fn terminal_reason(
     }
 }
 
+/// A verdict `handle_success` reached after the exit code was classified.
+///
+/// Exit code 0 classifies as [`Outcome::Success`] before the close-evidence,
+/// shipped-work and DoD-bypass checks run, so a success the handler then
+/// rejects must not reach the ledger as `verified_success` (needle-d39f6499,
+/// needle-3386daef). The bead action is already correct on those paths; this
+/// carries the semantic verdict to the `attempt.resolved` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LateVerdict {
+    /// A post-exit gate ran and rejected the work.
+    Rejected { gate: String },
+    /// A post-exit gate could not run, so nothing judged the work.
+    GateError { gate: String },
+    /// The handler could not establish whether the agent's work was accepted.
+    Unjudged { reason: &'static str },
+}
+
+impl LateVerdict {
+    /// The rejected gate named by a failing report.
+    fn rejected_by(report: &GateReport) -> Self {
+        let mut failed: Vec<&str> = report
+            .results
+            .iter()
+            .filter(|(_, result)| !result.passed())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        failed.sort_unstable();
+        LateVerdict::Rejected {
+            gate: if failed.is_empty() {
+                "unknown".to_string()
+            } else {
+                failed.join(",")
+            },
+        }
+    }
+
+    /// The ledger outcome and terminal reason this verdict resolves to.
+    fn resolution(&self) -> (String, Option<String>) {
+        match self {
+            LateVerdict::Rejected { gate } => {
+                ("work_failure".to_string(), Some(format!("gate:{gate}")))
+            }
+            LateVerdict::GateError { gate } => (
+                "infrastructure_failure".to_string(),
+                Some(format!("gate_error:{gate}")),
+            ),
+            LateVerdict::Unjudged { reason } => {
+                ("indeterminate".to_string(), Some((*reason).to_string()))
+            }
+        }
+    }
+}
+
 /// What the adapter-health detector concluded about one failure (N-T23).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AdapterJudgement {
@@ -1471,6 +1524,7 @@ impl OutcomeHandler {
             self.note_adapter_success(&adapter_name, attempt_provider.as_deref(), bead);
         }
 
+        let mut late_verdict = None;
         let (bead_action, telemetry_events) =
             if let Some(fingerprint) = infra_fingerprint.as_deref() {
                 self.handle_infrastructure_failure(store, bead, fingerprint)
@@ -1478,8 +1532,15 @@ impl OutcomeHandler {
             } else {
                 match outcome.clone() {
                     Outcome::Success => {
-                        self.handle_success(store, bead, gate_report, gate_telemetry, &mut outcome)
-                            .await?
+                        self.handle_success(
+                            store,
+                            bead,
+                            gate_report,
+                            gate_telemetry,
+                            &mut outcome,
+                            &mut late_verdict,
+                        )
+                        .await?
                     }
                     Outcome::Failure => {
                         // If we have a gate report with failures, check if any gate had execution errors.
@@ -1614,7 +1675,13 @@ impl OutcomeHandler {
                     crate::attempt_accounting::DECOMPOSED.to_string(),
                     Some(decomposition.terminal_reason().to_string()),
                 ),
-                None => (resolved_outcome, resolved_reason),
+                // A late verdict replaces the exit-code classification only
+                // after decomposition has been decided on it: a split attempt
+                // still resolves `decomposed`, never a failure (ADR-030).
+                None => match &late_verdict {
+                    Some(verdict) => verdict.resolution(),
+                    None => (resolved_outcome, resolved_reason),
+                },
             }
         };
 
@@ -2413,6 +2480,9 @@ impl OutcomeHandler {
     ///    - Still open → emit BeadOrphaned warning.
     ///
     /// NEEDLE does NOT auto-close — the agent owns closure via `br close`.
+    ///
+    /// Every path that does not accept the work records why in `late`, so the
+    /// ledger row reports the verdict rather than the exit code.
     async fn handle_success(
         &self,
         store: &dyn BeadStore,
@@ -2420,6 +2490,7 @@ impl OutcomeHandler {
         gate_report: Option<GateReport>,
         gate_telemetry: GateResolutionTelemetry,
         outcome: &mut Outcome,
+        late: &mut Option<LateVerdict>,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent completed successfully");
 
@@ -2495,6 +2566,7 @@ impl OutcomeHandler {
                     close_verification::CloseEvidenceVerdict::Skipped
                     | close_verification::CloseEvidenceVerdict::Pass => {}
                     close_verification::CloseEvidenceVerdict::Fail(report) => {
+                        *late = Some(LateVerdict::rejected_by(&report));
                         return self
                             .handle_gate_failure(store, bead, &report, gate_telemetry)
                             .await;
@@ -2503,6 +2575,9 @@ impl OutcomeHandler {
                         command,
                         reason,
                     } => {
+                        *late = Some(LateVerdict::GateError {
+                            gate: close_verification::GATE_NAME.to_string(),
+                        });
                         return self
                             .handle_gate_error(
                                 store,
@@ -2528,6 +2603,7 @@ impl OutcomeHandler {
                                 "bead closed but shipped-work check failed — reopening and releasing"
                             );
                             let report = GateReport::single_failure("shipped_work", reason);
+                            *late = Some(LateVerdict::rejected_by(&report));
                             return self
                                 .handle_gate_failure(store, bead, &report, gate_telemetry)
                                 .await;
@@ -2556,6 +2632,7 @@ impl OutcomeHandler {
                                     );
                                     let report =
                                         GateReport::single_failure(dod_bypass::GATE_NAME, reason);
+                                    *late = Some(LateVerdict::rejected_by(&report));
                                     return self
                                         .handle_gate_failure(store, bead, &report, gate_telemetry)
                                         .await;
@@ -2605,6 +2682,9 @@ impl OutcomeHandler {
                                 reason = %reason,
                                 "shipped-work gate could not run — releasing without incrementing failure count"
                             );
+                            *late = Some(LateVerdict::GateError {
+                                gate: "shipped_work".to_string(),
+                            });
                             return self
                                 .handle_gate_error(
                                     store,
@@ -2757,6 +2837,9 @@ impl OutcomeHandler {
                                 reason = %reason,
                                 "no shipped work detected — releasing orphaned bead with failure increment"
                             );
+                            *late = Some(LateVerdict::Rejected {
+                                gate: "shipped_work".to_string(),
+                            });
                             // Release and increment failure count to apply quarantine.
                             let mut release_events =
                                 self.prepare_release_events(store, bead).await?;
@@ -2798,6 +2881,9 @@ impl OutcomeHandler {
                                 reason = %reason,
                                 "shipped-work gate execution error — releasing without incrementing failure count"
                             );
+                            *late = Some(LateVerdict::GateError {
+                                gate: "shipped_work".to_string(),
+                            });
                             // Release without incrementing failure count
                             let mut release_events =
                                 self.prepare_release_events(store, bead).await?;
@@ -2813,6 +2899,9 @@ impl OutcomeHandler {
                                 error = %e,
                                 "shipped-work check errored — releasing orphaned bead with failure increment"
                             );
+                            *late = Some(LateVerdict::GateError {
+                                gate: "shipped_work".to_string(),
+                            });
                             // On error, release and increment failure count.
                             let mut release_events =
                                 self.prepare_release_events(store, bead).await?;
@@ -2836,6 +2925,9 @@ impl OutcomeHandler {
                         "enforce_shipped_work disabled — releasing orphaned bead"
                     );
                     // If enforce_shipped_work is disabled, just release without closing.
+                    *late = Some(LateVerdict::Unjudged {
+                        reason: "orphaned_unjudged",
+                    });
                     let mut release_events = self.prepare_release_events(store, bead).await?;
                     events.append(&mut release_events);
                     return Ok((
@@ -2850,6 +2942,9 @@ impl OutcomeHandler {
                     bead_id = %bead.id,
                     "show() timed out, releasing bead to enforce postcondition"
                 );
+                *late = Some(LateVerdict::Unjudged {
+                    reason: "closure_verification_timeout",
+                });
                 events.push(EventKind::WorkerHandlingTimeout {
                     bead_id: bead.id.clone(),
                     outcome: "success".to_string(),
@@ -2870,6 +2965,9 @@ impl OutcomeHandler {
                     error = %e,
                     "show() failed, releasing bead to enforce postcondition"
                 );
+                *late = Some(LateVerdict::Unjudged {
+                    reason: "closure_verification_error",
+                });
                 events.push(EventKind::WorkerHandlingTimeout {
                     bead_id: bead.id.clone(),
                     outcome: "success".to_string(),
@@ -8504,6 +8602,95 @@ mod tests {
             "decomposed:split_parent_without_commits"
         );
         assert_eq!(rows[1].data["outcome"], "verified_success");
+    }
+
+    /// needle-d39f6499 / needle-3386daef: exit 0 classifies as Success before
+    /// the shipped-work gate runs. When that later gate rejects the work, the
+    /// ledger row must say `work_failure` naming the gate — whether the agent
+    /// closed the bead (reopened) or left it open (orphaned) — and an orphan
+    /// nothing judged is `indeterminate`, never `verified_success`.
+    #[tokio::test]
+    async fn late_gate_rejection_resolves_work_failure_not_verified_success() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("late-gate-verdict");
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let mut enforced = Config::default();
+        enforced.worker.enforce_shipped_work = true;
+        let mut unenforced = Config::default();
+        unenforced.worker.enforce_shipped_work = false;
+
+        // Agent closed the bead; shipped work finds nothing and reopens it.
+        // Agent left the bead open; shipped work finds nothing and releases it.
+        // Agent left the bead open with enforcement off; nothing judged it.
+        for (config, status) in [
+            (enforced.clone(), BeadStatus::Done),
+            (enforced, BeadStatus::Open),
+            (unenforced, BeadStatus::Open),
+        ] {
+            let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+            let store = test_store(status);
+            let result = handler
+                .handle(&store, &bead, &test_output(0), false)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.outcome,
+                Outcome::Success,
+                "process verdict unchanged"
+            );
+            assert!(
+                matches!(result.bead_action, BeadAction::Released(_)),
+                "work not accepted: {:?}",
+                result.bead_action
+            );
+        }
+        helper.sync().await;
+
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(rows.len(), 3);
+        for (row, label) in rows[..2].iter().zip(["reopened", "orphaned"]) {
+            assert_eq!(row.data["outcome"], "work_failure", "{label} row");
+            assert_eq!(
+                row.data["terminal_reason"], "gate:shipped_work",
+                "{label} row"
+            );
+            assert_eq!(row.data["exit_code"], 0, "{label} row");
+        }
+        assert_eq!(rows[2].data["outcome"], "indeterminate");
+        assert_eq!(rows[2].data["terminal_reason"], "orphaned_unjudged");
+        for row in &rows {
+            assert_row_satisfies_v1_contract("late-verdict row", row);
+        }
+    }
+
+    /// A late verdict never overrides a decomposition: a split attempt whose
+    /// bead the shipped-work gate then releases still resolves `decomposed`.
+    #[tokio::test]
+    async fn late_gate_rejection_keeps_split_template_decomposed() {
+        let (_guard, _home) = isolated_home();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = true;
+        let helper = crate::telemetry::test_utils::TestHelper::new("late-verdict-split");
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.set_attempt_context(AttemptContext {
+            prompt_template: crate::attempt_accounting::SPLIT_TEMPLATE.to_string(),
+            template_version: "split-default".to_string(),
+            ..Default::default()
+        });
+        let store = test_store(BeadStatus::Open);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+        helper.sync().await;
+
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].data["outcome"], "decomposed");
     }
 
     /// A dispatch cancelled before `handle` runs is still terminal, so it

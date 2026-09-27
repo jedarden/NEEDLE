@@ -254,7 +254,11 @@ version = 1
 # +1 Explore claim-boundary regression (needle-4b42092c): an injected Explore
 # frontier advances after an atomic race, while a CLI/backend claim error
 # remains distinct and escalates through repeated-error telemetry.
-max_tests = 4008
+# +2 late post-exit verdict regressions (needle-d39f6499, needle-3386daef):
+# exit 0 rejected by shipped work (reopened/orphaned) resolves work_failure,
+# an unjudged orphan indeterminate, and a split attempt stays decomposed.
+# handle_success and the ledger row are private to src/outcome/mod.rs.
+max_tests = 4010
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -421,7 +421,9 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 - `infrastructure_failure` — nothing judged the work: the agent binary was missing or crashed, or a gate could not run or could never pass. Feeds workspace health, not the bead's failure count.
 - `cancelled` — the worker was interrupted before a verdict.
 - `stale_ownership` — reserved; assigned by the resolver once ownership is re-checked at resolution time (ADR-024), not by the outcome handler.
-- `indeterminate` — the attempt ended without a verdict: the time budget expired while the work was still running.
+- `indeterminate` — the attempt ended without a verdict: the time budget expired while the work was still running, or the agent exited 0 and the handler could not establish whether the work was accepted (`terminal_reason` `orphaned_unjudged`, `closure_verification_timeout`, `closure_verification_error`).
+
+Exit code 0 is classified before the post-exit checks run — close evidence, shipped work, DoD bypass. When one of them rejects the work the row is `work_failure` with `terminal_reason: "gate:<name>"` (e.g. `gate:shipped_work`), and when one cannot run it is `infrastructure_failure` with `gate_error:<name>`, whether the agent closed the bead (reopened) or left it open (orphaned). A decomposition is decided first and is not overridden.
 - `decomposed` — the attempt split its bead into children instead of delivering the work (ADR-030, N-T46): a success of the auto-split template (`terminal_reason: "decomposed:split_template"`), or an attempt that made its bead an `auto-split-parent` and created no commit (`"decomposed:split_parent_without_commits"`). It earns no verified credit and is no failure: `needle stats` reports it in its own DECOMP column and leaves it out of PASS RATE, and evidence routing and prompt canaries count it as an attempt that is neither verified nor judged. Gate results are kept. bead-rs has no such outcome, so the backend resolution records it as `indeterminate` with the same reason.
 
 **Versioned contract:** [`tests/fixtures/attempt-resolved-v2.schema.json`](../tests/fixtures/attempt-resolved-v2.schema.json)
