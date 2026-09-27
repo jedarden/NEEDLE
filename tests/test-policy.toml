@@ -251,7 +251,10 @@ version = 1
 # validation.outcome_timeout_seconds instead of a stale hardcoded 120s
 # ceiling. The function is private to src/worker/mod.rs, so only the unit
 # tier reaches it.
-max_tests = 4007
+# +1 Explore claim-boundary regression (needle-4b42092c): an injected Explore
+# frontier advances after an atomic race, while a CLI/backend claim error
+# remains distinct and escalates through repeated-error telemetry.
+max_tests = 4008
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

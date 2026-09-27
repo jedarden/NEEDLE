@@ -2248,11 +2248,14 @@ impl super::Strand for ExploreStrand {
 mod tests {
     use super::*;
     use crate::bead_store::RepairReport;
+    use crate::claim::Claimer;
+    use crate::telemetry::test_utils::TestHelper;
     use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use chrono::Utc;
 
     use anyhow::Result;
+    use std::collections::VecDeque;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -6421,6 +6424,7 @@ mod tests {
         _workspace: PathBuf,
         beads: Vec<Bead>,
         ready_calls: Option<Arc<std::sync::Mutex<Vec<PathBuf>>>>,
+        claim_results: Option<Arc<std::sync::Mutex<VecDeque<ClaimResult>>>>,
     }
 
     impl FrontierRankingStore {
@@ -6429,6 +6433,7 @@ mod tests {
                 _workspace: workspace,
                 beads,
                 ready_calls: None,
+                claim_results: None,
             }
         }
 
@@ -6441,6 +6446,7 @@ mod tests {
                 _workspace: workspace,
                 beads,
                 ready_calls: Some(ready_calls),
+                claim_results: None,
             }
         }
     }
@@ -6463,11 +6469,26 @@ mod tests {
         }
 
         async fn show(&self, _id: &BeadId) -> Result<Bead> {
-            anyhow::bail!("not implemented")
+            self.beads
+                .iter()
+                .find(|bead| bead.id == *_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {_id}"))
         }
 
-        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
-            anyhow::bail!("not implemented")
+        async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+            if let Some(result) = self
+                .claim_results
+                .as_ref()
+                .and_then(|results| results.lock().unwrap().pop_front())
+            {
+                return Ok(result);
+            }
+
+            let mut claimed = self.show(id).await?;
+            claimed.status = BeadStatus::InProgress;
+            claimed.assignee = Some(actor.to_string());
+            Ok(ClaimResult::Claimed(claimed))
         }
 
         async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
@@ -6539,6 +6560,7 @@ mod tests {
     struct FrontierRankingFactory {
         workspaces: std::collections::HashMap<PathBuf, Vec<Bead>>,
         ready_calls: Option<Arc<std::sync::Mutex<Vec<PathBuf>>>>,
+        claim_results: Option<Arc<std::sync::Mutex<VecDeque<ClaimResult>>>>,
     }
 
     impl FrontierRankingFactory {
@@ -6546,11 +6568,20 @@ mod tests {
             Self {
                 workspaces: workspaces.into_iter().collect(),
                 ready_calls: None,
+                claim_results: None,
             }
         }
 
         fn with_ready_calls(mut self, ready_calls: Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
             self.ready_calls = Some(ready_calls);
+            self
+        }
+
+        fn with_claim_results(
+            mut self,
+            claim_results: Arc<std::sync::Mutex<VecDeque<ClaimResult>>>,
+        ) -> Self {
+            self.claim_results = Some(claim_results);
             self
         }
     }
@@ -6559,7 +6590,7 @@ mod tests {
     impl StoreFactory for FrontierRankingFactory {
         async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>> {
             if let Some(beads) = self.workspaces.get(workspace) {
-                let store = match &self.ready_calls {
+                let mut store = match &self.ready_calls {
                     Some(ready_calls) => FrontierRankingStore::with_ready_calls(
                         workspace.to_path_buf(),
                         beads.clone(),
@@ -6567,6 +6598,7 @@ mod tests {
                     ),
                     None => FrontierRankingStore::new(workspace.to_path_buf(), beads.clone()),
                 };
+                store.claim_results = self.claim_results.clone();
                 Ok(Arc::new(store))
             } else {
                 Err(anyhow::anyhow!("unknown workspace"))
@@ -6724,6 +6756,198 @@ mod tests {
             assert_ne!(&calls1[3..5], &calls2[3..5]);
             assert_eq!(&calls1[5], &ws1);
             assert_eq!(&calls2[5], &ws1);
+        });
+    }
+
+    /// Explore must preserve the difference between contention and an
+    /// operational claim failure at the boundary where its candidates enter
+    /// the claimer. A race is retryable work and advances to the next Explore
+    /// candidate; a backend/CLI failure is an error, does not advance within
+    /// the same claim call, and repeated failures escalate through telemetry.
+    #[test]
+    fn explore_claim_race_advances_but_real_error_escalates() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            fn bead(id: &str, workspace: &Path) -> Bead {
+                Bead {
+                    id: BeadId::from(id),
+                    title: id.to_string(),
+                    body: None,
+                    priority: 1,
+                    status: BeadStatus::Open,
+                    assignee: None,
+                    labels: vec![],
+                    workspace: workspace.to_path_buf(),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    comments: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }
+            }
+
+            let temp_root = tempfile::tempdir().unwrap();
+            let workspace = temp_root.path().join("remote");
+            fs::create_dir_all(workspace.join(".beads")).unwrap();
+            let home = temp_root.path().join("home");
+            let lost = bead("explore-race-lost", &workspace);
+            let next = bead("explore-race-next", &workspace);
+
+            let race_results = Arc::new(std::sync::Mutex::new(VecDeque::from([
+                ClaimResult::RaceLost {
+                    claimed_by: "other-worker".to_string(),
+                },
+            ])));
+            let race_helper = TestHelper::new("explore-race-test");
+            let race_strand = ExploreStrand::new_with_store_factory(
+                vec![workspace.clone()],
+                home.clone(),
+                Registry::new(&temp_root.path().join("race-registry")),
+                race_helper.telemetry_handle(),
+                "explore-race-test".to_string(),
+                Arc::new(
+                    FrontierRankingFactory::new(vec![(
+                        workspace.clone(),
+                        vec![lost.clone(), next.clone()],
+                    )])
+                    .with_claim_results(race_results.clone()),
+                ),
+                300,
+            );
+            let dummy_store = DummyStore;
+            let StrandResult::BeadFound(candidates) = race_strand
+                .evaluate(&dummy_store, &HashSet::new())
+                .await
+            else {
+                panic!("Explore should return both candidates before the race");
+            };
+            assert_eq!(
+                candidates.iter().map(|candidate| &candidate.id).collect::<Vec<_>>(),
+                vec![&lost.id, &next.id]
+            );
+
+            let mut race_store =
+                FrontierRankingStore::new(workspace.clone(), vec![lost.clone(), next.clone()]);
+            race_store.claim_results = Some(race_results);
+            let race_store = Arc::new(race_store);
+            let claimer = Claimer::new(
+                race_store,
+                temp_root.path().join("race-locks"),
+                5,
+                0,
+                race_helper.telemetry_handle(),
+            );
+            let outcome = claimer
+                .claim_next(&candidates, "explore-race-test", &HashSet::new(), "explore")
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome,
+                crate::types::ClaimOutcome::Claimed(ref claimed) if claimed.id == next.id
+            ));
+
+            // The outer worker's next Explore pass carries the race exclusion;
+            // the frontier must advance without hiding the remaining bead.
+            let StrandResult::BeadFound(remaining) = race_strand
+                .evaluate(&dummy_store, &HashSet::from([lost.id.clone()]))
+                .await
+            else {
+                panic!("Explore should advance past a race-lost bead");
+            };
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].id, next.id);
+            race_helper.sync().await;
+            assert_eq!(race_helper.events_by_type("bead.claim.race_lost").len(), 1);
+            assert!(race_helper
+                .events_by_type("bead.claim.error_threshold")
+                .is_empty());
+
+            let error_bead = bead("explore-claim-error", &workspace);
+            let error_next = bead("explore-claim-next", &workspace);
+            let error_results = Arc::new(std::sync::Mutex::new(VecDeque::from([
+                ClaimResult::ClaimError {
+                    reason: "CLI claim failed: exit status 1".to_string(),
+                },
+                ClaimResult::ClaimError {
+                    reason: "CLI claim failed: exit status 1".to_string(),
+                },
+                ClaimResult::ClaimError {
+                    reason: "CLI claim failed: exit status 1".to_string(),
+                },
+            ])));
+            let error_helper = TestHelper::new("explore-error-test");
+            let error_strand = ExploreStrand::new_with_store_factory(
+                vec![workspace.clone()],
+                home,
+                Registry::new(&temp_root.path().join("error-registry")),
+                error_helper.telemetry_handle(),
+                "explore-error-test".to_string(),
+                Arc::new(
+                    FrontierRankingFactory::new(vec![(
+                        workspace.clone(),
+                        vec![error_bead.clone(), error_next],
+                    )])
+                    .with_claim_results(error_results.clone()),
+                ),
+                300,
+            );
+            let StrandResult::BeadFound(error_candidates) = error_strand
+                .evaluate(&dummy_store, &HashSet::new())
+                .await
+            else {
+                panic!("Explore should return the operational-error candidate");
+            };
+
+            let mut error_store = FrontierRankingStore::new(workspace, vec![error_bead.clone()]);
+            error_store.claim_results = Some(error_results.clone());
+            let error_store = Arc::new(error_store);
+            let error_claimer = Claimer::new(
+                error_store,
+                temp_root.path().join("error-locks"),
+                5,
+                0,
+                error_helper.telemetry_handle(),
+            );
+            let first = error_claimer
+                .claim_next(
+                    &error_candidates,
+                    "explore-error-test",
+                    &HashSet::new(),
+                    "explore",
+                )
+                .await
+                .unwrap();
+            assert!(matches!(first, crate::types::ClaimOutcome::StoreError(_)));
+            assert_eq!(
+                error_results.lock().unwrap().len(),
+                2,
+                "a real claim error must stop the candidate loop rather than trying the next Explore bead"
+            );
+
+            for attempt in 2..=3 {
+                let result = error_claimer
+                    .claim_one(
+                        &error_candidates[0].id,
+                        "explore-error-test",
+                        &HashSet::new(),
+                        Some("explore"),
+                    )
+                    .await
+                    .unwrap();
+                if attempt < 3 {
+                    assert!(matches!(result, ClaimResult::ClaimError { .. }));
+                } else {
+                    assert!(matches!(result, ClaimResult::Suspect { consecutive_errors: 3, .. }));
+                }
+            }
+            error_helper.sync().await;
+            assert_eq!(error_helper.events_by_type("bead.claim.failed").len(), 3);
+            let thresholds = error_helper.events_by_type("bead.claim.error_threshold");
+            assert_eq!(thresholds.len(), 1);
+            assert_eq!(thresholds[0].data["consecutive_errors"], serde_json::json!(3));
+            assert!(error_helper
+                .events_by_type("bead.claim.race_lost")
+                .is_empty());
         });
     }
 
