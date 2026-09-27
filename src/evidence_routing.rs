@@ -76,6 +76,9 @@ impl AdapterEvidence {
     /// resolution class is classified in one place. A decomposed row still
     /// adds its cost — splitting is spend without a verified success.
     pub fn observe_row(&mut self, row: &serde_json::Value) {
+        if !is_authoritative_attempt_row(row) {
+            return;
+        }
         self.attempts += 1;
         match row.get("outcome").and_then(|v| v.as_str()) {
             Some("verified_success") => self.verified += 1,
@@ -119,6 +122,15 @@ impl AdapterEvidence {
             "cost_per_success": self.cost_per_success(),
         })
     }
+}
+
+/// Whether an `attempt.resolved` data object may be used as learning evidence.
+///
+/// Missing and explicitly provisional flags are both non-authoritative. The
+/// schema requires this field, so a malformed or legacy row must not silently
+/// enter routing, canaries, or improvement decisions as confirmed evidence.
+pub fn is_authoritative_attempt_row(row: &serde_json::Value) -> bool {
+    row.get("provisional").and_then(serde_json::Value::as_bool) == Some(false)
 }
 
 /// One routing decision, with everything needed to explain it.
@@ -347,8 +359,12 @@ impl Evidence {
 
     /// Fold one `attempt.resolved` row into both scopes. A row without an
     /// adapter is skipped; a row without a usable workspace counts only
-    /// fleet-wide.
+    /// fleet-wide. Provisional or unmarked rows are skipped entirely: they
+    /// are visible in stats, but cannot make an authoritative routing choice.
     pub fn observe(&mut self, row: &serde_json::Value) {
+        if !is_authoritative_attempt_row(row) {
+            return;
+        }
         let Some(adapter) = row
             .get("adapter")
             .and_then(|v| v.as_str())
@@ -901,7 +917,7 @@ mod tests {
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "event_type": "attempt.resolved",
             "worker_id": "w",
-            "data": {"adapter": "a", "outcome": "decomposed", "estimated_cost_usd": 0.5}
+            "data": {"adapter": "a", "outcome": "decomposed", "estimated_cost_usd": 0.5, "provisional": false}
         })
         .to_string();
         std::fs::write(
@@ -934,6 +950,26 @@ mod tests {
     }
 
     #[test]
+    fn provisional_and_unmarked_rows_are_not_adapter_evidence() {
+        let evidence = Evidence::from_rows(&[
+            serde_json::json!({
+                "adapter": "adapter-a",
+                "workspace": "/srv/project",
+                "outcome": "verified_success",
+                "provisional": true,
+            }),
+            serde_json::json!({
+                "adapter": "adapter-b",
+                "workspace": "/srv/project",
+                "outcome": "verified_success",
+            }),
+        ]);
+
+        assert!(evidence.fleet.is_empty());
+        assert!(evidence.workspace.is_empty());
+    }
+
+    #[test]
     fn evidence_from_logs_reads_only_windowed_ledger_rows() {
         let dir = tempfile::tempdir().unwrap();
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -942,7 +978,7 @@ mod tests {
                 "timestamp": chrono::Utc::now().to_rfc3339(),
                 "event_type": "attempt.resolved",
                 "worker_id": "w",
-                "data": {"adapter": adapter, "outcome": outcome, "estimated_cost_usd": 0.5}
+                "data": {"adapter": adapter, "outcome": outcome, "estimated_cost_usd": 0.5, "provisional": false}
             })
             .to_string()
         };
@@ -985,6 +1021,7 @@ mod tests {
                 rows.push(serde_json::json!({
                     "workspace": workspace,
                     "adapter": adapter,
+                    "provisional": false,
                     "outcome": if i < verified { "verified_success" } else { "work_failure" },
                 }));
             }

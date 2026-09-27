@@ -1655,6 +1655,14 @@ impl OutcomeHandler {
                                     report.results.iter().find(|(_, r)| r.is_execution_error());
                                 if let Some((gate_name, result)) = execution_error {
                                     if let GateResult::ExecutionError { command, reason } = result {
+                                        // A gate that could not run did not judge
+                                        // the work. Preserve that distinction in
+                                        // the ledger even though the process's
+                                        // exit-code classifier used Failure to
+                                        // route into this branch.
+                                        late_verdict = Some(LateVerdict::GateError {
+                                            gate: gate_name.clone(),
+                                        });
                                         self.handle_gate_error(
                                             store,
                                             bead,
@@ -2394,10 +2402,10 @@ impl OutcomeHandler {
     /// (`handle_success` → `handle_gate_failure` on a shipped-work failure)
     /// still yields a single event, and no terminal path can forget it.
     ///
-    /// `attempt_id` and `provisional: true` are fixed until N-T03 resolves
-    /// attempts against beads: the ID is the dispatch-local UUIDv7 shared by
-    /// every event in the cycle (read back through the telemetry handle), and
-    /// no consumer may treat a provisional row as authoritative.
+    /// The dispatch-local UUIDv7 is shared by every event in the cycle (read
+    /// back through the telemetry handle). Rows without accepted claim-time
+    /// provenance remain provisional, and no consumer may treat those rows as
+    /// authoritative.
     fn emit_attempt_resolved(
         &self,
         bead: &Bead,
@@ -2443,8 +2451,9 @@ impl OutcomeHandler {
         let fields = crate::telemetry::AttemptResolvedFields {
             attempt_id,
             // Direct handler callers without claim provenance remain
-            // provisional; worker-owned attempts are authoritative even when
-            // a legacy backend cannot expose a numeric revision.
+            // provisional. The N-T03 worker path has an authoritative attempt
+            // identity once the claim's assignee is captured, even when a
+            // legacy backend cannot expose a numeric revision.
             provisional: provenance.assignee.is_none(),
             bead_id: bead.id.clone(),
             workspace: bead.workspace.display().to_string(),
@@ -6257,6 +6266,7 @@ mod tests {
         let mut failure_actions = None;
 
         for (index, (expected_outcome, exit_code, interrupted)) in cases.iter().enumerate() {
+            helper.telemetry().set_attempt_id(crate::attempt::new_id());
             let status = if *expected_outcome == "success" {
                 BeadStatus::Done
             } else {
@@ -6295,6 +6305,24 @@ mod tests {
                 event.data["action"].as_str().is_some(),
                 "terminal handling must record its action"
             );
+        }
+        let resolved = helper.events_by_type("attempt.resolved");
+        assert_eq!(
+            resolved.len(),
+            cases.len(),
+            "each of the six process terminal paths emits one resolved row"
+        );
+        let expected_resolutions = [
+            "verified_success",
+            "work_failure",
+            "indeterminate",
+            "infrastructure_failure",
+            "infrastructure_failure",
+            "cancelled",
+        ];
+        for (((_, _, _), expected), row) in cases.iter().zip(expected_resolutions).zip(&resolved) {
+            assert_eq!(row.data["outcome"], expected);
+            assert_row_satisfies_v1_contract("process terminal row", row);
         }
         let actions = failure_actions.expect("failure case ran");
         assert!(
@@ -7602,6 +7630,12 @@ mod tests {
             failed[0].data["command"], "fallback_python",
             "the report must name the fallback gate"
         );
+        let resolved = helper.events_by_type("attempt.resolved");
+        assert_eq!(resolved.len(), 1, "gate failure emits one resolved row");
+        assert_eq!(resolved[0].data["outcome"], "work_failure");
+        assert_eq!(resolved[0].data["terminal_reason"], "gate:fallback_python");
+        assert_eq!(resolved[0].data["exit_code"], 0);
+        assert_row_satisfies_v1_contract("failed verification row", &resolved[0]);
     }
 
     #[tokio::test]
@@ -7726,6 +7760,16 @@ mod tests {
             "an unjudged dispatch must not carry the verification-failed label, got: {:?}",
             store.actions()
         );
+        helper.sync().await;
+        let resolved = helper.events_by_type("attempt.resolved");
+        assert_eq!(resolved.len(), 1, "gate error emits one resolved row");
+        assert_eq!(resolved[0].data["outcome"], "infrastructure_failure");
+        assert_eq!(
+            resolved[0].data["terminal_reason"],
+            "gate_error:fallback_python"
+        );
+        assert_eq!(resolved[0].data["exit_code"], 0);
+        assert_row_satisfies_v1_contract("gate execution error row", &resolved[0]);
     }
 
     #[tokio::test]
@@ -8734,7 +8778,7 @@ mod tests {
         assert_eq!(row.data["schema_version"], 3, "{label}: schema_version");
         assert_eq!(
             row.data["provisional"], true,
-            "{label}: every row is provisional until N-T03"
+            "{label}: a row without accepted claim identity remains provisional"
         );
         assert!(
             row.data.get("context_manifest_hash").is_none(),
@@ -8743,9 +8787,8 @@ mod tests {
         );
     }
 
-    /// Every row is provisional and carries the dispatch's attempt ID until
-    /// N-T03 resolves attempts against beads — no consumer may treat it as
-    /// authoritative.
+    /// Rows without accepted claim-time identity stay provisional; the worker
+    /// path clears the flag once N-T03 binds the dispatch ID to claim provenance.
     #[tokio::test]
     async fn attempt_resolved_is_provisional_and_stamped_with_the_dispatch_attempt_id() {
         let (_guard, _home) = isolated_home();
@@ -8792,6 +8835,34 @@ mod tests {
         assert_ne!(minted, attempt_id, "no cycle: the row mints its own id");
         assert_eq!(solo[1].attempt_id.as_deref(), Some(minted));
         assert_row_satisfies_v1_contract("solo-handler row", &solo[1]);
+
+        // A claim-time identity makes the row authoritative; merely minting a
+        // UUID in a direct handler call did not.
+        let claimed_attempt_id = uuid::Uuid::now_v7().to_string();
+        helper
+            .telemetry()
+            .set_attempt_id(claimed_attempt_id.clone());
+        let handler_claimed = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler_claimed.set_attempt_provenance(crate::attempt::AttemptProvenance {
+            assignee: Some("ledger-row-test".to_string()),
+            ..Default::default()
+        });
+        let store3 = test_store(BeadStatus::InProgress);
+        let _ = handler_claimed
+            .handle(&store3, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+        helper.sync().await;
+        let claimed = helper.events_by_type("attempt.resolved");
+        assert_eq!(claimed.len(), 3);
+        assert_eq!(claimed[2].data["provisional"], false);
+        assert_eq!(claimed[2].data["attempt_id"], claimed_attempt_id);
+        crate::telemetry::test_utils::check_object_matches(
+            "claim-identified row",
+            &claimed[2].data,
+            &crate::telemetry::test_utils::fixture_spec(),
+        )
+        .expect("claim-identified row conforms to the current schema fixture");
     }
 
     /// N-T46 (ADR-030): the auto-split template's success is a decomposition,

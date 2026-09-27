@@ -81,6 +81,7 @@ fn windowed(ctx: &AuditContext) -> Vec<&LedgerRow> {
     let cutoff = ctx.collected_at - chrono::Duration::hours(ctx.config.audit.factory.window_hours);
     ctx.ledger
         .iter()
+        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
         .filter(|row| row.timestamp.is_none_or(|stamp| stamp >= cutoff))
         .collect()
 }
@@ -764,6 +765,7 @@ mod tests {
                 "workspace": workspace,
                 "bead_id": bead,
                 "adapter": adapter,
+                "provisional": false,
                 "outcome": outcome,
             }),
         }
@@ -965,6 +967,26 @@ mod tests {
             findings[0].detail
         );
         assert!(findings[0].detail.contains("claude-code-glm-5.3-flash"));
+    }
+
+    #[test]
+    fn nt16_factory_findings_ignore_provisional_rows() {
+        let mut context = ctx();
+        for index in 0..22 {
+            context.ledger.push(with_field(
+                row(
+                    1,
+                    "/home/coding/NEEDLE",
+                    &format!("needle-provisional-{index}"),
+                    "claude-code-glm-5.3-flash",
+                    INDETERMINATE,
+                ),
+                "provisional",
+                serde_json::json!(true),
+            ));
+        }
+
+        assert!(findings_of(&WorkspaceNoVerifiedClosures, &context).is_empty());
     }
 
     #[test]

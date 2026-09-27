@@ -129,9 +129,13 @@ pub fn collect(
 
     let logs = state_dir::logs_dir();
     let rows = timestamped_ledger_rows(&logs, window_days);
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
+        .collect();
     if rows.is_empty() {
         inputs_unavailable.push(format!(
-            "no attempt.resolved rows under {} in the last {window_days}d",
+            "no authoritative attempt.resolved rows under {} in the last {window_days}d",
             logs.display()
         ));
     }
@@ -239,6 +243,7 @@ fn flatten(
 fn trend(rows: &[LedgerRow]) -> FleetTrend {
     let live: Vec<&LedgerRow> = rows
         .iter()
+        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
         .filter(|row| !state_dir::is_fixture_row(field(row, "worker"), field(row, "workspace")))
         .filter(|row| field(row, "outcome") != crate::attempt_accounting::DECOMPOSED)
         .filter(|row| costed(row))

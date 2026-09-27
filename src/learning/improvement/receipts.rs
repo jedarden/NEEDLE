@@ -22,10 +22,10 @@
 //!   was already made. Rewriting one would make the audit trail a record of
 //!   what the loop currently believes rather than of what it did.
 //!
-//! Per Gate D, every measure here is computed from `costed = true` rows only,
-//! excluding decomposed and fixture rows (ADR-030): an uncosted attempt's cost
-//! is unknown rather than zero, and counting it as zero flatters every
-//! per-dollar figure.
+//! Per Gate D, every measure here is computed from authoritative,
+//! `costed = true` rows only, excluding provisional, decomposed and fixture
+//! rows (ADR-030): an uncosted attempt's cost is unknown rather than zero,
+//! and counting it as zero flatters every per-dollar figure.
 
 use std::path::{Path, PathBuf};
 
@@ -153,6 +153,7 @@ pub fn measure(
 ) -> CohortMeasures {
     let live: Vec<&LedgerRow> = rows
         .iter()
+        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
         .filter(|row| !state_dir::is_fixture_row(field(row, "worker"), field(row, "workspace")))
         .filter(|row| field(row, "outcome") != crate::attempt_accounting::DECOMPOSED)
         // Gate D: uncosted rows are excluded before any receipt is trusted.

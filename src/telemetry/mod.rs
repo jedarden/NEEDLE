@@ -90,10 +90,10 @@ pub struct TelemetryEvent {
     /// W3C span-id hex (16 lowercase hex chars). Present only when emitted inside an OTel span.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span_id: Option<String>,
-    /// Provisional attempt ID (UUIDv7) of the dispatch this event belongs to.
-    /// Present only on events emitted inside a dispatch cycle, mirroring the
-    /// span-context fields above. Until N-T03 lands every attempt ID is
-    /// provisional (plan section 4.4 step 1).
+    /// Attempt ID (UUIDv7) of the dispatch this event belongs to. Present only
+    /// on events emitted inside a dispatch cycle, mirroring the span-context
+    /// fields above; the ledger's `provisional` flag says whether this identity
+    /// is backed by accepted claim-time provenance (plan section 4.4 step 1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
 }

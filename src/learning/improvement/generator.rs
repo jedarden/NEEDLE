@@ -112,12 +112,16 @@ pub fn generate(
     thresholds: &GeneratorThresholds,
     now: DateTime<Utc>,
 ) -> GeneratedProposals {
-    let total = rows.len();
     let live: Vec<&LedgerRow> = rows
         .iter()
+        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
         .filter(|row| !state_dir::is_fixture_row(field(row, "worker"), field(row, "workspace")))
         .collect();
-    let fixture_rows_excluded = total - live.len();
+    let authoritative_rows = rows
+        .iter()
+        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
+        .count();
+    let fixture_rows_excluded = authoritative_rows - live.len();
 
     let mut out = GeneratedProposals {
         fixture_rows_excluded,

@@ -89,6 +89,9 @@ pub struct StopReceipt {
 pub fn variant_outcomes(rows: &[serde_json::Value]) -> HashMap<String, VariantOutcome> {
     let mut out: HashMap<String, VariantOutcome> = HashMap::new();
     for row in rows {
+        if !crate::evidence_routing::is_authoritative_attempt_row(row) {
+            continue;
+        }
         let version = row
             .get("template_version")
             .and_then(|v| v.as_str())
@@ -248,10 +251,26 @@ mod tests {
 
     fn row(version: &str, outcome: &str) -> serde_json::Value {
         serde_json::json!({
+            "provisional": false,
             "prompt_template": "pluck",
             "template_version": version,
             "outcome": outcome
         })
+    }
+
+    #[test]
+    fn provisional_rows_do_not_change_prompt_variant_evidence() {
+        let mut provisional = rows((40, 30), (40, 10));
+        for row in &mut provisional {
+            row["provisional"] = serde_json::json!(true);
+        }
+        provisional.push(serde_json::json!({
+            "prompt_template": "pluck",
+            "template_version": "pluck-v3",
+            "outcome": "verified_success"
+        }));
+
+        assert!(variant_outcomes(&provisional).is_empty());
     }
 
     fn rows(default: (u64, u64), v2: (u64, u64)) -> Vec<serde_json::Value> {

@@ -372,9 +372,10 @@ a dependency, not a preference.
    writes attempt, effort, quarantine, false-close and gate-health events to
    object storage, and the data stack exposes them joined to CI runs and
    bead events. NEEDLE owns the event schema; `declarative-config` owns the
-   sink; the exporters own the joins. Until N-T03 lands, `attempt_id` is a
-   dispatch-local UUID flagged `provisional: true`, and such rows are excluded
-   from authoritative SLOs (Gate A).
+   sink; the exporters own the joins. `attempt_id` is a dispatch-local UUID;
+   rows stay `provisional: true` until N-T03 captures accepted claim-time
+   identity. Such rows are excluded from learning evidence and authoritative
+   SLOs (Gate A).
 2. **Attribution.** NEEDLE passes the worker identity as actor on every
    bead-rs mutation once the backend accepts it (bead-rs BR-T12), so
    `closed`, `released` and `reopened` events stop reading actor `system`.

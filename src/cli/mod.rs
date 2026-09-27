@@ -448,8 +448,8 @@ pub enum CliCommand {
     /// PASS RATE is verified success over the group's attempts excluding
     /// DECOMP, the attempts that split their bead instead of delivering it
     /// (ADR-030). Both
-    /// also surface a PROVISIONAL count of rows whose attempt ID is still
-    /// provisional — treat such rows as non-authoritative.
+    /// also surface a PROVISIONAL count of rows without accepted attempt
+    /// identity — treat those rows and the resulting rates as non-authoritative.
     ///
     /// Examples:
     ///   needle stats --by template_version --since 7d
@@ -4764,8 +4764,8 @@ fn cmd_stats(
                 let provisional: u64 = rows.iter().map(|r| r.provisional).sum();
                 if provisional > 0 {
                     println!(
-                        "\nnote: {provisional} of {attempts} attempt rows carry a provisional \
-                         attempt ID — treat those rows as non-authoritative"
+                        "\nnote: {provisional} of {attempts} attempt rows lack accepted identity \
+                         provenance — their outcomes are non-authoritative"
                     );
                 }
             }

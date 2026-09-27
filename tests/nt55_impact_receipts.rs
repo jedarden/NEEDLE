@@ -261,6 +261,7 @@ fn row(workspace: &str, outcome: &str, worker: &str, costed: bool, cost: f64) ->
         timestamp: Some(at(13)),
         data: json!({
             "attempt_id": format!("a-{outcome}-{worker}-{cost}"),
+            "provisional": false,
             "bead_id": "needle-aaaa1111",
             "workspace": format!("/home/coding/{workspace}"),
             "worker": worker,
@@ -276,11 +277,17 @@ fn row(workspace: &str, outcome: &str, worker: &str, costed: bool, cost: f64) ->
 #[test]
 fn measures_are_computed_only_from_costed_non_decomposed_non_fixture_rows() {
     let rows = vec![
-        // Counted: four costed, live rows, two verified.
+        // Counted: four costed, authoritative live rows, two verified.
         row("NEEDLE", "verified_success", "glm-roam-18", true, 2.0),
         row("NEEDLE", "verified_success", "glm-roam-19", true, 2.0),
         row("NEEDLE", "work_failure", "glm-roam-20", true, 2.0),
         row("NEEDLE", "work_failure", "glm-roam-21", true, 2.0),
+        // Excluded: provisional rows are not authoritative evidence.
+        {
+            let mut provisional = row("NEEDLE", "verified_success", "glm-roam-25", true, 2.0);
+            provisional.data["provisional"] = json!(true);
+            provisional
+        },
         // Excluded: uncosted (cost unknown, never zero).
         row("NEEDLE", "work_failure", "glm-roam-22", false, 0.0),
         // Excluded: decomposed (ADR-030).

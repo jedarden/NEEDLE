@@ -380,18 +380,20 @@ and a handler torn down by its own timeout (`outcome: "indeterminate"`, reason
 `outcome_handler_timeout`). The fallback is guarded, so a dispatch that
 already has its row cannot gain a second.
 
-Until N-T03 resolves attempts against beads, every row carries
-`provisional: true` and a dispatch-local UUIDv7 `attempt_id` minted at
-dispatch start. The same ID is stamped on every event the dispatch emits (the
-envelope's `attempt_id` field, and the `attempt_id` OTLP log attribute), so a
-row joins to its dispatch's events. **No consumer may treat a provisional row
-as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
+Every row carries the dispatch-local UUIDv7 `attempt_id` minted at dispatch
+start. `provisional` stays true when the row has no accepted claim-time
+identity; a worker row with claim provenance from N-T03 is non-provisional.
+The same ID is stamped on every event the dispatch emits (the envelope's
+`attempt_id` field, and the `attempt_id` OTLP log attribute), so a row joins to
+its dispatch's events. **No consumer may treat a provisional row as
+authoritative** — provisional rows are excluded from routing, canary,
+improvement, audit and receipt evidence, and from SLOs (plan Gate A).
 
 | Field                  | Type            | Present | Description                                                                 |
 |------------------------|-----------------|---------|-----------------------------------------------------------------------------|
 | `schema_version`       | integer         | always  | Row schema version; `3` for this contract (`2` before pre-deadline accounting, `1` before the `decomposed` outcome existed). |
 | `attempt_id`           | string          | always  | UUIDv7 minted at dispatch start.                                            |
-| `provisional`          | boolean         | always  | `true` until the real attempt identity exists (N-T03).                      |
+| `provisional`          | boolean         | always  | `true` until accepted claim-time provenance ties the ID to a real attempt (N-T03). |
 | `bead_id`              | string          | always  | Bead the attempt worked on.                                                 |
 | `workspace`            | string          | always  | Workspace directory the attempt ran in.                                     |
 | `worker`               | string          | always  | Worker identifier that ran the attempt.                                     |
@@ -436,12 +438,11 @@ predate it and validate against
 [`attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json).
 
 **Aggregation:** `needle stats --by adapter` and `needle stats --by outcome`
-aggregate these rows directly — one attempt per row, with PASS RATE reading
-as verified success over all attempts in the group. Both surface a
-PROVISIONAL count per group: the rows flagged `provisional: true`. Until
-N-T03 lands every row is provisional, and such rows are excluded from
-authoritative SLOs (Gate A), so consumers must not treat a provisional
-attempt ID as authoritative.
+aggregate these rows directly — one attempt per row. Both surface a
+PROVISIONAL count per group and label rates non-authoritative when provisional
+or unmarked rows are present. Routing, canaries, improvement proposals, audits
+and impact receipts use only rows with `provisional: false`; provisional rows
+are excluded from authoritative SLOs (Gate A).
 
 **Example (a rejected gate behind a zero exit code):**
 ```json
@@ -529,11 +530,10 @@ attempt ID as authoritative.
 ```
 
 **Reading the two examples together:**
-- **Provisional ids are not authoritative.** Both rows carry
-  `provisional: true` and a dispatch-local UUIDv7 `attempt_id` minted at
-  dispatch start — the ID identifies the dispatch, not a durable attempt
-  (that starts with N-T03). No consumer may treat a provisional row as
-  authoritative, and provisional rows are excluded from SLOs (plan Gate A).
+- **These examples show provisional rows.** Their UUIDv7 `attempt_id` values
+  identify their dispatches, but without accepted claim-time provenance they
+  are not authoritative. Learning consumers and SLOs exclude provisional
+  rows (plan Gate A).
 - **`exit_code` is observation only.** It records what the agent process did,
   never whether the work was accepted. The `work_failure` row above exited `0`
   and is still a failure, because `clippy` ran and rejected the work; the

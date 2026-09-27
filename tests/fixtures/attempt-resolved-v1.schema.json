@@ -33,7 +33,7 @@
     },
     "provisional": {
       "type": "boolean",
-      "description": "True on every row until the real attempt identity exists (N-T03). Consumers must not treat a provisional row as authoritative: provisional rows are excluded from SLOs (plan section 4.4 step 1, Gate A)."
+      "description": "True until accepted claim-time provenance ties the dispatch ID to a real attempt (N-T03). Consumers must not treat a provisional row as authoritative: provisional rows are excluded from learning evidence and SLOs (plan section 4.4 step 1, Gate A)."
     },
     "bead_id": {
       "type": "string",

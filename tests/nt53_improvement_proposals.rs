@@ -40,7 +40,7 @@ fn row(
     let mut data = json!({
         "schema_version": 2,
         "attempt_id": attempt,
-        "provisional": true,
+        "provisional": false,
         "bead_id": bead,
         "workspace": format!("/home/coding/{workspace}"),
         "worker": "glm-roam-18",
@@ -567,4 +567,16 @@ fn every_generated_proposal_carries_a_computable_acceptance_measure() {
             proposal.signature
         );
     }
+}
+
+#[test]
+fn provisional_rows_cannot_generate_improvement_proposals() {
+    let mut rows = fixture();
+    for row in &mut rows {
+        row.data["provisional"] = json!(true);
+    }
+
+    let generated = generate(&rows, &GeneratorThresholds::default(), now());
+    assert!(generated.proposals.is_empty());
+    assert!(generated.refused.is_empty());
 }

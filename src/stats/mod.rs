@@ -866,12 +866,10 @@ pub struct StatsRow {
     /// For the `Adapter` and `Outcome` dimensions this counts attempts (one
     /// `attempt.resolved` row per attempt), not dispatches.
     pub beads: u64,
-    /// Number of rows in this group whose attempt ID is provisional
-    /// (`"provisional": true` on the `attempt.resolved` row). Populated only
-    /// by the `Adapter` and `Outcome` dimensions — every row is provisional
-    /// until bead-scoped attempt resolution lands (N-T03), and such rows are
-    /// excluded from authoritative SLOs (plan section 4.4 step 1), so
-    /// consumers must not treat a provisional attempt ID as authoritative.
+    /// Number of rows in this group without accepted attempt identity
+    /// (`"provisional": true`, or a missing/invalid flag). Populated only by
+    /// the `Adapter` and `Outcome` dimensions. These rows are excluded from
+    /// learning evidence and authoritative SLOs (plan section 4.4 step 1).
     pub provisional: u64,
     /// Number of beads that completed with `"Success"` outcome.
     pub pass: u64,
@@ -1125,7 +1123,7 @@ pub fn compute_attempt_stats(
             ..Default::default()
         });
         row.beads += 1;
-        if event.data.get("provisional").and_then(|v| v.as_bool()) == Some(true) {
+        if !crate::evidence_routing::is_authoritative_attempt_row(&event.data) {
             row.provisional += 1;
         }
 
@@ -1787,7 +1785,7 @@ mod tests {
         if let Some(obj) = confirmed.data.as_object_mut() {
             obj.insert("provisional".to_string(), serde_json::json!(false));
         }
-        // A row with the flag absent entirely — counted, but not provisional.
+        // A row with the flag absent is counted as non-authoritative too.
         let mut unflagged = attempt_row("adapter-b", "verified_success", None, None, None);
         if let Some(obj) = unflagged.data.as_object_mut() {
             obj.remove("provisional");
@@ -1810,14 +1808,14 @@ mod tests {
 
         let b = rows.iter().find(|r| r.key == "adapter-b").unwrap();
         assert_eq!(b.beads, 2);
-        assert_eq!(b.provisional, 1, "a missing flag is not a provisional row");
+        assert_eq!(b.provisional, 2, "missing authority is not assumed");
 
         // Same rows under the Outcome dimension: the count follows the row,
-        // so both provisional rows land in their outcome groups.
+        // so provisional and unmarked rows land in non-authoritative counts.
         let rows = compute_stats(&events, StatsDimension::Outcome);
         assert_eq!(rows.iter().map(|r| r.beads).sum::<u64>(), 4);
         let total_provisional: u64 = rows.iter().map(|r| r.provisional).sum();
-        assert_eq!(total_provisional, 2);
+        assert_eq!(total_provisional, 3);
     }
 
     #[test]
