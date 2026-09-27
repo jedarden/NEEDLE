@@ -370,12 +370,43 @@ impl TranscriptDiscovery {
         self
     }
 
+    /// Return the Claude project directory for this workspace.
+    ///
+    /// The directory name is deliberately derived through the same mapping
+    /// used by discovery, so callers that need an individual session do not
+    /// have to duplicate the project slug convention.
+    pub fn project_dir(&self) -> PathBuf {
+        self.claude_projects_dir.join(self.derive_project_name())
+    }
+
+    /// Resolve one Claude session transcript without reading the directory.
+    ///
+    /// Session ids are expected to be opaque single path components. Rejecting
+    /// separators here keeps a transcript lookup from escaping its project
+    /// directory if malformed harness output is ever persisted as metadata.
+    pub fn session_path(&self, session_id: &str) -> Option<PathBuf> {
+        let session_id = session_id.trim();
+        if session_id.is_empty()
+            || session_id == "."
+            || session_id == ".."
+            || session_id.contains(['/', '\\'])
+        {
+            return None;
+        }
+        Some(self.project_dir().join(format!("{session_id}.jsonl")))
+    }
+
+    /// Resolve the optional Claude subagent sidecar directory for one session.
+    pub fn session_subagent_dir(&self, session_id: &str) -> Option<PathBuf> {
+        let session_path = self.session_path(session_id)?;
+        Some(session_path.with_file_name(session_id.trim()))
+    }
+
     /// Discover all recent session transcripts for this workspace.
     ///
     /// Returns transcripts sorted by modification time (most recent first).
     pub fn discover(&self) -> Result<Vec<ParsedTranscript>> {
-        let project_name = self.derive_project_name();
-        let project_dir = self.claude_projects_dir.join(&project_name);
+        let project_dir = self.project_dir();
 
         if !project_dir.exists() {
             tracing::debug!(
@@ -446,7 +477,7 @@ impl TranscriptDiscovery {
         transcripts.truncate(self.max_sessions);
 
         tracing::debug!(
-            project_name,
+            project_name = self.derive_project_name(),
             count = transcripts.len(),
             "transcript discovery: found transcripts"
         );

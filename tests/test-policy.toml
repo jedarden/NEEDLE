@@ -393,7 +393,8 @@ contract = 210
 # +4 timeout activity contracts (needle-2f658c5a): stderr and partial stdout
 # activity reset idle deadlines, closed output pipes retain timeout enforcement,
 # and worker cancellation kills and reaps the process group.
-e2e = 869
+# +1 attempt-archive harness transcript copy/status contract (needle-310a29eb).
+e2e = 870
 soak = 0
 fuzz = 0
 
@@ -451,7 +452,8 @@ tier = "e2e"
 # +4 timeout activity contracts (needle-2f658c5a): stderr and partial stdout
 # activity reset idle deadlines, closed output pipes retain timeout enforcement,
 # and worker cancellation kills and reaps the process group.
-max_tests = 448
+# +1 attempt-archive harness transcript copy/status contract (needle-310a29eb).
+max_tests = 449
 owner = "component:process-integration"
 
 [[harness]]

@@ -3171,6 +3171,7 @@ impl Dispatcher {
                 pruned: false,
                 template_version: None,
                 session_id,
+                harness_transcript: None,
                 started_at: Some(capture.started_at()),
                 timeout_reason: timeout_reason.clone(),
                 terminal_reason,

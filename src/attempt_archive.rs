@@ -28,12 +28,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{ArchiveCompression, AttemptArchiveConfig};
+use crate::sanitize::{CustomPattern, Sanitizer};
+use crate::trace::{HarnessTranscriptStatus, TraceFormat};
 
 /// Schema version stamped on every sidecar.
 pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
@@ -100,6 +103,56 @@ pub fn spool_attempt(
     input: &AttemptArchiveInput,
     trace_dir: Option<&Path>,
 ) -> Result<Option<SpoolReceipt>> {
+    let sanitizer = if config.enabled && config.include.harness_transcript {
+        Some(Arc::new(Sanitizer::new(&[])?))
+    } else {
+        None
+    };
+    spool_attempt_with_sanitizer(config, input, trace_dir, sanitizer)
+}
+
+/// Build the same sanitizer configuration used by dispatch trace capture.
+pub fn configured_sanitizer(config: &crate::config::Config) -> Result<Option<Arc<Sanitizer>>> {
+    if !config.attempt_archive.enabled
+        || !config.attempt_archive.include.harness_transcript
+        || !config.strands.learning.trace_sanitization.enabled
+    {
+        return Ok(None);
+    }
+
+    let custom_patterns = config
+        .strands
+        .learning
+        .trace_sanitization
+        .custom_patterns
+        .iter()
+        .map(|pattern| CustomPattern {
+            id: pattern.id.clone(),
+            pattern: pattern.pattern.clone(),
+            entropy: pattern.entropy,
+        })
+        .collect::<Vec<_>>();
+    Ok(Some(Arc::new(Sanitizer::new(&custom_patterns)?)))
+}
+
+/// Spool one resolved attempt, optionally sanitizing harness files before they
+/// enter the bundle.
+pub fn spool_attempt_with_sanitizer(
+    config: &AttemptArchiveConfig,
+    input: &AttemptArchiveInput,
+    trace_dir: Option<&Path>,
+    sanitizer: Option<Arc<Sanitizer>>,
+) -> Result<Option<SpoolReceipt>> {
+    spool_attempt_with_sanitizer_and_claude_dir(config, input, trace_dir, sanitizer, None)
+}
+
+fn spool_attempt_with_sanitizer_and_claude_dir(
+    config: &AttemptArchiveConfig,
+    input: &AttemptArchiveInput,
+    trace_dir: Option<&Path>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    claude_dir: Option<&Path>,
+) -> Result<Option<SpoolReceipt>> {
     if !config.enabled {
         return Ok(None);
     }
@@ -136,7 +189,16 @@ pub fn spool_attempt(
     std::fs::create_dir_all(&staging)
         .with_context(|| format!("failed to create staging dir {}", staging.display()))?;
     let result = stage_and_pack(
-        config, input, trace_dir, &staging, &day_dir, &stem, &spool, &host,
+        config,
+        input,
+        trace_dir,
+        &staging,
+        &day_dir,
+        &stem,
+        &spool,
+        &host,
+        sanitizer.as_deref(),
+        claude_dir,
     );
     let _ = std::fs::remove_dir_all(&staging);
     result.map(Some)
@@ -152,6 +214,8 @@ fn stage_and_pack(
     stem: &str,
     spool: &Path,
     host: &str,
+    sanitizer: Option<&Sanitizer>,
+    claude_dir: Option<&Path>,
 ) -> Result<SpoolReceipt> {
     let mut files: Vec<String> = Vec::new();
 
@@ -163,15 +227,26 @@ fn stage_and_pack(
     files.push("attempt.json".to_string());
 
     if let Some(dir) = trace_dir.filter(|d| d.is_dir()) {
+        if config.include.harness_transcript {
+            let status = copy_harness_transcript(
+                input,
+                dir,
+                &staging.join("harness"),
+                sanitizer,
+                claude_dir,
+            )?;
+            update_harness_status(dir, status)?;
+            if staging.join("harness").is_dir() {
+                files.extend(files_below(staging, &staging.join("harness"))?);
+            }
+        }
+
         let mut wanted: Vec<&str> = vec!["metadata.json", "attempts.jsonl"];
         if config.include.trace {
-            wanted.extend(["stdout.txt", "stderr.txt"]);
-        }
-        if config.include.harness_transcript {
-            wanted.push("trace.jsonl");
+            wanted.extend(["stdout.txt", "stderr.txt", "trace.jsonl"]);
         }
         if config.include.prompt {
-            wanted.push("prompt.txt");
+            wanted.push("prompt.md");
         }
         for name in wanted {
             let source = dir.join(name);
@@ -245,6 +320,183 @@ fn stage_and_pack(
         sidecar: sidecar_path,
         bundle_bytes,
     })
+}
+
+/// Copy the Claude session transcript and any subagent sidecars into the
+/// bundle staging directory. A missing session is an expected retention race,
+/// not a spool error; the caller records it in metadata instead.
+fn copy_harness_transcript(
+    input: &AttemptArchiveInput,
+    trace_dir: &Path,
+    destination: &Path,
+    sanitizer: Option<&Sanitizer>,
+    claude_dir: Option<&Path>,
+) -> Result<HarnessTranscriptStatus> {
+    let metadata_path = trace_dir.join("metadata.json");
+    let metadata = match std::fs::read_to_string(&metadata_path) {
+        Ok(metadata) => serde_json::from_str::<serde_json::Value>(&metadata)
+            .with_context(|| format!("failed to parse {}", metadata_path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                attempt_id = %input.attempt_id,
+                "harness transcript absent: attempt metadata is unavailable"
+            );
+            return Ok(HarnessTranscriptStatus::Absent);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", metadata_path.display()))
+        }
+    };
+
+    let adapter = metadata
+        .get("adapter")
+        .or_else(|| metadata.get("agent"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !matches!(
+        crate::trace::detect_trace_format(adapter),
+        TraceFormat::ClaudeJson
+    ) {
+        tracing::debug!(
+            attempt_id = %input.attempt_id,
+            adapter,
+            "harness transcript unsupported for adapter"
+        );
+        return Ok(HarnessTranscriptStatus::UnsupportedAdapter);
+    }
+
+    let session_id = metadata
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty());
+    let Some(session_id) = session_id else {
+        tracing::debug!(
+            attempt_id = %input.attempt_id,
+            "harness transcript absent: session id is unavailable"
+        );
+        return Ok(HarnessTranscriptStatus::Absent);
+    };
+
+    let discovery =
+        crate::transcript::TranscriptDiscovery::new(Path::new(&input.workspace), claude_dir, 0);
+    let Some(session_path) = discovery.session_path(session_id) else {
+        tracing::debug!(
+            attempt_id = %input.attempt_id,
+            "harness transcript absent: session id is not a safe path component"
+        );
+        return Ok(HarnessTranscriptStatus::Absent);
+    };
+    if !session_path.is_file() {
+        tracing::debug!(
+            attempt_id = %input.attempt_id,
+            session_id,
+            path = %session_path.display(),
+            "harness transcript absent: session file not found"
+        );
+        return Ok(HarnessTranscriptStatus::Absent);
+    }
+
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+    let session_destination = destination.join(format!("{session_id}.jsonl"));
+    copy_sanitized_file(&session_path, &session_destination, sanitizer)?;
+
+    if let Some(subagent_dir) = discovery.session_subagent_dir(session_id) {
+        if subagent_dir.is_dir() {
+            copy_sanitized_tree(&subagent_dir, &destination.join(session_id), sanitizer)?;
+        }
+    }
+
+    Ok(HarnessTranscriptStatus::Present)
+}
+
+fn copy_sanitized_file(
+    source: &Path,
+    destination: &Path,
+    sanitizer: Option<&Sanitizer>,
+) -> Result<()> {
+    let bytes = std::fs::read(source)
+        .with_context(|| format!("failed to read harness transcript {}", source.display()))?;
+    let bytes = match String::from_utf8(bytes) {
+        Ok(text) => sanitizer
+            .map(|sanitizer| sanitizer.sanitize(&text))
+            .unwrap_or(text)
+            .into_bytes(),
+        Err(error) => error.into_bytes(),
+    };
+    std::fs::write(destination, bytes)
+        .with_context(|| format!("failed to write {}", destination.display()))
+}
+
+fn copy_sanitized_tree(
+    source: &Path,
+    destination: &Path,
+    sanitizer: Option<&Sanitizer>,
+) -> Result<()> {
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+    for entry in
+        std::fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_sanitized_tree(&source_path, &destination_path, sanitizer)?;
+        } else if file_type.is_file() {
+            copy_sanitized_file(&source_path, &destination_path, sanitizer)?;
+        } else {
+            tracing::debug!(
+                path = %source_path.display(),
+                "skipping non-regular harness sidecar"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn update_harness_status(trace_dir: &Path, status: HarnessTranscriptStatus) -> Result<()> {
+    let metadata_path = trace_dir.join("metadata.json");
+    if !metadata_path.is_file() {
+        return Ok(());
+    }
+    let mut metadata = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(&metadata_path)
+            .with_context(|| format!("failed to read {}", metadata_path.display()))?,
+    )
+    .with_context(|| format!("failed to parse {}", metadata_path.display()))?;
+    metadata["harness_transcript"] = serde_json::to_value(status)?;
+    std::fs::write(&metadata_path, serde_json::to_string_pretty(&metadata)?).with_context(|| {
+        format!(
+            "failed to write harness transcript status to {}",
+            metadata_path.display()
+        )
+    })
+}
+
+fn files_below(root: &Path, directory: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(directory)
+        .with_context(|| format!("failed to read {}", directory.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            files.extend(files_below(root, &path)?);
+        } else if entry.file_type()?.is_file() {
+            files.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn which_exists(binary: &str) -> bool {

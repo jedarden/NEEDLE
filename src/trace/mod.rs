@@ -131,6 +131,9 @@ pub struct TraceMetadata {
     /// Harness session id parsed from the stream-json init event.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Result of the optional copy of the harness-owned Claude transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_transcript: Option<HarnessTranscriptStatus>,
     /// Wall-clock time at which trace capture began.
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
@@ -174,12 +177,27 @@ impl Default for TraceMetadata {
             pruned: false,
             template_version: None,
             session_id: None,
+            harness_transcript: None,
             started_at: None,
             timeout_reason: None,
             terminal_reason: None,
             api_error_status: None,
         }
     }
+}
+
+/// Outcome of looking up the harness-owned session transcript for an attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessTranscriptStatus {
+    /// The session JSONL file was copied into the attempt archive.
+    Present,
+    /// The adapter was supported, but the session file was unavailable or
+    /// the session id was not recorded.
+    Absent,
+    /// This adapter does not currently have a supported harness transcript
+    /// location (including Codex adapters).
+    UnsupportedAdapter,
 }
 
 /// Adapter-specific trace format identifier.

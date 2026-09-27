@@ -2185,10 +2185,13 @@ impl OutcomeHandler {
         } else {
             bead.workspace.clone()
         };
-        let trace_dir = workspace
-            .join(".beads")
-            .join("traces")
-            .join(bead.id.as_ref());
+        let trace_dir = crate::trace::attempt_scoped_dir(
+            &workspace
+                .join(".beads")
+                .join("traces")
+                .join(bead.id.as_ref()),
+            Some(&ledger.attempt_id),
+        );
         let input = crate::attempt_archive::AttemptArchiveInput {
             attempt_id: ledger.attempt_id.clone(),
             bead_id: bead.id.to_string(),
@@ -2203,9 +2206,25 @@ impl OutcomeHandler {
             terminal_reason: ledger.terminal_reason.clone(),
             recorded_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         };
+        let sanitizer = match crate::attempt_archive::configured_sanitizer(&self.config) {
+            Ok(sanitizer) => sanitizer,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "failed to build attempt archive sanitizer; copying harness transcript without sanitization"
+                );
+                None
+            }
+        };
         let bead_id = bead.id.clone();
         let work = tokio::task::spawn_blocking(move || {
-            crate::attempt_archive::spool_attempt(&archive, &input, Some(&trace_dir))
+            crate::attempt_archive::spool_attempt_with_sanitizer(
+                &archive,
+                &input,
+                Some(&trace_dir),
+                sanitizer,
+            )
         });
         match tokio::time::timeout(std::time::Duration::from_secs(60), work).await {
             Ok(Ok(Ok(Some(receipt)))) => tracing::info!(

@@ -8,7 +8,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use needle::attempt_archive::{
-    sha256_file, spool_attempt, AttemptArchiveInput, Sidecar, SIDECAR_SCHEMA_VERSION,
+    sha256_file, spool_attempt, spool_attempt_with_sanitizer, AttemptArchiveInput, Sidecar,
+    SIDECAR_SCHEMA_VERSION,
 };
 use needle::bead_store::{
     builtin_bead_backends, open_configured, BeadBackend, BeadStore, CliBeadStore, Filters,
@@ -36,6 +37,7 @@ use needle::prompt::{BuiltPrompt, PromptBuilder};
 use needle::resolve::executor::{AppliedDecision, DecisionExecutor, ReleaseCause};
 use needle::resolve::{ResolveContext, ResolveDecision, Resolver, VerificationError};
 use needle::retrieval::{retrieve, RetrievalRequest};
+use needle::sanitize::{CustomPattern, Sanitizer};
 use needle::scratch_sweep::{sweep_scratch_directory_with_proc_root, SweepOutcome};
 use needle::spawn_version::spawn_version_output;
 use needle::telemetry::{EventKind, HookSink, Telemetry, TelemetryEvent};
@@ -1012,6 +1014,110 @@ fn archive_and_status_process_contracts_archive_missing_trace_facts() {
     let sidecar: Sidecar =
         serde_json::from_str(&fs::read_to_string(&receipt.sidecar).unwrap()).unwrap();
     assert_eq!(sidecar.files, vec!["attempt.json".to_string()]);
+}
+
+#[test]
+fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
+    let spool = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let workspace = TempDir::new().unwrap();
+    let workspace_path = workspace.path().to_path_buf();
+    let session_id = "session-archive";
+    let project_dir =
+        needle::transcript::TranscriptDiscovery::new(&workspace_path, None, 0).project_dir();
+    fs::create_dir_all(project_dir.join(session_id)).unwrap();
+    let transcript = r#"{"type":"user","content":"token sk-test-abc123"}\n"#;
+    fs::write(project_dir.join(format!("{session_id}.jsonl")), transcript).unwrap();
+    fs::write(
+        project_dir.join(session_id).join("subagent.jsonl"),
+        transcript,
+    )
+    .unwrap();
+
+    let trace = TempDir::new().unwrap();
+    fs::write(
+        trace.path().join("metadata.json"),
+        serde_json::json!({
+            "adapter": "claude-sonnet",
+            "session_id": session_id
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let config = AttemptArchiveConfig {
+        enabled: true,
+        spool_dir: spool.path().to_path_buf(),
+        compression: ArchiveCompression::None,
+        ..AttemptArchiveConfig::default()
+    };
+    let sanitizer = Arc::new(
+        Sanitizer::new(&[CustomPattern {
+            id: "test-token".into(),
+            pattern: "sk-test-[a-z0-9]+".into(),
+            entropy: None,
+        }])
+        .unwrap(),
+    );
+    let input = AttemptArchiveInput {
+        workspace: workspace_path.display().to_string(),
+        ..archive_and_status_process_contracts_input()
+    };
+    let receipt =
+        spool_attempt_with_sanitizer(&config, &input, Some(trace.path()), Some(sanitizer.clone()))
+            .unwrap()
+            .expect("spooled");
+
+    let read_tar = |path: &str| {
+        let output = Command::new("tar")
+            .arg("-xOf")
+            .arg(&receipt.bundle)
+            .arg(format!("./{path}"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "tar could not read {path}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let expected = sanitizer.sanitize(transcript);
+    assert_eq!(read_tar("harness/session-archive.jsonl"), expected);
+    assert_eq!(read_tar("harness/session-archive/subagent.jsonl"), expected);
+    assert!(!read_tar("harness/session-archive.jsonl").contains("sk-test-abc123"));
+    let metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(trace.path().join("metadata.json")).unwrap())
+            .unwrap();
+    assert_eq!(metadata["harness_transcript"], "present");
+
+    let missing_trace = TempDir::new().unwrap();
+    fs::write(
+        missing_trace.path().join("metadata.json"),
+        serde_json::json!({
+            "adapter": "claude-sonnet",
+            "session_id": "missing-session"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let missing = AttemptArchiveInput {
+        attempt_id: "0192-attempt-missing".into(),
+        ..input.clone()
+    };
+    let missing_receipt =
+        spool_attempt_with_sanitizer(&config, &missing, Some(missing_trace.path()), None)
+            .unwrap()
+            .expect("missing transcript still spools");
+    assert!(missing_receipt.bundle.is_file());
+    let missing_metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(missing_trace.path().join("metadata.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(missing_metadata["harness_transcript"], "absent");
+
+    let disabled = AttemptArchiveConfig::default();
+    assert!(
+        spool_attempt_with_sanitizer(&disabled, &input, Some(trace.path()), Some(sanitizer))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
