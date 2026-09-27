@@ -539,18 +539,33 @@ process_limits:
 
 Static routing matches on a model name and never learns. With
 `agent.evidence_routing` a worker chooses among **already configured**
-candidate adapters by what the attempt ledger (`attempt.resolved` rows in
-`~/.needle/logs`, bounded by file date) says about them: verified success
-over judged attempts (infrastructure failures excluded), cost per verified
-success as the tie-break. Guardrails: an adapter needs `min_attempts`
-judged attempts to be chosen as best; routing only moves away from the
-static default when the best leads it by `min_improvement`; an
-`exploration_share` of dispatches goes to a non-best eligible candidate so
-evidence keeps accruing; a gate-degraded workspace or a provider-degraded
-adapter freezes the choice on the static default. Every decision is a
-receipt (`agent.evidence_routing`). Off by default — this selects among
-approved variants and records exposure (plan 5.7 L1); it never creates or
-widens anything.
+candidate adapters by the attempt ledger (`attempt.resolved` rows in
+`~/.needle/logs`, bounded by file date), grouped by workspace, prompt-template
+task class, and adapter. The ranking metric is verified successes per known
+USD spent; each candidate receipt includes an approximate 95% Poisson
+confidence interval. Provisional rows remain visible in `needle stats` but
+do not count as authoritative routing evidence. An adapter needs
+`min_attempts` judged attempts in that exact workspace/task-class pair to be
+ranked. `exploration_share` sends that share of dispatches to the runner-up.
+Only loaded configured candidates are eligible, and a missing candidate
+falls back to the static model rule. Gate-degraded workspaces and
+provider-degraded adapters freeze the choice on the static result. Every
+decision is recorded in the `agent.evidence_routing` exposure receipt. This
+is off by default and stays within the plan 5.7 L1 boundary: it selects among
+configured adapters and records exposure.
+
+`min_improvement` remains available for N-T61 workspace-only withholding
+diagnostics; it does not gate the N-T18 metric ranking.
+
+The receipt includes the evidence counts for every considered adapter, the
+chosen adapter, the task class, the metric, whether exploration was used, and
+whether a retry tier bias applied. `metric` currently accepts
+`verified_success_per_usd`.
+
+After two consecutive timeout or max-turns outcomes on the same bead,
+`adapter_tiers` can bias its next retry to a higher-tier configured adapter.
+Tier numbers are explicit and only take effect when the selected adapter has
+a larger tier than the current choice.
 
 With `workspace_scope: true` (N-T48, ADR-030 decision 4) the bead's own
 workspace decides first: when the static default and at least one other
@@ -569,8 +584,10 @@ agent:
     candidates: [claude-code-glm-5.3-flash, claude-code-glm-5.3]
     min_attempts: 20
     exploration_share: 0.10
+    metric: verified_success_per_usd
+    adapter_tiers: { claude-code-glm-5.3-flash: 1, claude-code-glm-5.3: 2 }
     min_improvement: 0.05
-    window_days: 7
+    window_days: 14
     refresh_secs: 600
     workspace_scope: false
     workspace_poor_threshold: 0.0

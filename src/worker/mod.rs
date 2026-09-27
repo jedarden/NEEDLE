@@ -168,6 +168,8 @@ struct LedgerCache {
     computed_at: Instant,
     /// Routing evidence at fleet and workspace scope (N-T48).
     evidence: crate::evidence_routing::Evidence,
+    /// Timestamped rows support same-bead timeout/max-turns retry bias.
+    rows: Vec<crate::evidence_routing::LedgerRow>,
     variants: std::collections::HashMap<String, crate::experiments::VariantOutcome>,
 }
 
@@ -9199,12 +9201,15 @@ impl Worker {
             .window_days
             .max(self.config.prompt.experiments.window_days)
             .max(1);
-        let rows = crate::evidence_routing::ledger_rows(&log_dir, window);
-        let evidence = crate::evidence_routing::Evidence::from_rows(&rows);
-        let variants = crate::experiments::variant_outcomes(&rows);
+        let mut rows = crate::evidence_routing::timestamped_ledger_rows(&log_dir, window);
+        rows.sort_by_key(|row| row.timestamp);
+        let data_rows: Vec<serde_json::Value> = rows.iter().map(|row| row.data.clone()).collect();
+        let evidence = crate::evidence_routing::Evidence::from_rows(&data_rows);
+        let variants = crate::experiments::variant_outcomes(&data_rows);
         let cache = LedgerCache {
             computed_at: self.clock.now(),
             evidence,
+            rows,
             variants,
         };
         *guard = Some(cache.clone());
@@ -9348,6 +9353,13 @@ impl Worker {
                 }
             }
         }
+        let task_class = self
+            .built_prompt
+            .as_ref()
+            .map(|prompt| prompt.template_name.as_str());
+        let Some(task_class) = task_class else {
+            return (static_adapter, matched_rule);
+        };
         let cache = self.ledger_snapshot();
         // N-T51: a degraded provider takes its whole adapter group out of
         // routing at once. The degraded states are expanded against the
@@ -9387,33 +9399,64 @@ impl Worker {
             self.worker_name.hash(&mut h);
             (h.finish() % 10_000) as f64 / 10_000.0
         };
-        // A dispatch's own workspace decides first (N-T48); preflight and
-        // identity lookups carry no bead and use fleet evidence.
-        let workspace = bead_id
-            .filter(|_| !is_workspace_unset(&self.current_workspace))
-            .map(|_| self.current_workspace.to_string_lossy().into_owned());
-        let scoped = crate::evidence_routing::choose_scoped(
+        let context_evidence = cache
+            .evidence
+            .for_task_class(&self.current_workspace.to_string_lossy(), task_class);
+        let mut scoped_config = config.clone();
+        // Only dispatcher-loaded adapter names may enter the evidence choice.
+        // The static result remains the fallback if a configured candidate is
+        // missing or cannot be loaded.
+        scoped_config
+            .candidates
+            .retain(|name| self.dispatcher.adapter(name).is_some());
+        let mut choice = crate::evidence_routing::choose(
             &static_adapter,
-            config,
-            &cache.evidence,
-            workspace.as_deref(),
+            &scoped_config,
+            &context_evidence,
             &degraded,
             frozen,
             roll,
         );
-        let choice = &scoped.choice;
+        let mut retry_bias = false;
+        if let Some(id) = bead_id {
+            let mut candidates = scoped_config.candidates.clone();
+            if !candidates.iter().any(|name| name == &static_adapter) {
+                candidates.push(static_adapter.clone());
+            }
+            if let Some(preferred) = crate::evidence_routing::retry_bias_adapter(
+                &cache.rows,
+                id.as_ref(),
+                &candidates,
+                &config.adapter_tiers,
+            ) {
+                let current_tier = config
+                    .adapter_tiers
+                    .get(&choice.adapter)
+                    .copied()
+                    .unwrap_or(0);
+                let preferred_tier = config.adapter_tiers.get(&preferred).copied().unwrap_or(0);
+                if preferred_tier > current_tier && self.dispatcher.adapter(&preferred).is_some() {
+                    choice.reason = format!("retry_tier_bias:{preferred_tier}");
+                    choice.adapter = preferred;
+                    choice.explored = false;
+                    retry_bias = true;
+                }
+            }
+        }
         // Only an adapter the dispatcher can load is a real choice.
-        let chosen = if choice.adapter != static_adapter
-            && self.dispatcher.adapter(&choice.adapter).is_none()
-        {
+        let loaded: std::collections::HashSet<String> = self
+            .dispatcher
+            .adapter_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let chosen = crate::evidence_routing::available_choice(&choice, &static_adapter, &loaded);
+        if chosen == static_adapter && choice.adapter != static_adapter {
             tracing::warn!(
                 adapter = %choice.adapter,
                 "evidence routing chose an adapter the dispatcher cannot load — keeping the static adapter"
             );
-            static_adapter.clone()
-        } else {
-            choice.adapter.clone()
-        };
+        }
         if let Some(id) = bead_id {
             let receipts = |set: &[crate::evidence_routing::AdapterEvidence]| {
                 set.iter()
@@ -9423,15 +9466,18 @@ impl Worker {
             let _ = self.telemetry.emit(
                 EventKind::EvidenceRoutingDecision {
                     bead_id: id.clone(),
+                    task_class: Some(task_class.to_string()),
+                    metric: config.metric.as_str().to_string(),
                     static_adapter: static_adapter.clone(),
                     chosen_adapter: chosen.clone(),
                     reason: choice.reason.clone(),
                     explored: choice.explored,
+                    retry_bias,
                     considered: receipts(&choice.considered),
-                    scope: scoped.scope.as_str().to_string(),
-                    workspace: scoped.workspace.clone(),
-                    considered_workspace: receipts(&scoped.considered_workspace),
-                    considered_fleet: receipts(&scoped.considered_fleet),
+                    scope: "workspace_task_class".to_string(),
+                    workspace: Some(self.current_workspace.to_string_lossy().into_owned()),
+                    considered_workspace: receipts(&choice.considered),
+                    considered_fleet: Vec::new(),
                 },
                 chrono::Utc::now(),
             );

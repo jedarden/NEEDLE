@@ -305,6 +305,18 @@ fn terminal_reason(
         }
     }
 }
+
+/// Preserve a provider-reported max-turns termination as a stable ledger
+/// reason so N-T18 can recognize repeated same-bead retry exhaustion.
+fn max_turns_terminal_reason(output: &AgentOutcome) -> Option<String> {
+    let envelope = crate::trace::parse_result_envelope(&output.stdout)?;
+    let subtype = envelope.subtype.as_deref().unwrap_or("");
+    let reason = envelope.terminal_reason.as_deref().unwrap_or("");
+    (subtype.to_ascii_lowercase().contains("max_turns")
+        || reason.to_ascii_lowercase().contains("max_turns"))
+    .then(|| "max_turns".to_string())
+}
+
 /// Prefix used for the operator-facing note written when an attempt is parked
 /// at the human rung. Keeping this machine-readable makes `human-queue` able
 /// to report the same reason that appears in the attempt ledger.
@@ -1732,6 +1744,15 @@ impl OutcomeHandler {
                 ),
             }
         };
+        if matches!(outcome, Outcome::Failure)
+            && gate_report
+                .as_ref()
+                .is_none_or(|report| report.results.values().all(GateResult::passed))
+        {
+            if let Some(reason) = max_turns_terminal_reason(output) {
+                resolved_reason = Some(reason);
+            }
+        }
         if matches!(outcome, Outcome::Timeout) && needs_human_reason.is_none() {
             resolved_reason = Some(format!(
                 "timeout:{}",
@@ -6023,6 +6044,20 @@ mod tests {
             Outcome::Failure
         );
     }
+
+    #[test]
+    fn nt18_max_turns_terminal_reason_is_preserved_for_retry_routing() {
+        let output = AgentOutcome {
+            exit_code: 1,
+            stdout: r#"{"type":"result","subtype":"error_max_turns"}"#.into(),
+            stderr: String::new(),
+        };
+        assert_eq!(
+            max_turns_terminal_reason(&output).as_deref(),
+            Some("max_turns")
+        );
+    }
+
     #[test]
     fn classify_with_stream_error_terminal_reason_is_failure_despite_exit_zero() {
         let stdout = r#"{"type":"result","subtype":"success","terminal_reason":"api_error"}"#;

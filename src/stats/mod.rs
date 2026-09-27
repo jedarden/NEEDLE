@@ -102,6 +102,42 @@ impl VariantComparison {
 // Aggregator
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Composite key for N-T18 adapter evidence reports.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RoutingEvidenceKey {
+    pub workspace: String,
+    /// Attempt `prompt_template`, which records the task/strand class.
+    pub task_class: String,
+    pub adapter: String,
+}
+
+/// Per-workspace, per-task-class, per-adapter attempt evidence.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutingEvidenceStats {
+    /// All ledger rows in the group, including provisional rows.
+    pub attempts: u64,
+    /// Rows retained for visibility but excluded from authoritative metrics.
+    pub provisional: u64,
+    pub verified_successes: u64,
+    pub cost_usd: f64,
+    pub costed: u64,
+}
+
+impl RoutingEvidenceStats {
+    /// Verified successes per known USD spent.
+    pub fn verified_success_per_usd(&self) -> Option<f64> {
+        (self.costed > 0 && self.cost_usd > 0.0)
+            .then(|| self.verified_successes as f64 / self.cost_usd)
+    }
+
+    /// Approximate 95% Poisson confidence interval for the metric.
+    pub fn metric_ci95(&self) -> Option<(f64, f64)> {
+        (self.costed > 0 && self.cost_usd > 0.0).then(|| {
+            crate::evidence_routing::poisson_rate_ci95(self.verified_successes, self.cost_usd)
+        })
+    }
+}
+
 /// Aggregates template variant statistics from JSONL telemetry log files.
 ///
 /// # Usage
@@ -130,6 +166,8 @@ pub struct StatsAggregator {
     /// Pending dispatch durations waiting for an `agent.completed` event,
     /// keyed by bead_id.
     pending_dispatch_start: BTreeMap<String, (String, String)>,
+    /// N-T18 report rows keyed by the complete routing context.
+    routing_evidence: BTreeMap<RoutingEvidenceKey, RoutingEvidenceStats>,
 }
 
 impl StatsAggregator {
@@ -143,6 +181,7 @@ impl StatsAggregator {
             stats: BTreeMap::new(),
             pending: BTreeMap::new(),
             pending_dispatch_start: BTreeMap::new(),
+            routing_evidence: BTreeMap::new(),
         }
     }
 
@@ -186,6 +225,51 @@ impl StatsAggregator {
             Some(d) => d,
             None => return,
         };
+
+        if event_type == Some("attempt.resolved") {
+            let workspace = data
+                .get("workspace")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .trim_end_matches('/')
+                .to_string();
+            let task_class = data
+                .get("task_class")
+                .or_else(|| data.get("prompt_template"))
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown")
+                .to_string();
+            let adapter = data
+                .get("adapter")
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown")
+                .to_string();
+            let key = RoutingEvidenceKey {
+                workspace,
+                task_class,
+                adapter,
+            };
+            let row = self.routing_evidence.entry(key).or_default();
+            row.attempts += 1;
+            if !crate::evidence_routing::is_authoritative_attempt_row(data) {
+                row.provisional += 1;
+            } else {
+                if data.get("outcome").and_then(|v| v.as_str()) == Some("verified_success") {
+                    row.verified_successes += 1;
+                }
+                let costed = data.get("costed").and_then(|v| v.as_bool()).unwrap_or(true);
+                if let (true, Some(cost)) = (
+                    costed,
+                    data.get("estimated_cost_usd").and_then(|v| v.as_f64()),
+                ) {
+                    row.cost_usd += cost;
+                    row.costed += 1;
+                }
+            }
+            return;
+        }
 
         match event_type {
             Some("agent.dispatched") => {
@@ -280,6 +364,13 @@ impl StatsAggregator {
                 min_dispatches: self.min_dispatches,
                 variants: by_version.clone(),
             })
+    }
+
+    /// Report ledger rows for each `(workspace, task class, adapter)` tuple.
+    /// Provisional attempts remain visible in `attempts` and `provisional`,
+    /// but do not contribute to metric or confidence interval.
+    pub fn routing_evidence(&self) -> &BTreeMap<RoutingEvidenceKey, RoutingEvidenceStats> {
+        &self.routing_evidence
     }
 }
 
@@ -1615,6 +1706,41 @@ mod tests {
             data["estimated_cost_usd"] = serde_json::json!(c);
         }
         make_tel_event("attempt.resolved", "needle-alpha", Some("nd-1"), data)
+    }
+
+    #[test]
+    fn nt18_stats_aggregator_reports_scoped_metric_and_provisional_rows() {
+        let mut aggregator = StatsAggregator::new(1);
+        let event = |provisional: bool, outcome: &str, cost: f64| {
+            serde_json::json!({
+                "event_type": "attempt.resolved",
+                "data": {
+                    "provisional": provisional,
+                    "workspace": "/repo/",
+                    "prompt_template": "pluck",
+                    "adapter": "adapter-a",
+                    "outcome": outcome,
+                    "costed": true,
+                    "estimated_cost_usd": cost,
+                }
+            })
+        };
+        aggregator.process_event(&event(false, "verified_success", 0.5));
+        aggregator.process_event(&event(true, "verified_success", 50.0));
+
+        let key = RoutingEvidenceKey {
+            workspace: "/repo".into(),
+            task_class: "pluck".into(),
+            adapter: "adapter-a".into(),
+        };
+        let row = &aggregator.routing_evidence()[&key];
+        assert_eq!(
+            (row.attempts, row.provisional, row.verified_successes),
+            (2, 1, 1)
+        );
+        assert_eq!(row.cost_usd, 0.5, "provisional spend is not authoritative");
+        assert_eq!(row.verified_success_per_usd(), Some(2.0));
+        assert!(row.metric_ci95().is_some());
     }
 
     #[test]

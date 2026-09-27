@@ -133,18 +133,21 @@ from.
 
 ### Adaptation Receipts (plan 4.4 steps 4–5, N-T18/N-T19)
 - `agent.evidence_routing` — Evidence-based adapter selection made a choice.
-  Fields: `bead_id`, `static_adapter`, `chosen_adapter`, `reason`
-  (`default_is_best`, `evidence:<best>_vs_<default>_over_<n>`,
-  `below_min_improvement:…`, `insufficient_evidence:…`, `explore:<share>`,
-  `frozen:<why>`, `no_eligible_candidate`), `explored`, `considered` (every
+  Fields: `bead_id`, `task_class`, `metric`, `static_adapter`,
+  `chosen_adapter`, `reason` (`default_is_best`,
+  `evidence:<best>_vs_<default>_over_<n>`, `insufficient_evidence:…`,
+  `explore:<share>`, `frozen:<why>`, `no_eligible_candidate`,
+  `retry_tier_bias:<tier>`), `explored`, `retry_bias`, `considered` (every
   candidate's `attempts`, `judged`, `verified`, `success_rate`,
-  `cost_per_success`). N-T48 adds `scope` (`workspace`, `fleet` or
-  `static`: which evidence decided), `workspace` (the bead's workspace, when
-  known), and `considered_workspace` / `considered_fleet` (every candidate's
-  evidence at each scope; `considered` is the deciding scope's). With
-  `workspace_scope` on, `reason` is prefixed with the scope
-  (`workspace:evidence:…`), and a fleet-scope decision that passed over a
-  `workspace_only_candidates` entry ends `+withheld:<adapter>` (N-T61).
+  `cost_per_success`, `verified_success_per_usd`, and `metric_ci95`). N-T48
+  adds `scope` (`workspace`, `fleet` or `static`: which evidence decided),
+  `workspace` (the bead's workspace, when known), and `considered_workspace` /
+  `considered_fleet` (every candidate's evidence at each scope; `considered`
+  is the deciding scope's). With `workspace_scope` on, `reason` can carry the
+  scope prefix and a fleet-scope decision that passed over a
+  `workspace_only_candidates` entry ends `+withheld:<adapter>` (N-T61). N-T18
+  ranks on the exact workspace/task-class pair; fleet evidence is empty for
+  that decision.
 - `workspace.adapter_evidence_poor` — Every routing candidate in a workspace
   has at least `min_attempts` judged attempts and verifies below
   `workspace_poor_threshold`: a workspace signal, emitted once per

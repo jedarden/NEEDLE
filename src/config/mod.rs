@@ -259,11 +259,24 @@ pub struct EvidenceRoutingConfig {
     /// evidence keeps accruing (default: 0.10; 0 disables exploration).
     #[serde(default = "EvidenceRoutingConfig::default_exploration_share")]
     pub exploration_share: f64,
-    /// Verified-success-rate lead the best candidate needs over the static
-    /// default before routing moves (default: 0.05).
+    /// Metric used to rank adapters once the evidence floor is met.
+    ///
+    /// N-T18 currently supports `verified_success_per_usd`; the explicit
+    /// field keeps the decision contract visible in configuration and
+    /// receipts.
+    #[serde(default)]
+    pub metric: EvidenceRoutingMetric,
+    /// Optional preference tiers for retries after repeated timeout or
+    /// max-turns outcomes on the same bead. Larger values mean a higher-tier
+    /// adapter; adapters absent from this map are never inferred or ranked.
+    #[serde(default)]
+    pub adapter_tiers: BTreeMap<String, u32>,
+    /// Legacy N-T61 lead used for workspace-only candidate withholding
+    /// diagnostics (default: 0.05). N-T18 ranks directly on the configured
+    /// metric after its evidence floor.
     #[serde(default = "EvidenceRoutingConfig::default_min_improvement")]
     pub min_improvement: f64,
-    /// Ledger window in days (default: 7).
+    /// Ledger window in days (default: 14).
     #[serde(default = "EvidenceRoutingConfig::default_window_days")]
     pub window_days: u32,
     /// How often a worker re-reads the ledger (default: 600 s).
@@ -294,6 +307,8 @@ impl Default for EvidenceRoutingConfig {
             candidates: Vec::new(),
             min_attempts: Self::default_min_attempts(),
             exploration_share: Self::default_exploration_share(),
+            metric: EvidenceRoutingMetric::default(),
+            adapter_tiers: BTreeMap::new(),
             min_improvement: Self::default_min_improvement(),
             window_days: Self::default_window_days(),
             refresh_secs: Self::default_refresh_secs(),
@@ -315,10 +330,28 @@ impl EvidenceRoutingConfig {
         0.05
     }
     fn default_window_days() -> u32 {
-        7
+        14
     }
     fn default_refresh_secs() -> u64 {
         600
+    }
+}
+
+/// Evidence-based adapter ranking metric (N-T18).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceRoutingMetric {
+    /// Verified attempts per known USD spent.
+    #[default]
+    VerifiedSuccessPerUsd,
+}
+
+impl EvidenceRoutingMetric {
+    /// Stable configuration and telemetry name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::VerifiedSuccessPerUsd => "verified_success_per_usd",
+        }
     }
 }
 

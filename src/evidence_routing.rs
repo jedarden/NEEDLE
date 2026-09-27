@@ -2,8 +2,8 @@
 //!
 //! Static routing (`agent.routing.rules`) matches on a model name and never
 //! learns. This module chooses among *already configured* candidate
-//! adapters by what the attempt ledger says about them — verified success
-//! per attempt, then cost per verified success — inside the L1 envelope of
+//! adapters by what the attempt ledger says about them — verified successes
+//! per known dollar spent — inside the L1 envelope of
 //! plan section 5.7: it selects among approved variants, records the
 //! exposure, and cannot create a new adapter or widen anything.
 //!
@@ -12,12 +12,11 @@
 //! - **Evidence floor.** An adapter with fewer than `min_attempts` ledger
 //!   rows in the window cannot be chosen as best; static routing remains the
 //!   default when nothing clears the floor.
-//! - **Minimum improvement.** Switching away from the statically routed
-//!   adapter needs the best candidate to beat it by `min_improvement` in
-//!   verified success rate, so the fleet does not flap on noise.
-//! - **Bounded exploration.** With probability `exploration_share` an
-//!   eligible non-best candidate is dispatched instead, so evidence keeps
-//!   accruing for every candidate; the choice is recorded as explored.
+//! - **Evidence floor.** The static result stands until a candidate has
+//!   enough judged attempts and known spend to produce the configured metric.
+//! - **Bounded exploration.** With probability `exploration_share` the
+//!   runner-up is dispatched instead, so its evidence keeps accruing; the
+//!   choice is recorded as explored.
 //! - **Freeze.** A gate-degraded workspace or a degraded adapter (N-T21,
 //!   N-T23) takes the static default: infrastructure noise must not move
 //!   routing.
@@ -86,7 +85,14 @@ impl AdapterEvidence {
             Some(crate::attempt_accounting::DECOMPOSED) => self.decomposed += 1,
             _ => {}
         }
-        if let Some(cost) = row.get("estimated_cost_usd").and_then(|v| v.as_f64()) {
+        let costed = row
+            .get("costed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if let (true, Some(cost)) = (
+            costed,
+            row.get("estimated_cost_usd").and_then(|v| v.as_f64()),
+        ) {
             self.cost_usd += cost;
             self.costed += 1;
         }
@@ -111,6 +117,18 @@ impl AdapterEvidence {
         }
     }
 
+    /// Verified successes per known dollar spent.
+    pub fn verified_success_per_usd(&self) -> Option<f64> {
+        (self.costed > 0 && self.cost_usd > 0.0).then(|| self.verified as f64 / self.cost_usd)
+    }
+
+    /// Approximate 95% Poisson confidence interval for verified successes per
+    /// known dollar spent. Unknown cost is never treated as zero.
+    pub fn metric_ci95(&self) -> Option<(f64, f64)> {
+        (self.costed > 0 && self.cost_usd > 0.0)
+            .then(|| poisson_rate_ci95(self.verified, self.cost_usd))
+    }
+
     /// The fields a telemetry receipt carries for this evidence.
     pub fn receipt(&self) -> serde_json::Value {
         serde_json::json!({
@@ -120,8 +138,30 @@ impl AdapterEvidence {
             "verified": self.verified,
             "success_rate": self.success_rate(),
             "cost_per_success": self.cost_per_success(),
+            "verified_success_per_usd": self.verified_success_per_usd(),
+            "metric_ci95": self.metric_ci95().map(|(lower, upper)| serde_json::json!({
+                "lower": lower,
+                "upper": upper,
+            })),
         })
     }
+}
+
+/// Byar approximation to the exact Garwood interval for a Poisson rate.
+/// `exposure` is the known spend in USD and `count` is verified successes.
+pub(crate) fn poisson_rate_ci95(count: u64, exposure: f64) -> (f64, f64) {
+    const Z: f64 = 1.959_963_984_540_054;
+    if count == 0 {
+        return (0.0, -0.025_f64.ln() / exposure);
+    }
+    let k = count as f64;
+    let lower = k
+        * (1.0 - 1.0 / (9.0 * k) - Z / (3.0 * k.sqrt()))
+            .max(0.0)
+            .powi(3);
+    let next = k + 1.0;
+    let upper = next * (1.0 - 1.0 / (9.0 * next) + Z / (3.0 * next.sqrt())).powi(3);
+    (lower / exposure, upper / exposure)
 }
 
 /// Whether an `attempt.resolved` data object may be used as learning evidence.
@@ -153,6 +193,14 @@ pub fn choose(
     frozen: Option<&str>,
     roll: f64,
 ) -> Choice {
+    if !config.enabled {
+        return Choice {
+            adapter: default.to_string(),
+            reason: "disabled".to_string(),
+            explored: false,
+            considered: Vec::new(),
+        };
+    }
     let candidates = candidate_names(default, config);
     let considered = considered_from(&candidates, evidence);
 
@@ -178,38 +226,31 @@ pub fn choose(
         };
     }
 
-    // Best by success rate among those clearing the evidence floor; cost per
-    // success breaks ties (lower is better).
+    // Best by verified successes per known dollar among those clearing the
+    // evidence floor. The confidence interval is part of each receipt; the
+    // point estimate keeps ranking deterministic.
     let mut ranked: Vec<&AdapterEvidence> = eligible
         .iter()
         .copied()
-        .filter(|e| e.judged() >= config.min_attempts)
+        .filter(|e| e.judged() >= config.min_attempts && e.verified_success_per_usd().is_some())
         .collect();
     ranked.sort_by(|a, b| {
-        let ra = a.success_rate().unwrap_or(0.0);
-        let rb = b.success_rate().unwrap_or(0.0);
+        let ra = a.verified_success_per_usd().unwrap_or(0.0);
+        let rb = b.verified_success_per_usd().unwrap_or(0.0);
         rb.partial_cmp(&ra)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
-                let ca = a.cost_per_success().unwrap_or(f64::MAX);
-                let cb = b.cost_per_success().unwrap_or(f64::MAX);
-                ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
+                let sa = a.success_rate().unwrap_or(0.0);
+                let sb = b.success_rate().unwrap_or(0.0);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
             })
             .then_with(|| a.adapter.cmp(&b.adapter))
     });
 
-    // Bounded exploration: sometimes dispatch a non-best eligible candidate
-    // so its evidence keeps accruing. Uniform over the others.
-    let best_name = ranked.first().map(|e| e.adapter.clone());
+    // Bounded exploration dispatches the runner-up so its evidence keeps
+    // accruing. It never samples an unranked adapter below the evidence floor.
     if config.exploration_share > 0.0 && roll < config.exploration_share {
-        let others: Vec<&AdapterEvidence> = eligible
-            .iter()
-            .copied()
-            .filter(|e| Some(&e.adapter) != best_name.as_ref())
-            .collect();
-        if !others.is_empty() {
-            let idx = ((roll / config.exploration_share) * others.len() as f64) as usize;
-            let pick = others[idx.min(others.len() - 1)];
+        if let Some(pick) = ranked.get(1) {
             return Choice {
                 adapter: pick.adapter.clone(),
                 reason: format!("explore:{:.2}", config.exploration_share),
@@ -253,17 +294,15 @@ pub fn choose(
             considered,
         };
     }
-    let default_rate = default_evidence
-        .and_then(|e| e.success_rate())
+    let best_metric = best.verified_success_per_usd().unwrap_or(0.0);
+    let default_metric = default_evidence
+        .and_then(AdapterEvidence::verified_success_per_usd)
         .unwrap_or(0.0);
-    let best_rate = best.success_rate().unwrap_or(0.0);
-    if degraded_adapters.contains(default) || best_rate >= default_rate + config.min_improvement {
+    if degraded_adapters.contains(default) || best.adapter != default {
         Choice {
             adapter: best.adapter.clone(),
             reason: format!(
-                "evidence:{:.2}_vs_{:.2}_over_{}",
-                best_rate,
-                default_rate,
+                "evidence:{best_metric:.4}_vs_{default_metric:.4}_over_{}",
                 best.judged()
             ),
             explored: false,
@@ -272,13 +311,25 @@ pub fn choose(
     } else {
         Choice {
             adapter: default.to_string(),
-            reason: format!(
-                "below_min_improvement:{:.2}_vs_{:.2}",
-                best_rate, default_rate
-            ),
+            reason: "default_is_best".to_string(),
             explored: false,
             considered,
         }
+    }
+}
+
+/// Keep the static result when an evidence-selected adapter is not loaded by
+/// this worker. This prevents stale configuration from widening the adapter
+/// set at dispatch time.
+pub fn available_choice(
+    choice: &Choice,
+    static_default: &str,
+    loaded_adapters: &HashSet<String>,
+) -> String {
+    if choice.adapter == static_default || loaded_adapters.contains(&choice.adapter) {
+        choice.adapter.clone()
+    } else {
+        static_default.to_string()
     }
 }
 
@@ -345,6 +396,9 @@ pub struct Evidence {
     pub fleet: HashMap<String, AdapterEvidence>,
     /// Evidence per `(workspace key, adapter)`; see [`workspace_key`].
     pub workspace: HashMap<(String, String), AdapterEvidence>,
+    /// Evidence per `(workspace key, task class, adapter)`. The task class is
+    /// the prompt template recorded on each attempt (for example, `pluck`).
+    pub workspace_task_class: HashMap<(String, String, String), AdapterEvidence>,
 }
 
 impl Evidence {
@@ -386,9 +440,20 @@ impl Evidence {
             .and_then(workspace_key)
         {
             self.workspace
-                .entry((workspace, adapter.to_string()))
+                .entry((workspace.clone(), adapter.to_string()))
                 .or_insert_with(fresh)
                 .observe_row(row);
+            if let Some(task_class) = row
+                .get("task_class")
+                .or_else(|| row.get("prompt_template"))
+                .and_then(|v| v.as_str())
+                .filter(|class| !class.is_empty())
+            {
+                self.workspace_task_class
+                    .entry((workspace, task_class.to_string(), adapter.to_string()))
+                    .or_insert_with(fresh)
+                    .observe_row(row);
+            }
         }
     }
 
@@ -401,6 +466,23 @@ impl Evidence {
             .iter()
             .filter(|((ws, _), _)| *ws == key)
             .map(|((_, adapter), evidence)| (adapter.clone(), evidence.clone()))
+            .collect()
+    }
+
+    /// Evidence for one exact `(workspace, task class)` pair, keyed by
+    /// adapter. Other workspaces and task classes cannot affect this result.
+    pub fn for_task_class(
+        &self,
+        workspace: &str,
+        task_class: &str,
+    ) -> HashMap<String, AdapterEvidence> {
+        let Some(workspace) = workspace_key(workspace) else {
+            return HashMap::new();
+        };
+        self.workspace_task_class
+            .iter()
+            .filter(|((ws, class, _), _)| ws == &workspace && class == task_class)
+            .map(|((_, _, adapter), evidence)| (adapter.clone(), evidence.clone()))
             .collect()
     }
 
@@ -418,6 +500,50 @@ impl Evidence {
 pub fn workspace_key(path: &str) -> Option<String> {
     let trimmed = path.trim_end_matches('/');
     (!trimmed.is_empty() && trimmed != ".").then(|| trimmed.to_string())
+}
+
+/// Return the highest explicitly tiered candidate after the last two
+/// authoritative attempts for this bead both ended by timeout or max turns.
+/// Input rows should be in chronological order; timestamps provide a stable
+/// ordering when callers read multiple ledger files.
+pub fn retry_bias_adapter(
+    rows: &[LedgerRow],
+    bead_id: &str,
+    candidates: &[String],
+    adapter_tiers: &std::collections::BTreeMap<String, u32>,
+) -> Option<String> {
+    let mut attempts: Vec<&LedgerRow> = rows
+        .iter()
+        .filter(|row| {
+            row.data.get("bead_id").and_then(|v| v.as_str()) == Some(bead_id)
+                && is_authoritative_attempt_row(&row.data)
+        })
+        .collect();
+    attempts.sort_by_key(|row| row.timestamp);
+    let last_two = attempts.get(attempts.len().saturating_sub(2)..)?;
+    if last_two.len() != 2
+        || !last_two.iter().all(|row| {
+            let reason = row
+                .data
+                .get("terminal_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let timeout = row.data.get("outcome").and_then(|v| v.as_str()) == Some("indeterminate")
+                && reason.contains("timeout");
+            let max_turns = reason.contains("max_turns") || reason.contains("error_max_turns");
+            timeout || max_turns
+        })
+    {
+        return None;
+    }
+    candidates
+        .iter()
+        .filter_map(|name| adapter_tiers.get(name).map(|tier| (tier, name)))
+        .max_by(|(tier_a, name_a), (tier_b, name_b)| {
+            tier_a.cmp(tier_b).then_with(|| name_b.cmp(name_a))
+        })
+        .map(|(_, name)| name.clone())
 }
 
 /// A routing choice together with the scope that decided it.
@@ -819,6 +945,8 @@ mod tests {
             candidates: vec!["a".into(), "b".into()],
             min_attempts: 20,
             exploration_share: 0.1,
+            metric: crate::config::EvidenceRoutingMetric::VerifiedSuccessPerUsd,
+            adapter_tiers: std::collections::BTreeMap::new(),
             min_improvement: 0.05,
             window_days: 7,
             refresh_secs: 600,
@@ -826,6 +954,119 @@ mod tests {
             workspace_poor_threshold: 0.0,
             workspace_only_candidates: Vec::new(),
         }
+    }
+
+    #[test]
+    fn nt18_evidence_routing_off_returns_static_choice_without_receipts() {
+        let defaults = EvidenceRoutingConfig::default();
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.min_attempts, 20);
+        assert_eq!(defaults.exploration_share, 0.10);
+        assert_eq!(defaults.window_days, 14);
+        assert_eq!(defaults.metric.as_str(), "verified_success_per_usd");
+        let parsed: EvidenceRoutingConfig =
+            serde_yaml::from_str("metric: verified_success_per_usd").unwrap();
+        assert_eq!(parsed.metric, defaults.metric);
+
+        let mut off = cfg();
+        off.enabled = false;
+        let evidence = map(vec![ev("b", 100, 100, 1.0)]);
+        let choice = choose("a", &off, &evidence, &HashSet::new(), None, 0.01);
+        assert_eq!(choice.adapter, "a");
+        assert_eq!(choice.reason, "disabled");
+        assert!(!choice.explored);
+        assert!(choice.considered.is_empty());
+    }
+
+    #[test]
+    fn nt18_retry_bias_requires_two_timeouts_and_uses_explicit_tiers() {
+        let row = |outcome: &str, reason: &str, timestamp: &str| LedgerRow {
+            timestamp: Some(
+                chrono::DateTime::parse_from_rfc3339(timestamp)
+                    .unwrap()
+                    .to_utc(),
+            ),
+            data: serde_json::json!({
+                "bead_id": "nd-1",
+                "provisional": false,
+                "outcome": outcome,
+                "terminal_reason": reason,
+            }),
+        };
+        let rows = vec![
+            row("indeterminate", "timeout", "2026-09-01T00:00:00Z"),
+            row("work_failure", "exit_code:1", "2026-09-01T00:01:00Z"),
+        ];
+        let candidates = vec!["standard".into(), "high".into()];
+        let tiers = [("standard".into(), 1), ("high".into(), 2)]
+            .into_iter()
+            .collect();
+        assert_eq!(retry_bias_adapter(&rows, "nd-1", &candidates, &tiers), None);
+
+        let rows = vec![
+            row("indeterminate", "timeout", "2026-09-01T00:00:00Z"),
+            row("work_failure", "error_max_turns", "2026-09-01T00:01:00Z"),
+        ];
+        assert_eq!(
+            retry_bias_adapter(&rows, "nd-1", &candidates, &tiers).as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn nt18_missing_loaded_adapter_falls_back_to_static_choice() {
+        let choice = Choice {
+            adapter: "removed".into(),
+            reason: "evidence".into(),
+            explored: false,
+            considered: Vec::new(),
+        };
+        let loaded = ["static".to_string()].into_iter().collect();
+        assert_eq!(available_choice(&choice, "static", &loaded), "static");
+    }
+
+    #[test]
+    fn nt18_replay_fixture_changes_selection_only_after_candidates_clear_floor() {
+        let fixture = include_str!("../tests/fixtures/nt18-evidence-routing.jsonl");
+        let events: Vec<serde_json::Value> = fixture
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let rows: Vec<serde_json::Value> =
+            events.iter().map(|event| event["data"].clone()).collect();
+        let mut config = cfg();
+        config.candidates = vec!["a".into(), "b".into()];
+        config.min_attempts = 2;
+        config.exploration_share = 0.0;
+        config.min_improvement = 0.0;
+
+        let below_floor = Evidence::from_rows(&rows[..3]);
+        let low = choose(
+            "a",
+            &config,
+            &below_floor.for_task_class("/repo/", "pluck"),
+            &HashSet::new(),
+            None,
+            0.5,
+        );
+        assert_eq!(low.adapter, "a");
+
+        let evidence = Evidence::from_rows(&rows);
+        let context = evidence.for_task_class("/repo", "pluck");
+        let high = choose("a", &config, &context, &HashSet::new(), None, 0.5);
+        assert_eq!(high.adapter, "b");
+        assert!(high
+            .considered
+            .iter()
+            .all(|candidate| candidate.adapter != "c"));
+        let b = context.get("b").expect("configured candidate evidence");
+        assert_eq!(b.verified_success_per_usd(), Some(4.0));
+        let (lower, upper) = b.metric_ci95().expect("costed metric interval");
+        assert!(lower < 4.0 && upper > 4.0);
+        assert!(evidence.for_task_class("/other", "pluck").is_empty());
+        let mend = evidence.for_task_class("/repo", "mend");
+        assert_eq!(mend.len(), 1);
+        assert!(mend.contains_key("a"), "mend evidence stays task-scoped");
     }
 
     fn map(items: Vec<AdapterEvidence>) -> HashMap<String, AdapterEvidence> {
@@ -864,16 +1105,21 @@ mod tests {
     }
 
     #[test]
-    fn a_clearly_better_candidate_wins_and_a_marginal_one_does_not() {
+    fn higher_verified_success_per_usd_candidate_wins() {
         let evidence = map(vec![ev("a", 40, 20, 40.0), ev("b", 40, 32, 30.0)]);
         let c = choose("a", &cfg(), &evidence, &HashSet::new(), None, 0.5);
         assert_eq!(c.adapter, "b");
         assert!(c.reason.starts_with("evidence:"), "{}", c.reason);
 
+        // Even a modest success-rate lead wins when the configured metric is
+        // higher; min_improvement is not a second routing gate.
         let marginal = map(vec![ev("a", 40, 20, 40.0), ev("b", 40, 21, 30.0)]);
         let c = choose("a", &cfg(), &marginal, &HashSet::new(), None, 0.5);
-        assert_eq!(c.adapter, "a");
-        assert!(c.reason.starts_with("below_min_improvement"));
+        assert_eq!(c.adapter, "b");
+
+        let unknown_spend = map(vec![ev("a", 40, 20, 0.0), ev("b", 40, 40, 0.0)]);
+        let c = choose("a", &cfg(), &unknown_spend, &HashSet::new(), None, 0.5);
+        assert_eq!(c.adapter, "a", "unknown spend has no rankable metric");
     }
 
     #[test]

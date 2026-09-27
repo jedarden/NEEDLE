@@ -1388,10 +1388,13 @@ pub enum EventKind {
     /// workspace and fleet evidence sets are recorded (N-T48).
     EvidenceRoutingDecision {
         bead_id: BeadId,
+        task_class: Option<String>,
+        metric: String,
         static_adapter: String,
         chosen_adapter: String,
         reason: String,
         explored: bool,
+        retry_bias: bool,
         considered: Vec<serde_json::Value>,
         scope: String,
         workspace: Option<String>,
@@ -3249,10 +3252,13 @@ impl EventKind {
             }
             EventKind::EvidenceRoutingDecision {
                 bead_id,
+                task_class,
+                metric,
                 static_adapter,
                 chosen_adapter,
                 reason,
                 explored,
+                retry_bias,
                 considered,
                 scope,
                 workspace,
@@ -3261,10 +3267,13 @@ impl EventKind {
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
+                    "task_class": task_class,
+                    "metric": metric,
                     "static_adapter": static_adapter,
                     "chosen_adapter": chosen_adapter,
                     "reason": reason,
                     "explored": explored,
+                    "retry_bias": retry_bias,
                     "considered": considered,
                     "scope": scope,
                     "workspace": workspace,
