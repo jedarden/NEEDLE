@@ -7825,13 +7825,15 @@ mod tests {
         // snapshots describe rows written before it existed, so the field
         // staying out of them is what keeps old rows valid against their
         // own schema_version.
-        let v3_required: Vec<&str> = attempt_resolved_fixture()["required"]
-            .as_array()
-            .expect("v3 fixture must declare required fields")
-            .iter()
-            .map(|value| value.as_str().expect("required entries are strings"))
-            .collect();
-        assert!(v3_required.contains(&"commits_before_deadline"));
+        let v3 = attempt_resolved_fixture();
+        assert!(
+            v3["required"]
+                .as_array()
+                .expect("v3 fixture must declare required fields")
+                .iter()
+                .any(|value| value.as_str() == Some("commits_before_deadline")),
+            "the v3 contract must require the pre-deadline commit count"
+        );
         for (version, raw) in [
             (
                 "v1",
