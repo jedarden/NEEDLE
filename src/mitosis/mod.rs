@@ -1989,6 +1989,7 @@ fn has_label(bead: &Bead, label: &str) -> bool {
 
 fn active_retry_label(label: &str) -> bool {
     label.starts_with("failure-count:")
+        || label.starts_with(crate::bead_store::RETRY_COOLDOWN_LABEL_PREFIX)
         || label.starts_with("quarantine-until:")
         || label.starts_with("quarantine-round:")
         || label.starts_with("quarantine:")

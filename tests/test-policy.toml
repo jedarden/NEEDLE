@@ -233,7 +233,14 @@ version = 1
 # the test process's own PID as the reused number, so no spawn is involved.
 # +1 ADR-003 cleanup liveness regression (needle-156e8a08): a real tmux-backed
 # worker is preserved, an orphan is removed, and --all remains destructive.
-max_tests = 3991
+# +9 soft retry cooldown (needle-ebe67029): 6 in src/strand/pluck.rs (label
+# parsing and expiry, the hold-back-only-when-alternatives-exist rule, a lone
+# cooling bead still plucked, rotation behind an alternative, and a hard
+# quarantine left unchanged) and 3 in src/outcome/mod.rs (the soft label
+# replaces its predecessor without touching quarantine-until, is pruned by a
+# quarantine, and is cleared on success). The unit tier is the only home: the
+# preference helper and the handler's label bookkeeping are private.
+max_tests = 4000
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

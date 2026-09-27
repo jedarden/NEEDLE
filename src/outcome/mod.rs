@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{BeadStore, RETRY_COOLDOWN_LABEL_PREFIX};
 use crate::config::{Config, GatesConfig};
 use crate::fingerprint::{
     append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
@@ -3949,6 +3949,7 @@ impl OutcomeHandler {
             for label in labels.iter().filter(|l| {
                 l.starts_with(DEGRADED_WINDOW_MARKER_PREFIX)
                     || l.starts_with("failure-count:")
+                    || l.starts_with(RETRY_COOLDOWN_LABEL_PREFIX)
                     || l.starts_with("quarantine")
                     || l.as_str() == "cycling"
             }) {
@@ -4525,9 +4526,10 @@ impl OutcomeHandler {
         // The bead-rs ready frontier is deterministic.  Releasing a failed
         // bead without changing its eligibility makes the very next worker
         // select it again, which is retry churn rather than distribution.
-        // Persist a short expiring exclusion on the bead so every worker sees
-        // the same cooldown.  The full quarantine path below replaces this
-        // window when the configured failure ceiling is reached.
+        // Persist a short expiring soft cooldown on the bead so every worker
+        // sees the same rotation.  It only defers the bead while alternatives
+        // exist.  The hard quarantine path below supersedes this window when
+        // the configured failure ceiling is reached.
         let threshold = self.config.outcome.quarantine_after_failures;
         if threshold == 0 || new_count < threshold {
             if let Err(error) = self.apply_retry_cooldown(store, bead, new_count).await {
@@ -4543,12 +4545,16 @@ impl OutcomeHandler {
         Ok(new_count)
     }
 
-    /// Replace the bead's current expiry label with a bounded retry window.
+    /// Replace the bead's current retry window with a bounded one.
     ///
     /// This is deliberately stored on the bead rather than in one worker's
-    /// memory: a local exclusion merely hands the same bead to a peer.  Pluck
-    /// already treats a future `quarantine-until` label as a never-relaxed
-    /// constraint and automatically admits it after expiry.
+    /// memory: a local exclusion merely hands the same bead to a peer.  The
+    /// window is a `retry-cooldown-until:` label, NOT `quarantine-until:`: it is
+    /// a soft preference (needle-ebe67029).  The bead store's `ready()` keeps
+    /// returning the bead, and Pluck rotates it behind other candidates only
+    /// while others exist, so a lone failing bead is retried rather than left
+    /// idle for the window.  `quarantine-until:` stays reserved for the hard
+    /// quarantine applied at the failure ceiling, and is never touched here.
     async fn apply_retry_cooldown(
         &self,
         store: &dyn BeadStore,
@@ -4562,7 +4568,7 @@ impl OutcomeHandler {
 
         for label in labels
             .iter()
-            .filter(|label| label.starts_with("quarantine-until:"))
+            .filter(|label| label.starts_with(RETRY_COOLDOWN_LABEL_PREFIX))
         {
             tokio::time::timeout(
                 std::time::Duration::from_secs(30),
@@ -4576,7 +4582,7 @@ impl OutcomeHandler {
         let cooldown_secs =
             capped_exponential_backoff(RETRY_COOLDOWN_BASE_SECS, exponent, RETRY_COOLDOWN_MAX_SECS);
         let until = Utc::now() + chrono::Duration::seconds(cooldown_secs as i64);
-        let label = format!("quarantine-until:{}", until.to_rfc3339());
+        let label = format!("{RETRY_COOLDOWN_LABEL_PREFIX}{}", until.to_rfc3339());
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
             store.add_label(&bead.id, &label),
@@ -4589,7 +4595,7 @@ impl OutcomeHandler {
             failure_count,
             cooldown_secs,
             retry_after = %until.to_rfc3339(),
-            "deferred failed bead behind a fleet-wide retry cooldown"
+            "rotated failed bead behind a fleet-wide soft retry cooldown"
         );
         Ok(())
     }
@@ -4637,6 +4643,7 @@ impl OutcomeHandler {
         let mut removed_count = 0;
         for label in &labels {
             if label.starts_with("failure-count:")
+                || label.starts_with(RETRY_COOLDOWN_LABEL_PREFIX)
                 || label.starts_with("quarantine-until:")
                 || label.starts_with("quarantine-round:")
                 || label.starts_with("quarantine:")
@@ -4749,9 +4756,13 @@ impl OutcomeHandler {
                 .ok_or_else(|| anyhow::anyhow!("timed out adding quarantine label"))?;
         }
 
+        // A hard quarantine supersedes the soft retry cooldown, so any
+        // `retry-cooldown-until:` window is pruned along with the stale
+        // quarantine labels.
         for label in labels.iter().filter(|label| {
             (label.starts_with("quarantine-round:") && label.as_str() != round_label)
                 || (label.starts_with("quarantine-until:") && label.as_str() != until_label)
+                || label.starts_with(RETRY_COOLDOWN_LABEL_PREFIX)
                 || (label.starts_with(crate::quarantine_expiry::CONTENT_HASH_LABEL_PREFIX)
                     && label.as_str() != hash_label)
         }) {
@@ -6040,9 +6051,85 @@ mod tests {
         );
         assert!(
             actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label.starts_with("retry-cooldown-until:"))
+            ),
+            "a below-threshold failure must receive a soft retry cooldown"
+        );
+        assert!(
+            !actions.iter().any(
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label.starts_with("quarantine-until:"))
             ),
-            "a below-threshold failure must receive a retry cooldown"
+            "the retry cooldown must not be a hard quarantine window"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_cooldown_replaces_prior_soft_window_and_leaves_quarantine_labels_alone() {
+        // needle-ebe67029: the retry window is its own label. A new failure
+        // swaps the previous soft window for a fresh one and never edits a
+        // `quarantine-until:` label, which belongs to the hard quarantine.
+        let handler = test_handler();
+        let old_soft = "retry-cooldown-until:2026-01-01T00:00:00+00:00".to_string();
+        let old_hard = "quarantine-until:2026-01-01T00:00:00+00:00".to_string();
+        let store = MockBeadStore::new(BeadStatus::InProgress).with_labels(vec![
+            "failure-count:1".to_string(),
+            old_soft.clone(),
+            old_hard.clone(),
+        ]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::RemoveLabel(_, label) if *label == old_soft)),
+            "the previous soft window must be replaced: {actions:?}"
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                StoreAction::AddLabel(_, label)
+                    if label.starts_with("retry-cooldown-until:") && *label != old_soft
+            )),
+            "a fresh soft window must be installed: {actions:?}"
+        );
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                StoreAction::AddLabel(_, label) | StoreAction::RemoveLabel(_, label)
+                    if label.starts_with("quarantine-until:")
+            )),
+            "a below-threshold failure must not touch quarantine-until: {actions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_cooldown_is_pruned_when_the_failure_ceiling_quarantines() {
+        // A hard quarantine supersedes the soft window.
+        let handler = test_handler();
+        let soft = "retry-cooldown-until:2099-01-01T00:00:00+00:00".to_string();
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:4".to_string(), soft.clone()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Quarantined);
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::RemoveLabel(_, label) if *label == soft)),
+            "quarantine must prune the soft retry window: {actions:?}"
         );
     }
 
@@ -6089,6 +6176,32 @@ mod tests {
                 |a| matches!(a, StoreAction::RemoveLabel(_, label) if label == "failure-count:3")
             ),
             "should remove failure-count:3 on success"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_cooldown_is_cleared_when_success_resets_failure_state() {
+        // A successful dispatch starts a fresh failure series; a leftover soft
+        // window would otherwise keep deferring a healthy bead.
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler();
+        let soft = "retry-cooldown-until:2099-01-01T00:00:00+00:00".to_string();
+        let store = MockBeadStore::new(BeadStatus::Done)
+            .with_labels(vec!["failure-count:3".to_string(), soft.clone()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert!(
+            store
+                .actions()
+                .iter()
+                .any(|a| matches!(a, StoreAction::RemoveLabel(_, label) if *label == soft)),
+            "success must clear the soft retry window"
         );
     }
 

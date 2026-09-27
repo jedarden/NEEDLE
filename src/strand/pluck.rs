@@ -7,7 +7,7 @@
 //!
 //! Given the same queue state, every worker computes the same candidate list.
 
-use crate::bead_store::{active_quarantine_until, BeadStore, Filters};
+use crate::bead_store::{active_quarantine_until, active_retry_cooldown_until, BeadStore, Filters};
 use crate::build_status::{BuildStatusChecker, CircuitDecision, CircuitPolicy};
 use crate::deferral::{holds as deferral_holds, until as deferred_until};
 use crate::internal::is_internal_artifact;
@@ -690,6 +690,58 @@ fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
 
 fn is_never_relaxed_label(label: &str, now: chrono::DateTime<Utc>) -> bool {
     is_manual_block_label(label) || deferral_holds(label, now) || is_human_like_label(label, &[])
+}
+
+/// What the soft retry-cooldown preference did to one candidate set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryCooldownEffect {
+    /// No candidate was inside a retry cooldown; the set is unchanged.
+    Unaffected,
+    /// `held_back` cooling candidates were dropped behind `alternatives` others.
+    HeldBack {
+        held_back: usize,
+        alternatives: usize,
+    },
+    /// Every candidate is cooling, so none is dropped: there is no alternative.
+    NoAlternative { cooling: usize },
+}
+
+/// Prefer candidates that are not inside a `retry-cooldown-until:` window.
+///
+/// The cooldown is soft (needle-ebe67029): it rotates a recently failed bead
+/// behind other work, but only when other work exists. A worker with nothing
+/// else to do keeps retrying the failed bead rather than idling out the window
+/// — and, because Pluck still returns a candidate, the generation gate never
+/// fires to invent work merely because one bead is cooling.
+///
+/// "Alternative" means another candidate in the same set. An expired or
+/// malformed window does not count as cooling.
+fn prefer_candidates_outside_retry_cooldown(
+    candidates: Vec<Bead>,
+    now: chrono::DateTime<Utc>,
+) -> (Vec<Bead>, RetryCooldownEffect) {
+    let cooling = candidates
+        .iter()
+        .filter(|bead| active_retry_cooldown_until(bead, now).is_some())
+        .count();
+    if cooling == 0 {
+        return (candidates, RetryCooldownEffect::Unaffected);
+    }
+    if cooling == candidates.len() {
+        return (candidates, RetryCooldownEffect::NoAlternative { cooling });
+    }
+    let alternatives = candidates.len() - cooling;
+    let kept: Vec<Bead> = candidates
+        .into_iter()
+        .filter(|bead| active_retry_cooldown_until(bead, now).is_none())
+        .collect();
+    (
+        kept,
+        RetryCooldownEffect::HeldBack {
+            held_back: cooling,
+            alternatives,
+        },
+    )
 }
 
 fn workspace_from_inventory(beads: &[Bead]) -> String {
@@ -1665,7 +1717,42 @@ impl PluckStrand {
     /// preferences*, and a lane is a reservation, not a preference. Ordering
     /// inside the lane is untouched — the same tier, the same backend order,
     /// the same later sort.
+    ///
+    /// The soft retry cooldown (needle-ebe67029) is applied to whichever tier
+    /// produced candidates: a bead still inside its `retry-cooldown-until:`
+    /// window is held back only while the same result holds other candidates.
+    /// When every candidate is cooling there is nothing to rotate to, so all of
+    /// them proceed. Relaxation tiers are not walked to dodge a cooldown —
+    /// relaxing drops worker preferences, and a cooldown is not a reason to.
     async fn query_tiers(
+        &self,
+        store: &dyn BeadStore,
+        lane_label: Option<&str>,
+    ) -> Result<(Vec<Bead>, RelaxationTier)> {
+        let (candidates, tier) = self.query_tiers_unfiltered(store, lane_label).await?;
+        let (candidates, effect) = prefer_candidates_outside_retry_cooldown(candidates, Utc::now());
+        match effect {
+            RetryCooldownEffect::Unaffected => {}
+            RetryCooldownEffect::HeldBack {
+                held_back,
+                alternatives,
+            } => tracing::info!(
+                tier = tier.name(),
+                held_back,
+                alternatives,
+                "retry cooldown holding recently failed bead(s) behind available alternatives"
+            ),
+            RetryCooldownEffect::NoAlternative { cooling } => tracing::info!(
+                tier = tier.name(),
+                cooling,
+                "every candidate is inside its retry cooldown; proceeding because no alternative exists"
+            ),
+        }
+        Ok((candidates, tier))
+    }
+
+    /// The relaxation waterfall itself, before the retry-cooldown preference.
+    async fn query_tiers_unfiltered(
         &self,
         store: &dyn BeadStore,
         lane_label: Option<&str>,
@@ -3566,7 +3653,7 @@ fn write_query_execution_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bead_store::{quarantine_until, RepairReport};
+    use crate::bead_store::{quarantine_until, retry_cooldown_until, RepairReport};
     use crate::types::{BeadId, BeadStatus, BrDependency, ClaimResult};
 
     use anyhow::Result;
@@ -4807,6 +4894,192 @@ mod tests {
                 );
             }
             other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    // ── Soft retry cooldown (needle-ebe67029) ──
+
+    #[test]
+    fn retry_cooldown_label_parses_rfc3339_and_ignores_malformed() {
+        let ts = "2026-09-27T12:00:00+00:00";
+        assert_eq!(
+            retry_cooldown_until(&format!("retry-cooldown-until:{ts}")).map(|d| d.to_rfc3339()),
+            Some(ts.to_string())
+        );
+        assert!(retry_cooldown_until("retry-cooldown-until:tomorrow").is_none());
+        assert!(retry_cooldown_until("retry-cooldown-until:").is_none());
+        // The two windows are distinct labels: neither parser reads the other.
+        assert!(retry_cooldown_until(&format!("quarantine-until:{ts}")).is_none());
+        assert!(quarantine_until(&format!("retry-cooldown-until:{ts}")).is_none());
+    }
+
+    #[test]
+    fn retry_cooldown_is_active_only_until_it_expires() {
+        let now = Utc::now();
+        let past = (now - chrono::Duration::minutes(5)).to_rfc3339();
+        let soon = (now + chrono::Duration::minutes(5)).to_rfc3339();
+        let later = (now + chrono::Duration::minutes(20)).to_rfc3339();
+
+        let expired =
+            make_bead_with_labels("expired", 1, vec![&format!("retry-cooldown-until:{past}")]);
+        assert!(active_retry_cooldown_until(&expired, now).is_none());
+
+        let cooling =
+            make_bead_with_labels("cooling", 1, vec![&format!("retry-cooldown-until:{soon}")]);
+        assert!(active_retry_cooldown_until(&cooling, now).is_some());
+
+        let stacked = make_bead_with_labels(
+            "stacked",
+            1,
+            vec![
+                &format!("retry-cooldown-until:{soon}"),
+                &format!("retry-cooldown-until:{later}"),
+            ],
+        );
+        assert_eq!(
+            active_retry_cooldown_until(&stacked, now).map(|d| d.to_rfc3339()),
+            Some(later.clone())
+        );
+
+        // A hard quarantine window is not a retry cooldown.
+        let quarantined =
+            make_bead_with_labels("quarantined", 1, vec![&format!("quarantine-until:{later}")]);
+        assert!(active_retry_cooldown_until(&quarantined, now).is_none());
+    }
+
+    #[test]
+    fn retry_cooldown_preference_holds_cooling_beads_back_only_when_alternatives_exist() {
+        let now = Utc::now();
+        let soon = (now + chrono::Duration::minutes(5)).to_rfc3339();
+        let past = (now - chrono::Duration::minutes(5)).to_rfc3339();
+        let cooling =
+            |id: &str| make_bead_with_labels(id, 1, vec![&format!("retry-cooldown-until:{soon}")]);
+        let ids =
+            |beads: &[Bead]| -> Vec<String> { beads.iter().map(|b| b.id.to_string()).collect() };
+
+        // Nothing cooling: untouched.
+        let (kept, effect) = prefer_candidates_outside_retry_cooldown(
+            vec![
+                make_bead_with_labels("a", 1, vec![]),
+                make_bead_with_labels("b", 1, vec![]),
+            ],
+            now,
+        );
+        assert_eq!(effect, RetryCooldownEffect::Unaffected);
+        assert_eq!(ids(&kept), ["a", "b"]);
+
+        // An expired window is not cooling.
+        let (kept, effect) = prefer_candidates_outside_retry_cooldown(
+            vec![make_bead_with_labels(
+                "expired",
+                1,
+                vec![&format!("retry-cooldown-until:{past}")],
+            )],
+            now,
+        );
+        assert_eq!(effect, RetryCooldownEffect::Unaffected);
+        assert_eq!(ids(&kept), ["expired"]);
+
+        // Mixed: the cooling bead yields to the alternatives, order preserved.
+        let (kept, effect) = prefer_candidates_outside_retry_cooldown(
+            vec![
+                make_bead_with_labels("fresh-1", 1, vec![]),
+                cooling("failed"),
+                make_bead_with_labels("fresh-2", 1, vec![]),
+            ],
+            now,
+        );
+        assert_eq!(
+            effect,
+            RetryCooldownEffect::HeldBack {
+                held_back: 1,
+                alternatives: 2
+            }
+        );
+        assert_eq!(ids(&kept), ["fresh-1", "fresh-2"]);
+
+        // All cooling: no alternative, so every one proceeds.
+        let (kept, effect) = prefer_candidates_outside_retry_cooldown(
+            vec![cooling("failed-1"), cooling("failed-2")],
+            now,
+        );
+        assert_eq!(effect, RetryCooldownEffect::NoAlternative { cooling: 2 });
+        assert_eq!(ids(&kept), ["failed-1", "failed-2"]);
+    }
+
+    #[tokio::test]
+    async fn retry_cooldown_lone_bead_is_still_plucked() {
+        // The operator's condition: the cooldown applies only if there are
+        // alternative beads to pluck. A single cooling bead is the only work.
+        let soon = (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+        let store = MemoryStore {
+            beads: vec![make_bead_with_labels(
+                "only-bead",
+                1,
+                vec!["failure-count:1", &format!("retry-cooldown-until:{soon}")],
+            )],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        match strand.evaluate(&store, &HashSet::new()).await {
+            StrandResult::BeadFound(beads) => {
+                let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
+                assert_eq!(ids, ["only-bead"]);
+            }
+            other => panic!("a lone cooling bead must still be plucked, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_cooldown_rotates_a_failed_bead_behind_available_alternatives() {
+        let soon = (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+        let store = MemoryStore {
+            beads: vec![
+                // Older and the same priority, so it would otherwise sort first
+                // after the failure_count key ties are broken by age.
+                make_bead_with_labels(
+                    "recently-failed",
+                    1,
+                    vec![&format!("retry-cooldown-until:{soon}")],
+                ),
+                make_bead_with_labels("fresh", 1, vec![]),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        match strand.evaluate(&store, &HashSet::new()).await {
+            StrandResult::BeadFound(beads) => {
+                let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
+                assert_eq!(
+                    ids,
+                    ["fresh"],
+                    "the cooling bead must yield while an alternative exists"
+                );
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_cooldown_does_not_soften_an_active_quarantine() {
+        // A hard quarantine window is unchanged: it still hides the bead even
+        // when it is the only one, unlike the soft retry cooldown.
+        let soon = (Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        let store = MemoryStore {
+            beads: vec![make_bead_with_labels(
+                "quarantined-bead",
+                1,
+                vec![
+                    "quarantined",
+                    &format!("quarantine-until:{soon}"),
+                    "quarantine-round:1",
+                ],
+            )],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        if let StrandResult::BeadFound(beads) = strand.evaluate(&store, &HashSet::new()).await {
+            panic!("a lone actively quarantined bead must stay hidden, got {beads:?}");
         }
     }
 

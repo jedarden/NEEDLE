@@ -1492,6 +1492,7 @@ mod tests {
             .with_stored_notes("did the work")
             .with_labels(&[
                 "failure-count:3",
+                "retry-cooldown-until:2099-01-01T00:00:00Z",
                 "quarantine-until:2099-01-01T00:00:00Z",
                 "quarantine-round:3",
             ]);
@@ -1503,6 +1504,7 @@ mod tests {
         assert_eq!(applied, AppliedDecision::Completed);
         assert!(store.labels_snapshot().iter().all(|label| {
             !label.starts_with("failure-count:")
+                && !label.starts_with("retry-cooldown-until:")
                 && !label.starts_with("quarantine-until:")
                 && !label.starts_with("quarantine-round:")
         }));
@@ -1608,8 +1610,15 @@ mod tests {
             store
                 .labels_snapshot()
                 .iter()
+                .any(|l| l.starts_with("retry-cooldown-until:")),
+            "the fleet-wide soft retry cooldown is applied"
+        );
+        assert!(
+            !store
+                .labels_snapshot()
+                .iter()
                 .any(|l| l.starts_with("quarantine-until:")),
-            "the fleet-wide retry cooldown is applied"
+            "a retry is not a hard quarantine"
         );
         assert_eq!(store.released(), 1, "bead released for retry");
     }

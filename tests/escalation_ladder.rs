@@ -630,8 +630,10 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
     )?;
 
     // Rung 1 and the threshold crossing: each one-shot worker dispatch is a
-    // real claim/release cycle. The fixture's retry cooldown is expired by a
-    // real bead label edit between attempts so the test does not sleep.
+    // real claim/release cycle. Below the ceiling the retry cooldown is soft
+    // (needle-ebe67029), so this lone bead is redispatchable without waiting;
+    // the label edit between attempts only keeps any hard window expired so
+    // the test never sleeps.
     for attempt in 1..=5 {
         fixture
             .run_worker(&format!("ladder-failure-{attempt}"), &fixture.normal_path)
@@ -840,41 +842,61 @@ async fn immediate_exit_agent_counts_toward_quarantine_instead_of_looping() -> R
 
     // GitHub #22: an agent that dies before doing any work (exit=-1, 0ms)
     // used to be released without a failure count and re-claimed in a tight
-    // loop forever. A crash now counts like an ordinary failure: each one
-    // defers the bead behind the retry cooldown, so a worker dispatches it
-    // once and then goes idle instead of spinning, and the fifth crash
-    // reaches the quarantine ceiling. The cooldown is expired by a real
-    // label edit between rounds so the test does not sleep.
-    for attempt in 1..=5 {
+    // loop forever. A crash now counts like an ordinary failure. Each one
+    // below the ceiling leaves a SOFT retry cooldown (needle-ebe67029): with
+    // other work available the bead would be rotated behind it, but a lone
+    // bead is the only work, so a worker keeps retrying it rather than idling
+    // out the window. The loop stays bounded because the fifth crash reaches
+    // the quarantine ceiling, a hard hold, and the worker then goes idle.
+    // Runs repeat until the bead is quarantined so the assertions do not
+    // depend on how many dispatches one run makes before it idles.
+    let mut runs = 0;
+    loop {
+        runs += 1;
+        assert!(
+            runs <= 5,
+            "the crashing bead was still dispatchable after {} runs and {} dispatches",
+            runs - 1,
+            fixture.dispatches_of(&parent)
+        );
         fixture
             .run_worker_until_idle(
-                &format!("instant-exit-{attempt}"),
+                &format!("instant-exit-{runs}"),
                 &fixture.normal_path,
-                Duration::from_secs(30),
+                Duration::from_secs(60),
             )
             .await?;
-        assert_eq!(
-            fixture.dispatches_of(&parent),
-            attempt as usize,
-            "each worker run must dispatch the crashing bead exactly once, not loop"
-        );
-        assert_failure_count(&fixture, &parent, attempt)?;
-        if attempt < 5 {
-            let labels = fixture.labels(&parent)?;
-            assert!(
-                !labels.iter().any(|label| label == "quarantined"),
-                "crash {attempt} is below the quarantine ceiling"
-            );
-            assert!(
-                labels
-                    .iter()
-                    .any(|label| label.starts_with("quarantine-until:")),
-                "crash {attempt} must defer the bead behind the retry cooldown"
-            );
-            fixture.expire_and_allow_redispatch(&parent)?;
+        let labels = fixture.labels(&parent)?;
+        if labels.iter().any(|label| label == "quarantined") {
+            break;
         }
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.starts_with("retry-cooldown-until:")),
+            "a crash below the ceiling must leave the soft retry cooldown: {labels:?}"
+        );
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.starts_with("quarantine-until:")),
+            "a crash below the ceiling must not leave a hard quarantine window: {labels:?}"
+        );
     }
 
+    assert_eq!(
+        fixture.dispatches_of(&parent),
+        5,
+        "one dispatch per failure up to the quarantine ceiling, never a loop past it"
+    );
+    assert_failure_count(&fixture, &parent, 5)?;
+    let labels = fixture.labels(&parent)?;
+    assert!(
+        !labels
+            .iter()
+            .any(|label| label.starts_with("retry-cooldown-until:")),
+        "the hard quarantine supersedes the soft retry cooldown: {labels:?}"
+    );
     assert_quarantine_window(&fixture, &parent, 1, 2 * 60 * 60)?;
     assert_manual_blocked_is_false(&fixture.why(&parent)?, &parent);
     Ok(())

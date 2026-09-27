@@ -45,19 +45,52 @@ pub(crate) use cli_store::operation_failed_with;
 pub use cli_store::CliBeadStore;
 pub use version_handshake::{check_bead_forge_version, run_version_handshake, VersionCheck};
 
+/// Label prefix of the soft retry cooldown a failed attempt leaves on a bead.
+///
+/// Unlike `quarantine-until:`, this window is a scheduling preference rather
+/// than a hold: [`CliBeadStore::ready`] never filters on it, and Pluck holds a
+/// cooling bead back only while other candidates exist (needle-ebe67029).
+pub(crate) const RETRY_COOLDOWN_LABEL_PREFIX: &str = "retry-cooldown-until:";
+
+/// Parse an `<prefix><rfc3339>` expiry label into its instant.
+///
+/// A malformed label is treated as absent so it cannot starve work forever.
+fn until_label_instant(label: &str, prefix: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let trimmed = label.trim();
+    if trimmed.len() < prefix.len() || !trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed[prefix.len()..].trim())
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
 /// Parse a `quarantine-until:<rfc3339>` label into its expiry instant.
 ///
 /// Quarantine is an expiring readiness constraint, not a bead status. A
 /// malformed label is treated as absent so it cannot starve work forever.
 pub(crate) fn quarantine_until(label: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    const PREFIX: &str = "quarantine-until:";
-    let trimmed = label.trim();
-    if trimmed.len() < PREFIX.len() || !trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-        return None;
-    }
-    chrono::DateTime::parse_from_rfc3339(trimmed[PREFIX.len()..].trim())
-        .ok()
-        .map(|dt| dt.with_timezone(&chrono::Utc))
+    until_label_instant(label, "quarantine-until:")
+}
+
+/// Parse a `retry-cooldown-until:<rfc3339>` label into its expiry instant.
+pub(crate) fn retry_cooldown_until(label: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    until_label_instant(label, RETRY_COOLDOWN_LABEL_PREFIX)
+}
+
+/// Return the bead's latest still-running retry cooldown expiry, if any.
+///
+/// The cooldown is soft: a bead inside it is still eligible work. Only Pluck
+/// consults this, and only to prefer other candidates when some exist.
+pub(crate) fn active_retry_cooldown_until(
+    bead: &Bead,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    bead.labels
+        .iter()
+        .filter_map(|label| retry_cooldown_until(label))
+        .max()
+        .filter(|until| *until > now)
 }
 
 /// Return the bead's latest active quarantine expiry, if any.
