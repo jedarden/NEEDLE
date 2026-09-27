@@ -3,8 +3,9 @@
 ## Overview
 
 NEEDLE (Navigates Every Enqueued Deliverable, Logs Effort) is a Rust bead worker
-binary. It automates bead processing by running the `bf` CLI (bead-forge) to
-select, claim, dispatch an AI agent, and handle outcomes.
+binary. It automates bead processing by running the workspace's configured
+bead CLI (bead-rs `bead`, or bead-forge `bf` for explicitly bound legacy
+workspaces) to select, claim, dispatch an AI agent, and handle outcomes.
 
 ## MSRV
 
@@ -162,17 +163,28 @@ test(needle-XYZ): short description
 
 ## Bead Workflow
 
-Beads are managed with the `bf` CLI (bead-forge). `br` is a deprecated alias
-that survives only as a shim on some hosts — never invoke it, and never emit it
-from a prompt template or doc. Each bead's body contains deliverables and
-acceptance criteria. Close beads with:
+> Historical/non-operational reference: `br` below is a retired shim alias
+> for bead-forge, named only as an operational warning. It must never be
+> invoked or emitted in a prompt template or doc.
+<!-- retired-br: historical-only -->
+
+The primary backend is bead-rs (`bead`); bead-forge (`bf`) remains supported
+for explicitly bound legacy workspaces. Check `.needle.yaml` (`bead_cli.backend`)
+and the `.beads/` layout (`.beads/config.json` = bead-rs, `.beads/config.yaml`
+= bf) before running either CLI — do not infer the backend from which binaries
+happen to be installed. **This repository's own workspace is bead-rs.** `br`
+is a deprecated alias that survives only as a shim on some hosts — never
+invoke it, and never emit it from a prompt template or doc. Never use one
+backend's repair or import command on the other backend's database. Each
+bead's body contains deliverables and acceptance criteria. Close beads with:
 
 ```bash
-bf close BEAD_ID --reason "Summary of what was done"
+bead close BEAD_ID --reason "Summary of what was done"
 ```
 
 Note `--reason`, not `--body`: `--body` is not a valid flag and the close will
-fail.
+fail. (bf uses the same `--reason` flag if you are working an explicitly
+bf-bound legacy workspace.)
 
 ### Reopening Beads
 
