@@ -33,9 +33,14 @@ grep -q $'^glm-roam-22\t/home/coding/coned-rate-optimizer\tclaude-code-glm-5.3-f
 # needle-182be85c Step 2: the OpenAI bucket must exceed the Codex roster (registered accounting).
 grep -A2 '^    openai:' "$SRC_DIR/bootstrap-lane.yaml" | grep -qx '      max_concurrent: 16'
 [[ "$(awk -F'\t' '$3 ~ /^codex-/ {n++} END {print n+0}' <<<"$rows")" -lt 16 ]]
-grep -q $'^codex-luna-twproxy\t/home/coding/twitterapi-proxy\tcodex-gpt-5.6-luna-xhigh\t420\ttrue$' "$MANIFEST"
-grep -q $'^codex-luna-pjp\t/home/coding/pjp-demo\tcodex-gpt-5.6-luna-xhigh\t435\ttrue$' "$MANIFEST"
-grep -q $'^codex-luna-skills\t/home/coding/jeds-curated-skills\tcodex-gpt-5.6-luna-xhigh\t450\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-twproxy\t/home/coding/twitterapi-proxy\tcodex-gpt-5.6-luna-xhigh\t60\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-pjp\t/home/coding/pjp-demo\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-skills\t/home/coding/jeds-curated-skills\tcodex-gpt-5.6-luna-xhigh\t120\ttrue$' "$MANIFEST"
+# needle-182be85c incident: a start delay >= TimeoutStartSec (needle-worker@.service)
+# makes ExecStartPre's sleep get killed as a start timeout, looping forever under
+# Restart=always -- the worker never reaches construction. Guard the whole roster.
+timeout_start_sec=$(sed -n 's/^TimeoutStartSec=//p' "$SRC_DIR/needle-worker@.service")
+[[ "$(awk -F'\t' -v t="$timeout_start_sec" '$4 >= t {print}' <<<"$rows" | wc -l)" -eq 0 ]]
 grep -q $'^codex-luna-argo\t/home/coding/argo-workflows-exporter\tcodex-gpt-5.6-luna-xhigh\t375\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-utilities\t/home/coding/utilities\tcodex-gpt-5.6-luna-xhigh\t390\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-clustertop\t/home/coding/clustertop\tcodex-gpt-5.6-luna-xhigh\t405\ttrue$' "$MANIFEST"
