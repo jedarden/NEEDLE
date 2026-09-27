@@ -154,7 +154,18 @@ RUN set -eux; \
     CARGO_HOME=/tmp/bead-rs-cargo CARGO_BUILD_JOBS=2 cargo +stable install --locked \
       --git https://github.com/jedarden/bead-rs.git --rev "${BEAD_RS_REV}" \
       --bin bead --root /usr/local bead-rs; \
+    AARCH64_BEAD_ROOT=/tmp/bead-rs-aarch64; \
+    CARGO_HOME=/tmp/bead-rs-cargo CARGO_BUILD_JOBS=2 \
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+      CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+      cargo +1.95.0 install --locked \
+        --git https://github.com/jedarden/bead-rs.git --rev "${BEAD_RS_REV}" \
+        --target aarch64-unknown-linux-gnu --bin bead --root "$AARCH64_BEAD_ROOT" bead-rs; \
+    install -m 0755 "$AARCH64_BEAD_ROOT/bin/bead" \
+      /usr/local/bin/bead-aarch64-unknown-linux-gnu; \
     rm -rf /tmp/bead-rs-cargo; \
-    test "$(bead --version | cut -d' ' -f1-2)" = "bead ${BEAD_RS_VERSION}"
+    rm -rf /tmp/bead-rs-aarch64; \
+    test "$(bead --version | cut -d' ' -f1-2)" = "bead ${BEAD_RS_VERSION}"; \
+    test -x /usr/local/bin/bead-aarch64-unknown-linux-gnu
 
 WORKDIR /workspace

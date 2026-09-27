@@ -200,17 +200,28 @@ grep -Fq -- '--bin bead --root /usr/local bead-rs' "$BASE_DOCKERFILE" \
   || fail 'base image must install only the bead binary into /usr/local/bin'
 grep -Fq 'test "$(bead --version | cut -d'\'' '\'' -f1-2)" = "bead ${BEAD_RS_VERSION}"' "$BASE_DOCKERFILE" \
   || fail 'base image must assert the exact installed bead-rs version'
+grep -Fq -- '--target aarch64-unknown-linux-gnu --bin bead --root "$AARCH64_BEAD_ROOT" bead-rs' "$BASE_DOCKERFILE" \
+  || fail 'base image must cross-build the pinned aarch64 bead-rs binary'
+grep -Fq 'install -m 0755 "$AARCH64_BEAD_ROOT/bin/bead"' "$BASE_DOCKERFILE" \
+  || fail 'base image must install the cross-built aarch64 bead asset'
+grep -Fq 'test -x /usr/local/bin/bead-aarch64-unknown-linux-gnu' "$BASE_DOCKERFILE" \
+  || fail 'base image must verify the installed aarch64 bead asset'
 
 bead_rev_line="$(grep -n '^ARG BEAD_RS_REV=' "$BASE_DOCKERFILE" | cut -d: -f1)"
-bead_install_line="$(grep -nF -- '--git https://github.com/jedarden/bead-rs.git --rev "${BEAD_RS_REV}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
+mapfile -t bead_install_lines < <(grep -nF -- '--git https://github.com/jedarden/bead-rs.git --rev "${BEAD_RS_REV}"' "$BASE_DOCKERFILE" | cut -d: -f1)
+bead_install_line="${bead_install_lines[0]:-}"
+aarch64_bead_install_line="${bead_install_lines[1]:-}"
 bead_assert_line="$(grep -nF 'test "$(bead --version | cut -d'\'' '\'' -f1-2)" = "bead ${BEAD_RS_VERSION}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
 bead_toolchain_line="$(grep -n '^RUN rustup toolchain install ' "$BASE_DOCKERFILE" | cut -d: -f1)"
 bead_workdir_line="$(grep -n '^WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
-[[ -n "$bead_rev_line" && -n "$bead_install_line" && -n "$bead_assert_line" && \
+[[ "${#bead_install_lines[@]}" -eq 2 && -n "$bead_rev_line" && \
+   -n "$bead_install_line" && -n "$aarch64_bead_install_line" && \
+   -n "$bead_assert_line" && \
    -n "$bead_toolchain_line" && -n "$bead_workdir_line" && \
    "$bead_toolchain_line" -lt "$bead_rev_line" && \
    "$bead_rev_line" -lt "$bead_install_line" && \
-   "$bead_install_line" -lt "$bead_assert_line" && \
+   "$bead_install_line" -lt "$aarch64_bead_install_line" && \
+   "$aarch64_bead_install_line" -lt "$bead_assert_line" && \
    "$bead_assert_line" -lt "$bead_workdir_line" ]] || fail \
   'base image must build bead-rs after the toolchain layers, then version-check it'
 
@@ -247,7 +258,7 @@ nextest_binary_checksum_line="$(grep -nF 'echo "${CARGO_NEXTEST_BINARY_SHA256}  
 nextest_install_line="$(grep -nF 'install -m 0755 "${root}/cargo-nextest" /usr/local/bin/cargo-nextest' "$BASE_DOCKERFILE" | cut -d: -f1)"
 nextest_assert_line="$(grep -nF 'cargo-nextest --version | grep -Fx "release: ${CARGO_NEXTEST_VERSION}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
 toolchain_install_line="$(grep -nF 'RUN rustup toolchain install 1.95.0 \' "$BASE_DOCKERFILE" | cut -d: -f1)"
-toolchain_end_line="$(grep -nF '    --target aarch64-unknown-linux-gnu' "$BASE_DOCKERFILE" | cut -d: -f1)"
+toolchain_end_line="$(grep -nE '^    --target aarch64-unknown-linux-gnu$' "$BASE_DOCKERFILE" | cut -d: -f1)"
 nextest_version_line="$(grep -nF 'ARG CARGO_NEXTEST_VERSION=0.9.144' "$BASE_DOCKERFILE" | cut -d: -f1)"
 workdir_line="$(grep -nF 'WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
 [[ "$nextest_download_line" -lt "$nextest_archive_checksum_line" && \
@@ -263,7 +274,7 @@ workdir_line="$(grep -nF 'WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
    "$nextest_assert_line" -lt "$workdir_line" ]] || fail \
   'base image must add cargo-nextest after the pinned Rust toolchain layer and before WORKDIR'
 
-[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.14" ]] \
+[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.15" ]] \
   || fail 'ci/VERSION must move with the exact-profile dependency image contents'
 grep -Fq 'nextest-version = { required = "0.9.144" }' "$NEXTEST_CONFIG" \
   || fail 'nextest config must set the minimum supported runner version'
@@ -341,6 +352,6 @@ echo "PASS: rustc release matches the source toolchain pin ($source_toolchain)"
 echo 'PASS: base image builds bead-rs 0.2.6 from the pinned fleet revision'
 echo 'PASS: base image pins and verifies cargo-nextest 0.9.144 before installation'
 echo 'PASS: nextest CI profile emits stable, non-duplicated JUnit output'
-echo 'PASS: CI image version is 0.1.13'
+echo 'PASS: CI image version is 0.1.15'
 
 "$REPO_ROOT/tests/nextest-shard-plan/run.sh"
