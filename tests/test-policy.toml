@@ -271,7 +271,12 @@ version = 1
 # identity/credential rotation and the guarded CLI mutation matrix. These
 # exercise the claim/store/outcome boundaries in-process.
 # +1 provisional attempt-ID sink and stats regression pin (needle-00fbe3bc).
-max_tests = 4028
+# +3 pre-deadline count emission contracts (needle-5fa1c5de): the count
+# rides every outcome kind's resolved row, a counted zero is emitted
+# rather than omitted, and the v1/v2 snapshots stay free of the v3-only
+# field. Pure serializer/fixture checks; `cargo test --lib nt25_` covers
+# them.
+max_tests = 4031
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

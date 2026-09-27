@@ -7789,6 +7789,80 @@ mod tests {
     }
 
     #[test]
+    fn nt25_pre_deadline_count_rides_every_outcome_kind() {
+        // The count describes the attempt's commit cadence, not its verdict,
+        // so every terminal path must carry it: successful, failed, timed
+        // out (indeterminate), and each otherwise-terminal resolution.
+        for outcome in AttemptOutcome::ALL {
+            let mut fields = attempt_resolved_fields();
+            fields.outcome = outcome.as_str().to_string();
+            let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
+            assert_eq!(data["outcome"], outcome.as_str());
+            assert_eq!(
+                data["commits_before_deadline"], 1,
+                "a {outcome} row must carry the pre-deadline commit count"
+            );
+            check_object_matches("attempt.resolved", &data, &fixture_spec())
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    #[test]
+    fn nt25_zero_pre_deadline_count_is_emitted_not_omitted() {
+        // A counted zero says no commit beat the checkpoint mark — a fact,
+        // distinct from the unknown (null) the v3 fixture also allows.
+        let mut fields = attempt_resolved_fields();
+        fields.commits_before_deadline = Some(0);
+        let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
+        assert_eq!(data["commits_before_deadline"], 0);
+        check_object_matches("attempt.resolved", &data, &fixture_spec())
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    #[test]
+    fn nt25_pre_deadline_count_is_v3_only_across_versioned_fixtures() {
+        // v3 is the contract that adds the count (N-T25). The v1/v2
+        // snapshots describe rows written before it existed, so the field
+        // staying out of them is what keeps old rows valid against their
+        // own schema_version.
+        let v3_required: Vec<&str> = attempt_resolved_fixture()["required"]
+            .as_array()
+            .expect("v3 fixture must declare required fields")
+            .iter()
+            .map(|value| value.as_str().expect("required entries are strings"))
+            .collect();
+        assert!(v3_required.contains(&"commits_before_deadline"));
+        for (version, raw) in [
+            (
+                "v1",
+                include_str!("../../tests/fixtures/attempt-resolved-v1.schema.json"),
+            ),
+            (
+                "v2",
+                include_str!("../../tests/fixtures/attempt-resolved-v2.schema.json"),
+            ),
+        ] {
+            let fixture: serde_json::Value = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("{version} fixture must parse: {e}"));
+            assert!(
+                fixture["properties"]
+                    .get("commits_before_deadline")
+                    .is_none(),
+                "the {version} snapshot must not describe the v3-only count"
+            );
+            let required = fixture["required"]
+                .as_array()
+                .expect("versioned fixture must declare required fields");
+            assert!(
+                !required
+                    .iter()
+                    .any(|value| value.as_str() == Some("commits_before_deadline")),
+                "the {version} snapshot must not require the v3-only count"
+            );
+        }
+    }
+
+    #[test]
     fn attempt_resolved_fixture_describes_this_event() {
         let fixture = attempt_resolved_fixture();
         assert_eq!(fixture["title"], "attempt.resolved");
