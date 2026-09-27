@@ -258,7 +258,10 @@ version = 1
 # exit 0 rejected by shipped work (reopened/orphaned) resolves work_failure,
 # an unjudged orphan indeterminate, and a split attempt stays decomposed.
 # handle_success and the ledger row are private to src/outcome/mod.rs.
-max_tests = 4010
+# +1 attempt-identity guard classification (needle-cafdd3af): each guard is
+# a releasable pre-spawn abort that spawns nothing. The guard and its error
+# type are private to src/dispatch/mod.rs.
+max_tests = 4011
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

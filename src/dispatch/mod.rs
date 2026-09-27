@@ -1221,6 +1221,41 @@ pub fn is_claim_verification_error(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<ClaimVerificationError>().is_some())
 }
 
+/// The dispatch context's attempt identity was absent or disagreed with the
+/// telemetry identity, so the dispatcher refused to spawn.
+///
+/// Like a claim-verification abort, no agent ran and the worker still holds
+/// the claim, so the worker must release it rather than strand it until the
+/// lease expires (needle-cafdd3af).
+#[derive(Debug)]
+struct AttemptIdentityError {
+    detail: String,
+}
+
+impl std::fmt::Display for AttemptIdentityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.detail.fmt(formatter)
+    }
+}
+
+impl std::error::Error for AttemptIdentityError {}
+
+fn attempt_identity_error(detail: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(AttemptIdentityError {
+        detail: detail.into(),
+    })
+}
+
+/// Whether the dispatcher refused to spawn while the claim was still held:
+/// a failed final claim check or an attempt-identity guard. The caller owns
+/// releasing that claim.
+pub fn is_pre_spawn_abort(error: &anyhow::Error) -> bool {
+    is_claim_verification_error(error)
+        || error
+            .chain()
+            .any(|cause| cause.downcast_ref::<AttemptIdentityError>().is_some())
+}
+
 /// The immutable claim-time context handed to a dispatch.
 ///
 /// A worker may roam between workspaces, and bead IDs are only unique within
@@ -1602,16 +1637,22 @@ impl Dispatcher {
         if let Some(context) = authority.claim_context() {
             if let Some(attempt_id) = context.attempt_id() {
                 if attempt_id.is_empty() {
-                    bail!("dispatch context carries an empty attempt identity");
+                    return Err(attempt_identity_error(
+                        "dispatch context carries an empty attempt identity",
+                    ));
                 }
                 match self.telemetry.attempt_id() {
                     Some(active) if active == attempt_id => {}
-                    Some(active) => bail!(
-                        "attempt identity mismatch before dispatch: context={attempt_id}, telemetry={active}"
-                    ),
-                    None => bail!(
-                        "attempt identity missing from telemetry for dispatch context {attempt_id}"
-                    ),
+                    Some(active) => {
+                        return Err(attempt_identity_error(format!(
+                            "attempt identity mismatch before dispatch: context={attempt_id}, telemetry={active}"
+                        )))
+                    }
+                    None => {
+                        return Err(attempt_identity_error(format!(
+                            "attempt identity missing from telemetry for dispatch context {attempt_id}"
+                        )))
+                    }
                 }
             }
         }

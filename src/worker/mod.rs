@@ -4439,15 +4439,30 @@ impl Worker {
                 // final pre-spawn gate. The dispatcher must not reconstruct
                 // either value from the workspace path or its home-store
                 // compatibility fields.
-                let dispatch_context = DispatchContext::new(
-                    (*target_store).clone(),
-                    claim_identity.clone(),
-                )
-                .with_attempt_id(
-                    self.attempt_id
-                        .clone()
-                        .ok_or_else(|| anyhow::anyhow!("dispatch context lost attempt identity"))?,
-                );
+                let Some(attempt_id) = self.attempt_id.clone() else {
+                    // Nothing was spawned and the claim is still held: release
+                    // it with the held identity instead of stranding it until
+                    // the lease expires (needle-cafdd3af).
+                    cleanup_unverifiable_claim_context(
+                        &cleanup_telemetry,
+                        &cleanup_fallback_actor,
+                        &bead.id,
+                        "pre_spawn",
+                        Some((*target_store).clone()),
+                        Some(claim_identity.clone()),
+                    )
+                    .await;
+                    crate::validation::predispatch::clear_if_own(
+                        dispatch_ws,
+                        &bead.id,
+                        predispatch_token.as_deref(),
+                    )
+                    .await;
+                    bail!("dispatch context lost attempt identity");
+                };
+                let dispatch_context =
+                    DispatchContext::new((*target_store).clone(), claim_identity.clone())
+                        .with_attempt_id(attempt_id);
 
                 self.exec_started_at = Some(self.clock.now());
                 self.agent_process_active = true;
@@ -4464,7 +4479,9 @@ impl Worker {
                 self.agent_process_active = false;
                 let result = match dispatch_result {
                     Ok(result) => result,
-                    Err(error) if dispatch::is_claim_verification_error(&error) => {
+                    // A pre-spawn abort (claim check or attempt-identity
+                    // guard) ran no agent and left the claim held.
+                    Err(error) if dispatch::is_pre_spawn_abort(&error) => {
                         cleanup_unverifiable_claim_context(
                             &cleanup_telemetry,
                             &cleanup_fallback_actor,

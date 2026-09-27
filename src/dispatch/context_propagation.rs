@@ -31,7 +31,8 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 
 use super::{
-    builtin_adapters, is_claim_verification_error, AgentAdapter, DispatchContext, Dispatcher,
+    builtin_adapters, is_claim_verification_error, is_pre_spawn_abort, AgentAdapter,
+    DispatchContext, Dispatcher,
 };
 use crate::bead_store::{BeadStore, Filters, RepairReport};
 use crate::claim::{ClaimIdentity, ResolvedStoreContext};
@@ -464,4 +465,63 @@ async fn context_free_dispatch_without_a_wired_verifier_fails_closed() {
     let verify_error = events_of_type(&events, "bead.claim.verify_error");
     assert_eq!(verify_error.len(), 1);
     assert_eq!(verify_error[0]["stage"], serde_json::json!("pre_spawn"));
+}
+
+/// needle-cafdd3af: an attempt-identity guard refuses to spawn while the
+/// worker still holds the claim. Each guard must surface as a pre-spawn abort
+/// — the classification the worker releases the claim on — and spawn nothing,
+/// while a matching identity still dispatches.
+#[tokio::test]
+async fn attempt_identity_guards_abort_before_spawn_as_releasable() {
+    let target = Arc::new(ProbeStore::claimed_by(CONTEXT_WORKER, CAPTURED_REVISION, 2));
+
+    // (context attempt id, telemetry attempt id)
+    let cases: [(&str, Option<&str>); 3] = [
+        ("", Some("attempt-a")),
+        ("attempt-a", Some("attempt-b")),
+        ("attempt-a", None),
+    ];
+    for (context_id, telemetry_id) in cases {
+        let (sink, _events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink(CONTEXT_WORKER.to_string(), sink);
+        if let Some(id) = telemetry_id {
+            telemetry.set_attempt_id(id.to_string());
+        }
+        let mut adapters = HashMap::new();
+        let adapter = probe_adapter();
+        adapters.insert(adapter.name.clone(), adapter);
+        let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 60)
+            .with_worker_id(CONTEXT_WORKER.to_string());
+        let dispatch_workspace = tempfile::tempdir().expect("create dispatch workspace");
+        let context = DispatchContext::new(
+            ResolvedStoreContext::new(target.clone(), PathBuf::from(CARRIED_WORKSPACE)),
+            captured_identity(),
+        )
+        .with_attempt_id(context_id);
+
+        let error = dispatcher
+            .dispatch_with_context(
+                &BeadId::from("needle-context-probe-identity"),
+                &probe_prompt(),
+                dispatcher
+                    .adapter(PROBE_ADAPTER)
+                    .expect("probe adapter is registered"),
+                dispatch_workspace.path(),
+                &context,
+            )
+            .await
+            .expect_err("a bad attempt identity must abort");
+        assert!(
+            is_pre_spawn_abort(&error),
+            "context={context_id:?} telemetry={telemetry_id:?}: must be releasable, got {error:#}"
+        );
+        assert!(
+            !is_claim_verification_error(&error),
+            "an identity guard is not a claim-verification failure"
+        );
+        assert!(
+            !dispatch_workspace.path().join(SPAWN_SENTINEL).exists(),
+            "an identity guard must spawn zero child processes"
+        );
+    }
 }
