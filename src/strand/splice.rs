@@ -73,7 +73,7 @@ pub async fn ensure_fix_build_bead(
     let labels = ["fix-build", "priority:0"];
     let label_refs: Vec<&str> = labels.to_vec();
     let bead_id = store
-        .create_bead(&title, &body, &label_refs)
+        .create_bead_with_priority(&title, &body, &label_refs, 0)
         .await
         .context("failed to create the fix-build circuit repair bead")?;
     tracing::warn!(
@@ -1227,7 +1227,7 @@ mod tests {
         created: Arc<Mutex<Vec<CreatedBead>>>,
     }
 
-    type CreatedBead = (String, String, Vec<String>);
+    type CreatedBead = (String, String, Vec<String>, u8);
 
     #[async_trait::async_trait]
     impl BeadStore for NoOpStore {
@@ -1281,6 +1281,22 @@ mod tests {
                 title.to_string(),
                 body.to_string(),
                 labels.iter().map(|label| (*label).to_string()).collect(),
+                2,
+            ));
+            Ok(crate::types::BeadId::from("new-bead".to_string()))
+        }
+        async fn create_bead_with_priority(
+            &self,
+            title: &str,
+            body: &str,
+            labels: &[&str],
+            priority: u8,
+        ) -> Result<crate::types::BeadId> {
+            self.created.lock().unwrap().push((
+                title.to_string(),
+                body.to_string(),
+                labels.iter().map(|label| (*label).to_string()).collect(),
+                priority,
             ));
             Ok(crate::types::BeadId::from("new-bead".to_string()))
         }
@@ -1377,6 +1393,7 @@ mod tests {
         assert!(created[0].0.contains("deadbeef"));
         assert!(created[0].1.contains("cargo check --all-targets failed"));
         assert_eq!(created[0].2, vec!["fix-build", "priority:0"]);
+        assert_eq!(created[0].3, 0);
     }
 
     #[tokio::test]

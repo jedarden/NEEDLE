@@ -966,7 +966,15 @@ fn builtin_bead_rs() -> BeadBackend {
     operations.insert(
         "create".into(),
         operation(
-            &["create", "--title", "{title}", "--description", "{body}"],
+            &[
+                "create",
+                "--title",
+                "{title}",
+                "--description",
+                "{body}",
+                "--priority",
+                "{priority}",
+            ],
             None,
             Some(ParseShape::BareId),
         ),

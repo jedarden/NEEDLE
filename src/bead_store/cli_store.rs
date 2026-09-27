@@ -252,6 +252,58 @@ impl CliBeadStore {
         values
     }
 
+    async fn create_bead_at_priority(
+        &self,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+        priority: u8,
+        require_explicit_priority: bool,
+    ) -> Result<BeadId> {
+        if priority > 4 {
+            bail!("bead priority must be between 0 and 4, got {priority}");
+        }
+        let supports_priority = self
+            .operation("create")?
+            .argv
+            .iter()
+            .any(|argument| argument.contains("{priority}"));
+        if require_explicit_priority && !supports_priority {
+            bail!(
+                "backend '{}' create operation does not render '{{priority}}'; refusing to silently create requested P{} work at its default priority",
+                self.backend.name,
+                priority
+            );
+        }
+
+        let values = HashMap::from([
+            ("title", title.to_string()),
+            ("body", body.to_string()),
+            ("priority", priority.to_string()),
+        ]);
+        let mut args = self.render_operation("create", &values)?;
+        let labels_strategy = match self.strategy("labels")? {
+            ParsedStrategy::Labels(strategy) => strategy,
+            _ => bail!(
+                "backend '{}' has invalid labels strategy",
+                self.backend.name
+            ),
+        };
+        args.extend(execute_labels_strategy(labels_strategy, labels));
+        let stdout = self.run_argv("create", &args, DEFAULT_TIMEOUT_SECS).await?;
+        let id_strategy = match self.strategy("create_id")? {
+            ParsedStrategy::CreateId(strategy) => strategy,
+            _ => bail!(
+                "backend '{}' has invalid create_id strategy",
+                self.backend.name
+            ),
+        };
+        Ok(BeadId::from(execute_create_id_strategy(
+            id_strategy,
+            &stdout,
+        )?))
+    }
+
     fn validate_explicit_query_limit(&self, name: &str, args: &[String]) -> Result<()> {
         if !BOUNDED_QUERY_OPERATIONS.contains(&name) {
             return Ok(());
@@ -1178,28 +1230,19 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
-        let values = HashMap::from([("title", title.to_string()), ("body", body.to_string())]);
-        let mut args = self.render_operation("create", &values)?;
-        let labels_strategy = match self.strategy("labels")? {
-            ParsedStrategy::Labels(strategy) => strategy,
-            _ => bail!(
-                "backend '{}' has invalid labels strategy",
-                self.backend.name
-            ),
-        };
-        args.extend(execute_labels_strategy(labels_strategy, labels));
-        let stdout = self.run_argv("create", &args, DEFAULT_TIMEOUT_SECS).await?;
-        let id_strategy = match self.strategy("create_id")? {
-            ParsedStrategy::CreateId(strategy) => strategy,
-            _ => bail!(
-                "backend '{}' has invalid create_id strategy",
-                self.backend.name
-            ),
-        };
-        Ok(BeadId::from(execute_create_id_strategy(
-            id_strategy,
-            &stdout,
-        )?))
+        self.create_bead_at_priority(title, body, labels, 2, false)
+            .await
+    }
+
+    async fn create_bead_with_priority(
+        &self,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+        priority: u8,
+    ) -> Result<BeadId> {
+        self.create_bead_at_priority(title, body, labels, priority, true)
+            .await
     }
 
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
@@ -2772,10 +2815,14 @@ mod tests {
         let values = HashMap::from([
             ("title", title_with_special.to_string()),
             ("body", body_with_special.to_string()),
+            ("priority", "0".to_string()),
         ]);
         let result = store.render_operation("create", &values).unwrap();
         assert!(result.contains(&title_with_special.to_string()));
         assert!(result.contains(&body_with_special.to_string()));
+        assert!(result
+            .windows(2)
+            .any(|arguments| arguments == ["--priority", "0"]));
     }
 
     #[test]

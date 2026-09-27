@@ -954,13 +954,14 @@ impl<'a> CiCoordinator<'a> {
         );
         let id = self
             .store
-            .create_bead(
+            .create_bead_with_priority(
                 &format!(
                     "Repair CI failure: {}",
                     &entry.key.commit_sha[..entry.key.commit_sha.len().min(12)]
                 ),
                 &body,
-                &[REPAIR_LABEL],
+                &[REPAIR_LABEL, "fix-build", "origin:ci", "priority:0"],
+                0,
             )
             .await?;
         self.store.add_dependency(&id, &entry.parent_id).await?;
@@ -1472,6 +1473,25 @@ mod tests {
             self.beads.lock().unwrap().push(created);
             Ok(id)
         }
+        async fn create_bead_with_priority(
+            &self,
+            title: &str,
+            body: &str,
+            labels: &[&str],
+            priority: u8,
+        ) -> Result<BeadId> {
+            let id = self.create_bead(title, body, labels).await?;
+            if let Some(created) = self
+                .beads
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|bead| bead.id == id)
+            {
+                created.priority = priority;
+            }
+            Ok(id)
+        }
         async fn add_dependency(&self, blocker: &BeadId, blocked: &BeadId) -> Result<()> {
             self.actions
                 .lock()
@@ -1697,16 +1717,16 @@ mod tests {
                 .unwrap(),
             ReconcileOutcome::DuplicateIgnored
         );
-        assert_eq!(
-            store
-                .beads
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|bead| bead.labels.contains(&REPAIR_LABEL.to_string()))
-                .count(),
-            1
-        );
+        let beads = store.beads.lock().unwrap();
+        let repairs = beads
+            .iter()
+            .filter(|bead| bead.labels.contains(&REPAIR_LABEL.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(repairs.len(), 1);
+        assert_eq!(repairs[0].priority, 0);
+        assert!(repairs[0].labels.contains(&"fix-build".to_string()));
+        assert!(repairs[0].labels.contains(&"origin:ci".to_string()));
+        drop(beads);
         let evidence = std::fs::read_to_string(dir.path().join(LEDGER_FILE)).unwrap();
         assert!(evidence.contains("https://run/1"));
         assert!(evidence.contains("test failed"));

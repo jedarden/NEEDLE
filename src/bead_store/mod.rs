@@ -1779,6 +1779,31 @@ pub trait BeadStore: Send + Sync {
     /// Create a new bead and return its ID.
     async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId>;
 
+    /// Create a new bead at an explicit backend priority and return its ID.
+    ///
+    /// Priority is part of the scheduling contract, not merely presentation:
+    /// callers that need urgent work must not silently fall back to the
+    /// backend's default. Backends with priority-aware creation override this
+    /// method. The default only preserves the conventional P2 behavior used by
+    /// [`Self::create_bead`].
+    async fn create_bead_with_priority(
+        &self,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+        priority: u8,
+    ) -> Result<BeadId> {
+        if priority > 4 {
+            bail!("bead priority must be between 0 and 4, got {priority}");
+        }
+        if priority == 2 {
+            return self.create_bead(title, body, labels).await;
+        }
+        bail!(
+            "configured bead backend does not implement explicit priority creation (requested P{priority})"
+        )
+    }
+
     /// Add a dependency link: `blocker_id` blocks `blocked_id`.
     ///
     /// Uses `br dep add <blocker_id> --blocks <blocked_id>`.
