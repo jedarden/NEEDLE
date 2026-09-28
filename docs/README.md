@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 191 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 149 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
