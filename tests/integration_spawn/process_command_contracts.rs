@@ -1562,6 +1562,7 @@ async fn backend_probe_process_contracts_identity_and_capabilities() {
     super::capabilities_negotiation_conformance::verify_required_identity_status_schema_and_command_capabilities();
     super::capabilities_negotiation_conformance::verify_optional_and_static_capability_projection();
     super::capabilities_negotiation_conformance::verify_each_transition_capability_gate();
+    super::capabilities_negotiation_conformance::verify_fenced_claim_handle_facts_gate();
     super::capabilities_negotiation_conformance::verify_worker_blocks_incompatible_capability_probes()
         .await;
 }

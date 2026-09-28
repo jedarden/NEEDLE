@@ -32,6 +32,22 @@ fn capability_document() -> serde_json::Value {
     })
 }
 
+/// The `claim_handle` object of a backend that satisfies ADR-028 in full.
+///
+/// The base document stays handle-less on purpose: it is the minimal valid
+/// native-v1 document, the shape real bead-rs releases emit before the
+/// claim-handle advertisement ships, so the compatibility-mode and fail-closed
+/// cases keep exercising it. A case that must negotiate protected execution
+/// attaches this object alongside `transitions.claim_fencing: true`.
+fn fully_fenced_claim_handle() -> serde_json::Value {
+    serde_json::json!({
+        "fenced_claim": true,
+        "renewable_lease": true,
+        "guarded_mutations": true,
+        "credential_transport": "stdin",
+    })
+}
+
 fn capability_binary(workspace: &Path, capabilities: &serde_json::Value) -> PathBuf {
     let path = workspace.join("bead");
     let script = format!(
@@ -225,13 +241,26 @@ pub(super) fn verify_each_transition_capability_gate() {
             _ => unreachable!("transition matrix is exhaustive"),
         }
 
+        // ADR-028: an enabled fenced_claim switch demands the claim_handle
+        // facts on top of the transition advertisement. The handle rides on
+        // every document in that row so each case isolates exactly one absent
+        // fact — the advertisement — while the handle gate itself has its own
+        // coverage in `verify_fenced_claim_handle_facts_gate`.
+        let claim_handle = (name == "fenced_claim").then(fully_fenced_claim_handle);
+
         let mut advertised = capability_document();
+        if let Some(handle) = &claim_handle {
+            advertised["claim_handle"] = handle.clone();
+        }
         advertised["transitions"] = serde_json::json!({(capability): true});
         let workspace = TempDir::new().unwrap();
         open_backend(workspace.path(), &advertised, &enabled)
             .unwrap_or_else(|error| panic!("{capability} should enable {name}: {error:#}"));
 
         let mut absent = capability_document();
+        if let Some(handle) = &claim_handle {
+            absent["claim_handle"] = handle.clone();
+        }
         absent["transitions"] = serde_json::json!({});
         let workspace = TempDir::new().unwrap();
         let error = open_backend(workspace.path(), &absent, &enabled)
@@ -243,6 +272,9 @@ pub(super) fn verify_each_transition_capability_gate() {
         );
 
         let mut false_advertisement = capability_document();
+        if let Some(handle) = &claim_handle {
+            false_advertisement["claim_handle"] = handle.clone();
+        }
         false_advertisement["transitions"] = serde_json::json!({(capability): false});
         let workspace = TempDir::new().unwrap();
         let error = open_backend(workspace.path(), &false_advertisement, &enabled)
@@ -250,6 +282,97 @@ pub(super) fn verify_each_transition_capability_gate() {
             .unwrap_or_else(|| panic!("false {capability} must not enable {name}"));
         assert!(format!("{error:#}").contains(capability));
     }
+}
+
+/// ADR-028's claim-handle gate: an enabled `transitions.fenced_claim` switch
+/// refuses every backend whose document does not carry the complete renewable
+/// handle contract, and never downgrades to the legacy visible-token policy.
+///
+/// This is the second, finer gate behind `verify_each_transition_capability_gate`:
+/// advertising `transitions.claim_fencing: true` is necessary but not
+/// sufficient. Each of the four handle facts — `fenced_claim`,
+/// `renewable_lease`, `guarded_mutations`, and `credential_transport: "stdin"`
+/// — is required, the same document keeps opening in compatibility mode while
+/// the switch is off, and a fully-fenced backend projects
+/// `claim_handle.protected_execution: true`.
+pub(super) fn verify_fenced_claim_handle_facts_gate() {
+    let mut enabled = TransitionsConfig::default();
+    enabled.fenced_claim.enabled = true;
+
+    // The compatibility-mode shape — the transition advertised, no handle
+    // facts at all — is exactly what a real pre-ADR-028 backend emits.
+    // Enabling the switch against it must refuse startup, not silently run
+    // unprotected.
+    let mut handle_less = capability_document();
+    handle_less["transitions"] = serde_json::json!({"claim_fencing": true});
+    let workspace = TempDir::new().unwrap();
+    let error = open_backend(workspace.path(), &handle_less, &enabled)
+        .err()
+        .expect("claim_fencing without claim_handle facts must fail closed");
+    assert!(
+        format!("{error:#}").contains("refusing protected execution"),
+        "handle-less claim_fencing: unexpected negotiation error: {error:#}"
+    );
+
+    // Every fact is load-bearing: breaking any one of the four is the same
+    // refusal as omitting the whole object.
+    let broken_facts = [
+        ("fenced_claim", serde_json::json!(false)),
+        ("renewable_lease", serde_json::json!(false)),
+        ("guarded_mutations", serde_json::json!(false)),
+        ("credential_transport", serde_json::json!("argv")),
+    ];
+    for (fact, value) in broken_facts {
+        let mut document = capability_document();
+        document["transitions"] = serde_json::json!({"claim_fencing": true});
+        let mut handle = fully_fenced_claim_handle();
+        handle[fact] = value;
+        document["claim_handle"] = handle;
+        let workspace = TempDir::new().unwrap();
+        let error = open_backend(workspace.path(), &document, &enabled)
+            .err()
+            .unwrap_or_else(|| {
+                panic!("{fact}: a broken claim_handle fact must refuse protected execution")
+            });
+        assert!(
+            format!("{error:#}").contains("refusing protected execution"),
+            "{fact}: unexpected negotiation error: {error:#}"
+        );
+    }
+
+    // The complete contract opens and reports protected execution.
+    let mut complete = capability_document();
+    complete["transitions"] = serde_json::json!({"claim_fencing": true});
+    complete["claim_handle"] = fully_fenced_claim_handle();
+    let workspace = TempDir::new().unwrap();
+    let store = open_backend(workspace.path(), &complete, &enabled)
+        .expect("the full claim_handle contract must open under an enabled switch");
+    let snapshot = store
+        .negotiated_capabilities()
+        .expect("CLI backend publishes its capability snapshot");
+    assert_eq!(
+        snapshot["claim_handle"]["protected_execution"],
+        serde_json::json!(true),
+        "a fully-fenced backend must project protected_execution"
+    );
+
+    // Compatibility mode survives: the same minimal document keeps opening
+    // while the switch is off, visibly unprotected.
+    let workspace = TempDir::new().unwrap();
+    let legacy = open_backend(
+        workspace.path(),
+        &capability_document(),
+        &TransitionsConfig::default(),
+    )
+    .expect("the minimal document keeps opening in compatibility mode");
+    let snapshot = legacy
+        .negotiated_capabilities()
+        .expect("CLI backend publishes its capability snapshot");
+    assert_eq!(
+        snapshot["claim_handle"]["protected_execution"],
+        serde_json::json!(false),
+        "a handle-less backend must project unprotected execution"
+    );
 }
 
 fn worker_adapter() -> AgentAdapter {
