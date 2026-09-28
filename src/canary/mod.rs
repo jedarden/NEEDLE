@@ -1064,12 +1064,12 @@ impl CanaryRunner {
 
         // `needle run --count 1` means one worker, not one bead, so it remains
         // alive after processing the fixture. Poll until trace metadata exists
-        // and the state machine has completed LOGGING and returned to SELECTING,
-        // then stop the now-idle worker. Merely observing entry into LOGGING is
-        // too early: release/defer mutations are still completing at that point,
-        // which makes the same binary score nondeterministically. Scoring the
-        // detached/long-lived launcher was the source of the old canary's false
-        // results.
+        // and the state machine has entered LOGGING, then stop the worker before
+        // it can return to SELECTING and reclaim the persistent failure fixture.
+        // Outcome handling completes before the HANDLING -> LOGGING transition;
+        // the tighter poll interval keeps the parent on that boundary. Scoring
+        // the detached/long-lived launcher was the source of the old canary's
+        // false results.
         let log_dir = isolated_home.path().join(".needle/logs");
         let exit_code = loop {
             match child.try_wait() {
@@ -1088,11 +1088,8 @@ impl CanaryRunner {
                         }
                     };
                     let handling_complete = trace_complete
-                        && read_state_transitions(&log_dir).is_ok_and(|states| {
-                            states.windows(2).any(|transition| {
-                                transition[0] == "LOGGING" && transition[1] == "SELECTING"
-                            })
-                        });
+                        && read_state_transitions(&log_dir)
+                            .is_ok_and(|states| states.iter().any(|state| state == "LOGGING"));
                     if handling_complete {
                         if let Err(error) = child.kill() {
                             return CanaryTestResult::Error {
@@ -1112,7 +1109,7 @@ impl CanaryRunner {
                             elapsed_secs: start.elapsed().as_secs(),
                         };
                     }
-                    std::thread::sleep(Duration::from_millis(500));
+                    std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(e) => {
                     return CanaryTestResult::Error {
@@ -1165,7 +1162,14 @@ impl CanaryRunner {
         let (_, binary) = self.resolved_bead_cli()?;
         let bead = self.show_bead(&binary, bead_id)?;
 
-        let final_status = bead["status"].as_str().unwrap_or("unknown").to_string();
+        // bead-rs can represent a time-based defer as an open raw status plus
+        // a defer label. Its effective projection is the lifecycle state the
+        // worker and operator see, so score that when the backend provides it.
+        let final_status = bead["effective_status"]
+            .as_str()
+            .or_else(|| bead["status"].as_str())
+            .unwrap_or("unknown")
+            .to_string();
         let labels = bead["labels"]
             .as_array()
             .map(|arr| {
