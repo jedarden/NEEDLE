@@ -28,7 +28,7 @@ gh release create "v${VERSION}" \
   ...
 ```
 
-Source: Workflow template lines 422-437, see [workflow template](.claude/projects/-home-coding-NEEDLE/37c9fd05-61ab-46eb-a4f5-c64c374d7c8a/tool-results/bvufnef5q.txt)
+Source: workflow template lines 422-437 of the release workflow, captured during the investigation.
 
 ### Release History Timeline
 

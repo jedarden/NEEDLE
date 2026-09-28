@@ -214,4 +214,3 @@ cargo test heartbeat --lib
 - `src/health/mod.rs`: Implementation
 - `src/config/mod.rs`: HealthConfig structure
 - `src/worker/mod.rs`: Worker integration
-- [Capacity Governor](../capacity-governor/README.md): External scaling system

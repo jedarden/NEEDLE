@@ -458,7 +458,6 @@ ExploreConfig {
 
 ## Related Documentation
 
-- [Explore Strand Architecture](../strand/explore/README.md)
-- [Configuration System Overview](config-system.md)
-- [Workspace Discovery](workspace-discovery.md)
-- [ADR-015: Concurrent Same-Repo Worker Isolation](../adr/015-concurrent-same-repo-worker-isolation.md)
+- [Explore Workspace Discovery](explore-workspace-discovery.md)
+- [Configuration Guide](configuration.md)
+- [ADR-015: Concurrent Same-Repo Worker Isolation](adr/015-concurrent-same-repo-worker-isolation.md)

@@ -3,7 +3,7 @@
 One shared answer to one question: **was this bead produced by NEEDLE's own
 control plane rather than by a human or a target-repository workflow?**
 
-- Predicate: [`crate::internal::is_internal_artifact`](`src/internal.rs`)
+- Predicate: [`crate::internal::is_internal_artifact`](../src/internal.rs)
 - Consumers: Unravel, Analyze, Mitosis, Pluck, Explore, and the low-water
   generator gate — every current or future work generator
 

@@ -861,6 +861,13 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # it, so a new loose file cannot silently add another link step.
   run_check "cargo target manifest tests" bash tests/cargo-targets/run.sh
 
+  # Documentation navigation: every internal Markdown link resolves, every
+  # ADR and research document is indexed, and the index's inventory counts
+  # match the tree. Pure bash/awk, so it runs identically in the git-less
+  # clean-gate extractions. Contract: docs/ci/doc-navigation-check.md.
+  run_check "documentation navigation" bash scripts/check-doc-links.sh
+  run_check "documentation navigation checker tests" bash tests/doc-links/run.sh
+
   # cargo clippy <lane selectors> -- -D warnings
   #
   # This is the fast lane's only type-checking pass, and that is deliberate --
