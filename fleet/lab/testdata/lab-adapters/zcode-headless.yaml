@@ -1,0 +1,17 @@
+name: zcode-headless
+description: "ZCode Agent headless development using the model selected in ZCode settings"
+agent_cli: needle-zcode-headless
+version_command: "needle-zcode-headless --version"
+input_method:
+  method: file
+  path_template: "{prompt_file}"
+invoke_template: "cd {workspace} && git rev-parse HEAD > .needle-predispatch-sha 2>/dev/null; ENRICHED=$(mktemp /tmp/needle-zcode-prompt.XXXXXX.md); cat /home/coding/.config/needle/adapters/zcode-prompt-prefix.md '{prompt_file}' /home/coding/.config/needle/adapters/zcode-prompt-suffix.md > \"$ENRICHED\"; needle-zcode-headless --workspace '{workspace}' --prompt-file \"$ENRICHED\" --mode yolo; STATUS=$?; rm -f \"$ENRICHED\"; exit $STATUS"
+environment: {}
+timeout_secs: 0
+idle_timeout_secs: 900
+hard_timeout_secs: 7200
+provider: zai
+model: glm-5.3-flash
+token_extraction:
+  method: none
+harness: zcode

@@ -1,0 +1,15 @@
+name: codex
+description: OpenAI Codex CLI with full-auto approval
+agent_cli: codex
+version_command: "codex --version"
+input_method:
+  method: args
+  flag: "--"
+invoke_template: "cd {workspace} && codex --model {model} --approval-mode full-auto \"$(cat {prompt_file})\""
+environment: {}
+timeout_secs: 3600
+provider: openai
+model: gpt-4
+token_extraction:
+  method: none
+output_transform: needle-transform-codex

@@ -1,0 +1,16 @@
+name: claude-anthropic-sonnet
+description: Claude Code (Sonnet 4.6) headless via Anthropic direct
+agent_cli: claude
+version_command: "/home/coding/.local/bin/claude --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && /home/coding/.local/bin/claude --print --verbose --output-format stream-json --include-partial-messages --model claude-sonnet-4-6 --max-turns 30 --dangerously-skip-permissions < {prompt_file}"
+environment: {}
+timeout_secs: 600
+provider: anthropic
+model: claude-sonnet-4-6
+token_extraction:
+  method: json_field
+  input_path: "result.usage.input_tokens"
+  output_path: "result.usage.output_tokens"
+output_transform: needle-transform-claude

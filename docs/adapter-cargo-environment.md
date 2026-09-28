@@ -41,7 +41,21 @@ scripts/check-adapter-cargo-environment.sh \
 ```
 
 Run `scripts/check-adapter-cargo-environment.sh --self-test` to exercise the
-valid, no-policy, partial, wrong-value, and forbidden-`RUSTFLAGS` cases.
+valid, no-policy, partial, wrong-value, forbidden-`RUSTFLAGS`, and
+nested-quote-idiom cases.
+
+Lab's real adapters assign the Cargo policy inside a
+`systemd-run ... bash -c '...'` scope, where every inner single quote is
+written as the `'\''` escape idiom, so the checker collapses that idiom back
+to a bare quote before reading an assignment: `CARGO_BUILD_JOBS='\''2'\''`
+has the value `2`, not the lone backslash a first-quote scan would extract
+(fixed in needle-01dea2ea after the misparse blocked every lab converge).
+Because lab's adapter directory is machine-local, `fleet/lab/test.sh` also
+runs the checker over a checked-in mirror of it
+(`fleet/lab/testdata/lab-adapters/`, refresh procedure in
+`fleet/lab/testdata/README.md`) and over the live
+`$HOME/.config/needle/adapters` when one exists; `tests/adapter-cargo-environment/run.sh`
+pins the idiom cases against the checker itself.
 
 ## Measurement used for the decision
 
@@ -119,3 +133,24 @@ flagged; the newest fingerprint carrying `-C codegen-units=1` anywhere
 remained the 2026-09-25T13:51Z pdftract write. The 33-adapter policy check
 passed and no live `cargo`/`rustc` process carried `RUSTFLAGS`. Full output
 is recorded on bead `needle-2020b478`.
+
+## 2026-09-28 lab counterpart cutover
+
+The lab counterparts named above were the two stragglers still carrying the
+retired flag: `claude-code-glm-4.7.yaml` and `claude-code-glm-5.3-flash.yaml`
+on `lab:~/.config/needle/adapters` (in place since the 2026-05-22 "rustcap"
+tuning, four months before this policy). They stayed undetected because the
+checker's parser misread those files' `systemd-run ... bash -c '...'`
+nested-quote idiom — every one of their Cargo assignments reported as a lone
+backslash — so `apply-lab-fleet.sh` died at its policy gate on six false
+positives alongside the two real `RUSTFLAGS` violations, and the synthetic
+self-test never saw the real shape (needle-01dea2ea).
+
+With the parser fixed, `RUSTFLAGS='\''-C codegen-units=1'\''` was removed from
+both files (timestamped `.bak-pre-rustflags-unset-20260928T*` backups kept
+beside them; both `invoke_template` lines re-verified with `bash -n`), and the
+live 14-adapter directory passes the checker. Workers load the adapter table
+at process start, so lab workers already running kept dispatching with the
+old table until their next restart — an operator restarting the lab
+`needle-worker@*` units at a quiet moment closes that residual, as was done
+for codinghome on 2026-09-25.

@@ -46,6 +46,20 @@ write_adapter "$cases/rustflags-template" rustflags-template \
     'invoke_template: "RUSTFLAGS=\"-C codegen-units=1\" agent"'
 write_adapter "$cases/rustflags-environment" rustflags-environment \
     $'invoke_template: "agent {prompt_file}"\nenvironment:\n  RUSTFLAGS: ""'
+# Lab's real GLM adapters assign the Cargo policy inside a
+# `systemd-run ... bash -c '...'` scope, where every inner single quote is
+# the '\'' escape idiom. Before needle-01dea2ea the checker stopped at the
+# escape's quote and read each value as a lone backslash, so valid adapters
+# failed the gate. These cases pin the corrected unquoting.
+mkdir -p "$cases/nested-idiom" "$cases/nested-idiom-bad"
+cat > "$cases/nested-idiom/nested-idiom.yaml" <<'EOF'
+invoke_template: systemd-run --user --scope --slice=needle.slice bash -c 'cd {workspace} && CARGO_BUILD_JOBS='\''2'\'' RUST_TEST_THREADS='\''2'\'' CARGO_INCREMENTAL='\''0'\'' agent < {prompt_file}'
+environment: {}
+EOF
+cat > "$cases/nested-idiom-bad/nested-idiom-bad.yaml" <<'EOF'
+invoke_template: systemd-run --user --scope --slice=needle.slice bash -c 'cd {workspace}; CARGO_BUILD_JOBS='\''4'\'' RUST_TEST_THREADS='\''2'\'' CARGO_INCREMENTAL='\''0'\'' RUSTFLAGS='\''-C codegen-units=1'\'' agent < {prompt_file}'
+environment: {}
+EOF
 
 expect_pass valid "$cases/valid"
 expect_pass no-policy "$cases/no-policy"
@@ -54,6 +68,9 @@ expect_failure partial "$cases/partial" 'missing CARGO_INCREMENTAL'
 expect_failure wrong-value "$cases/wrong-value" 'CARGO_BUILD_JOBS=4'
 expect_failure rustflags-template "$cases/rustflags-template" 'RUSTFLAGS is set'
 expect_failure rustflags-environment "$cases/rustflags-environment" 'RUSTFLAGS is set'
+expect_pass nested-idiom "$cases/nested-idiom"
+expect_failure nested-idiom-bad "$cases/nested-idiom-bad" 'CARGO_BUILD_JOBS=4'
+expect_failure nested-idiom-bad "$cases/nested-idiom-bad" 'RUSTFLAGS is set'
 
 # Keep the documented checker self-test in this executable regression suite.
 "$checker" --self-test >/dev/null

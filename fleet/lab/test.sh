@@ -8,6 +8,22 @@ ADAPTER_POLICY_CHECK="$SRC_DIR/../../scripts/check-adapter-cargo-environment.sh"
 bash -n "$ADAPTER_POLICY_CHECK" "$SRC_DIR/apply-lab-fleet.sh"
 "$ADAPTER_POLICY_CHECK" --self-test
 
+# The self-test exercises only synthetic fixtures: it stayed green while the
+# checker misparsed lab's REAL adapter shape (systemd-run ... bash -c
+# wrappers whose inner quotes use the '\'' escape idiom) and every
+# apply-lab-fleet.sh run died at the policy gate (needle-01dea2ea). Check a
+# checked-in mirror of lab's real adapter directory — refresh it from
+# lab:~/.config/needle/adapters when that set changes (see testdata/README.md)
+# — and the live host directory when one exists, so checker regressions
+# against real shapes and live drift both fail here, not at the next deploy.
+LAB_ADAPTER_MIRROR="$SRC_DIR/testdata/lab-adapters"
+[[ -f "$LAB_ADAPTER_MIRROR/claude-code-glm-5.3-flash.yaml" ]] \
+    || { echo "missing lab adapter mirror under testdata/lab-adapters" >&2; exit 1; }
+"$ADAPTER_POLICY_CHECK" --label lab-mirror --adapters-dir "$LAB_ADAPTER_MIRROR"
+if [[ -d "$HOME/.config/needle/adapters" ]]; then
+    "$ADAPTER_POLICY_CHECK" --label "$(hostname)-live" --adapters-dir "$HOME/.config/needle/adapters"
+fi
+
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 8 ]]
 [[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 8 ]]

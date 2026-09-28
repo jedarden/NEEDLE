@@ -1,0 +1,16 @@
+name: claude-opus
+description: Claude Code (Opus) headless with full permissions
+agent_cli: claude
+version_command: "claude --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && claude --print --model claude-opus-4-6 --max-turns 50 --output-format json --verbose --dangerously-skip-permissions < {prompt_file}"
+environment: {}
+timeout_secs: 7200
+provider: anthropic
+model: claude-opus-4-6
+token_extraction:
+  method: json_field
+  input_path: "result.usage.input_tokens"
+  output_path: "result.usage.output_tokens"
+output_transform: needle-transform-claude

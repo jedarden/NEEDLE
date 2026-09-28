@@ -1,0 +1,42 @@
+name: claude-code-glm-4.7
+description: Claude Code via ZAI proxy (GLM-4.7 free tier, cost-effective)
+agent_cli: claude
+version_command: "/home/coding/.local/bin/claude --version"
+input_method:
+  method: stdin
+invoke_template: systemd-run --user --scope --slice=needle.slice -p CPUWeight=100 -p MemoryMax=12G bash -c 'cd {workspace} && git rev-parse HEAD > .needle-predispatch-sha 2>/dev/null; unset CLAUDECODE; VITEST_MAX_THREADS=2 VITEST_MAX_FORKS=2 GOMAXPROCS=4 GOFLAGS=-p=2 CARGO_BUILD_JOBS='\''2'\'' RUST_TEST_THREADS='\''2'\'' CARGO_INCREMENTAL='\''0'\'' NODE_TLS_REJECT_UNAUTHORIZED='\''0'\'' ANTHROPIC_BASE_URL='\''https://traefik-apexalgo-iad.tail1b1987.ts.net:8444'\'' ANTHROPIC_AUTH_TOKEN='\''proxy-handles-auth'\'' ANTHROPIC_MODEL='\''glm-4.7'\'' ANTHROPIC_DEFAULT_OPUS_MODEL='\''glm-4.7'\'' ANTHROPIC_DEFAULT_SONNET_MODEL='\''glm-4.7'\'' ANTHROPIC_DEFAULT_HAIKU_MODEL='\''glm-4.7'\'' CLAUDE_CODE_SUBAGENT_MODEL='\''glm-4.7'\'' DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 NODE_TLS_REJECT_UNAUTHORIZED=0 /home/coding/.local/bin/claude --print --verbose --output-format stream-json --include-partial-messages --model glm-4.7 --max-turns 30 --dangerously-skip-permissions < {prompt_file}'
+environment: {}
+idle_timeout_secs: 900
+hard_timeout_secs: 0
+provider: zai
+model: glm-4.7
+token_extraction:
+  method: json_field
+  input_path: "result.usage.input_tokens"
+  output_path: "result.usage.output_tokens"
+output_transform: needle-transform-claude
+# LOCAL/REMOTE CARGO SPLIT:
+# This adapter configures workers to split cargo operations between local and remote execution.
+#
+# LOCAL (cheap, low-memory operations - run in this adapter's systemd-run scope):
+#   - cargo check: Fast type-checking, runs locally with MemoryMax=12G limit
+#   - cargo clippy: Lint checks, runs locally with MemoryMax=12G limit
+#   - Targeted unit tests for small modules: Use `cargo test <module>::<test_name>` for quick validation
+#
+# REMOTE (heavy operations - automatically routed to rust-verify on iad-ci):
+#   - cargo test --release: Full release test suite (auto-routed by ~/.local/bin/cargo wrapper)
+#   - cargo test --all-targets: Complete test suite (auto-routed by ~/.local/bin/cargo wrapper)
+#   - Fuzz testing: Submit via rust-verify with appropriate proptest/fuzz args
+#   - Proptest suites: Submit via rust-verify with proptest-specific args
+#
+# CRITICAL: Always use `cargo test` for heavy test suites - the cargo wrapper at ~/.local/bin/cargo
+# automatically routes these to rust-verify on iad-ci. Do NOT use `cargo nextest run` for heavy
+# operations as it bypasses the remote routing and runs locally, which can overwhelm the lab server.
+#
+# The cargo wrapper (~/bin/cargo) implementation:
+#   - `cargo test` → routes to rust-verify (when in git repo with remote)
+#   - `cargo check` → runs locally with cgroup limits (CPUQuota=200%, MemoryMax=6G)
+#   - `cargo clippy` → runs locally with cgroup limits
+#   - Other commands → run locally with cgroup limits
+#
+# This split reduces lab build pressure to near zero and removes the one-worker-per-Rust-repo limit.

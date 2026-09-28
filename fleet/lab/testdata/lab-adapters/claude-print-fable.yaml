@@ -1,0 +1,13 @@
+name: claude-print-fable
+description: Claude Code (fable) via claude-print — subscription billing (cc_entrypoint=cli)
+agent_cli: claude-print
+version_command: "claude-print --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && /home/coding/.local/bin/claude-print --model {model} --max-turns 60 --output-format stream-json --dangerously-skip-permissions --no-inherit-hooks < {prompt_file}"
+timeout_secs: 600
+provider: anthropic
+model: fable
+output_transform: needle-transform-claude
+cost:
+  type: use_or_lose

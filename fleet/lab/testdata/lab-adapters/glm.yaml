@@ -1,0 +1,16 @@
+name: glm
+description: Claude Code via ZAI proxy (GLM-5-Turbo default, GLM-4.7 subagent)
+agent_cli: claude
+version_command: "claude --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && git rev-parse HEAD > .needle-predispatch-sha 2>/dev/null; NODE_TLS_REJECT_UNAUTHORIZED='0' ANTHROPIC_BASE_URL='https://traefik-apexalgo-iad.tail1b1987.ts.net:8444' ANTHROPIC_AUTH_TOKEN='proxy-handles-auth' ANTHROPIC_MODEL='glm-5-turbo' ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5' ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5-turbo' ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-4.7' CLAUDE_CODE_SUBAGENT_MODEL='glm-4.7' DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 claude --print --model glm-5-turbo --max-turns 30 --dangerously-skip-permissions < {prompt_file}"
+environment: {}
+idle_timeout_secs: 900
+hard_timeout_secs: 0
+provider: zai
+model: glm-5-turbo
+token_extraction:
+  method: json_field
+  input_path: "result.usage.input_tokens"
+  output_path: "result.usage.output_tokens"

@@ -53,6 +53,23 @@ policy_records() {
             return value
         }
 
+        function unescape_bash_quotes(text, seq, out, pos) {
+            # A `bash -c '...'` invoke wrapper writes every single quote of
+            # the inner script as the four characters '\'' (close quote,
+            # backslash-escaped quote, reopen quote). Collapse each one back
+            # to a bare quote so shell_value() sees assignments the way bash
+            # parses them: CARGO_BUILD_JOBS='\''2'\'' is CARGO_BUILD_JOBS='2'
+            # to the inner shell, and its value is 2, not the lone backslash
+            # a naive first-quote scan would stop at (needle-01dea2ea).
+            seq = "'\\''"
+            out = ""
+            while ((pos = index(text, seq)) > 0) {
+                out = out substr(text, 1, pos - 1) "'"
+                text = substr(text, pos + length(seq))
+            }
+            return out text
+        }
+
         function shell_value(rest, quote, closing, separator_pos) {
             if (substr(rest, 1, 1) == "\"" || substr(rest, 1, 1) == "'") {
                 quote = substr(rest, 1, 1)
@@ -100,6 +117,7 @@ policy_records() {
                 if (NR != invoke_line && line ~ /^[[:space:]]*[A-Za-z0-9_-]+:[[:space:]]*/ && indent <= invoke_indent) {
                     in_invoke = 0
                 } else {
+                    line = unescape_bash_quotes(line)
                     emit_assignment(line, "CARGO_BUILD_JOBS")
                     emit_assignment(line, "CARGO_INCREMENTAL")
                     emit_assignment(line, "RUST_TEST_THREADS")
@@ -121,6 +139,7 @@ policy_records() {
                 in_invoke = 1
                 invoke_line = NR
                 invoke_indent = indent
+                line = unescape_bash_quotes(line)
                 emit_assignment(line, "CARGO_BUILD_JOBS")
                 emit_assignment(line, "CARGO_INCREMENTAL")
                 emit_assignment(line, "RUST_TEST_THREADS")
@@ -235,6 +254,21 @@ self_test() {
         'invoke_template: "agent {prompt_file}"' \
         'environment:' \
         '  RUSTFLAGS: ""' > "$tmp/bad/invalid-static.yaml"
+    # The lab fleet's real adapters wrap their assignments in a
+    # `systemd-run ... bash -c '...'` scope, so every inner single quote
+    # appears as the '\'' escape idiom. These fixtures mirror that shape;
+    # before needle-01dea2ea the checker stopped at the escape's quote and
+    # read the value as a lone backslash.
+    cat > "$tmp/lab/nested-quote-idiom.yaml" <<'EOF'
+name: nested-quote-idiom
+invoke_template: systemd-run --user --scope --slice=needle.slice bash -c 'cd {workspace} && unset CLAUDECODE; CARGO_BUILD_JOBS='\''2'\'' RUST_TEST_THREADS='\''2'\'' CARGO_INCREMENTAL='\''0'\'' agent < {prompt_file}'
+environment: {}
+EOF
+    cat > "$tmp/bad/nested-quote-rustflags.yaml" <<'EOF'
+name: nested-quote-rustflags
+invoke_template: systemd-run --user --scope --slice=needle.slice bash -c 'cd {workspace}; CARGO_BUILD_JOBS='\''4'\'' RUST_TEST_THREADS='\''2'\'' CARGO_INCREMENTAL='\''0'\'' RUSTFLAGS='\''-C codegen-units=1'\'' agent < {prompt_file}'
+environment: {}
+EOF
 
     "$0" --label codinghome --adapters-dir "$tmp/codinghome" \
         --label lab --adapters-dir "$tmp/lab" >/dev/null
@@ -246,6 +280,12 @@ self_test() {
     grep -q 'bad/invalid.yaml: missing RUST_TEST_THREADS' <<<"$output"
     grep -q 'bad/invalid.yaml: RUSTFLAGS is set' <<<"$output"
     grep -q 'bad/invalid-static.yaml: RUSTFLAGS is set' <<<"$output"
+    grep -q 'bad/nested-quote-rustflags.yaml: CARGO_BUILD_JOBS=4' <<<"$output"
+    grep -q 'bad/nested-quote-rustflags.yaml: RUSTFLAGS is set' <<<"$output"
+    if grep -q 'CARGO_BUILD_JOBS=\\' <<<"$output"; then
+        printf 'self-test regressed: nested-quote idiom still misparsed as a lone backslash\n' >&2
+        return 1
+    fi
     printf 'adapter cargo-environment policy self-test passed\n'
 }
 
