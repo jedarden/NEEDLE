@@ -629,30 +629,18 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
         "A single intentionally failing fixture task.",
     )?;
 
-    // Rung 1 and the threshold crossing: each one-shot worker dispatch is a
-    // real claim/release cycle. Below the ceiling the retry cooldown is soft
-    // (needle-ebe67029), so this lone bead is redispatchable without waiting;
-    // the label edit between attempts only keeps any hard window expired so
-    // the test never sleeps.
-    for attempt in 1..=5 {
-        fixture
-            .run_worker(&format!("ladder-failure-{attempt}"), &fixture.normal_path)
-            .await?;
-        assert_failure_count(&fixture, &parent, attempt)?;
-        if attempt == 3 {
-            // The force threshold is deliberately a one-shot fixture hook:
-            // once rung 2 has been observed, ordinary retries must not spend
-            // additional Mitosis dispatches before quarantine.
-            fixture.write_global_config(true)?;
-        }
-        if attempt < 5 {
-            fixture.expire_and_allow_redispatch(&parent)?;
-        }
-    }
+    // Rung 1 and the threshold crossing: below the ceiling the retry cooldown
+    // is soft (needle-ebe67029), so the lone bead is retried by this worker
+    // until it reaches hard quarantine. The force threshold fires Mitosis once
+    // at failure 3, then remains spent for later failures in this run.
+    fixture
+        .run_worker("ladder-quarantine-round-1", &fixture.normal_path)
+        .await?;
+    assert_failure_count(&fixture, &parent, 5)?;
 
     // Rung 2 is a post-failure Mitosis attempt at count 3. The fixture says
     // the bead is not splittable, so no child is created and the parent keeps
-    // climbing toward quarantine.
+    // climbing to quarantine without repeating the threshold evaluation.
     assert_eq!(Fixture::log_lines(&fixture.mitosis_log), 1);
     let beads = fixture.ready()?;
     assert!(beads.iter().any(|bead| {

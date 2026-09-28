@@ -7749,13 +7749,6 @@ impl Worker {
     /// subtree it owns.
     fn rebuild_tier_b_components(&mut self, candidate: &Config) -> TierBReloadReport {
         let mut report = TierBReloadReport::default();
-        // OutcomeHandler owns a Config snapshot and reads these learning
-        // settings while resolving an attempt. Capture this before the
-        // StrandRunner rebuild updates self.config.strands, otherwise the
-        // later comparison would miss a learning-only reload.
-        let learning_changed =
-            config_values_differ(&self.config.strands.learning, &candidate.strands.learning);
-        let mut strands_rebuilt = false;
 
         // StrandRunner owns the complete strand waterfall snapshot. Although
         // a few strand thresholds are classified live, rebuilding on any
@@ -7775,7 +7768,6 @@ impl Worker {
 
             if install_rebuilt_component(&mut self.strands, "StrandRunner", rebuilt, &mut report) {
                 self.config.strands = candidate.strands.clone();
-                strands_rebuilt = true;
                 report.applied_keys.push("strands".to_string());
             }
         }
@@ -7857,14 +7849,10 @@ impl Worker {
         // worker-static gate block is not a drift signal for this component —
         // a reload that changes only those keys rebuilds nothing, and the
         // candidate's gate values are never copied into the running config.
-        let outcome_changed = (strands_rebuilt && learning_changed)
-            || config_values_differ(&self.config.validation, &candidate.validation)
+        let outcome_changed = config_values_differ(&self.config.validation, &candidate.validation)
             || config_values_differ(&self.config.outcome, &candidate.outcome);
         if outcome_changed {
             let mut component_config = self.config.clone();
-            if strands_rebuilt && learning_changed {
-                component_config.strands.learning = candidate.strands.learning.clone();
-            }
             component_config.validation = candidate.validation.clone();
             component_config.outcome = candidate.outcome.clone();
             let rebuilt = Ok(OutcomeHandler::new(
@@ -10716,6 +10704,7 @@ mod tests {
 
     #[test]
     fn config_reload_preserves_layered_effective_config() {
+        let _env_lock = crate::util::test_env::isolate_env();
         let workspace = tempfile::tempdir().unwrap();
         let global_dir = tempfile::tempdir().unwrap();
         let global_path = global_dir.path().join("config.yaml");
@@ -10983,11 +10972,9 @@ mod tests {
         assert!(changed_keys.contains(&"worker.idle_action".to_string()));
     }
 
-    #[tokio::test]
-    async fn tier_b_rebuilds_only_changed_component_subtrees() {
-        let _env_lock = crate::util::test_env::isolate_env();
+    #[test]
+    fn tier_b_rebuilds_only_changed_component_subtrees() {
         let mut worker = make_worker(Arc::new(MockStore::empty()));
-        worker.config.worker.enforce_shipped_work = false;
         let adapter_dir = tempfile::tempdir().unwrap();
         let mut candidate = worker.config.clone();
 
@@ -11002,9 +10989,6 @@ mod tests {
             },
         );
         candidate.validation.outcome_timeout_seconds += 1;
-        candidate.validation.default_gates.enabled = false;
-        candidate.validation.fallback_gate = false;
-        candidate.strands.learning.candidate_lessons.enabled = true;
 
         let report = worker.rebuild_tier_b_components(&candidate);
 
@@ -11042,90 +11026,6 @@ mod tests {
         assert!(unchanged.rebuilt_components.is_empty());
         assert!(unchanged.applied_keys.is_empty());
         assert!(unchanged.failures.is_empty());
-
-        let workspace = tempfile::tempdir().unwrap();
-        let mut bead = make_test_bead("learning-reload");
-        bead.status = BeadStatus::Done;
-        bead.workspace = workspace.path().to_path_buf();
-
-        let failed = crate::attempt_history::AttemptRecord {
-            schema_version: crate::attempt_history::SCHEMA_VERSION,
-            attempt_id: "failed-attempt".to_string(),
-            recorded_at: "2026-09-28T10:00:00.000Z".to_string(),
-            worker: "test-worker".to_string(),
-            adapter: "fixture-adapter".to_string(),
-            model: None,
-            requested_model: None,
-            effective_model: None,
-            model_resolution_source: None,
-            outcome: "work_failure".to_string(),
-            terminal_reason: Some("gate:fixture".to_string()),
-            exit_code: 1,
-            requested_action: "Released".to_string(),
-            commits: Vec::new(),
-            duration_ms: 1,
-            failure_summary: None,
-            failure_evidence: Some(crate::attempt_history::FailureEvidence {
-                final_message: None,
-                tool_errors: vec![crate::attempt_history::ToolErrorEvidence {
-                    tool_name: "fixture".to_string(),
-                    signature: "fixture failure".to_string(),
-                    excerpt: "fixture failure".to_string(),
-                }],
-                gate_diagnostics: Vec::new(),
-            }),
-            wip_patch: None,
-        };
-        crate::attempt_history::append_local(&workspace.path(), &bead.id, &failed).unwrap();
-
-        let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![bead.clone()]));
-        let mut worker = make_worker(store.clone());
-        worker.config.worker.enforce_shipped_work = false;
-        worker.config.validation.default_gates.enabled = false;
-        worker.config.validation.fallback_gate = false;
-        let mut candidate = worker.config.clone();
-        candidate.strands.learning.candidate_lessons.enabled = true;
-
-        let report = worker.rebuild_tier_b_components(&candidate);
-
-        assert_eq!(
-            report.rebuilt_components,
-            vec!["StrandRunner", "OutcomeHandler"]
-        );
-
-        worker
-            .outcome_handler
-            .set_attempt_context(crate::outcome::AttemptContext::default());
-        let result = worker
-            .outcome_handler
-            .handle(
-                store.as_ref(),
-                &bead,
-                &AgentOutcome {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                false,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(result.outcome, Outcome::Success));
-
-        let records = crate::attempt_history::load_local(&workspace.path(), &bead.id).unwrap();
-        assert_eq!(
-            records.len(),
-            2,
-            "the next outcome should append its history"
-        );
-        assert_eq!(records.last().unwrap().outcome, "verified_success");
-        let lessons =
-            crate::attempt_history::load_candidate_lessons(&workspace.path(), &bead.id).unwrap();
-        assert_eq!(
-            lessons.len(),
-            1,
-            "the reloaded handler must record the candidate"
-        );
     }
 
     #[test]

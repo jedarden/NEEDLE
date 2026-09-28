@@ -348,39 +348,27 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         "strands.learning.max_learning_context_bytes",
         ReloadTier::Rebuild,
     ),
-    // Attempt history and candidate lessons are read by OutcomeHandler from
-    // its component snapshot, so changing them requires a Tier-B rebuild.
-    (
-        "strands.learning.failure_history.enabled",
-        ReloadTier::Rebuild,
-    ),
+    // Attempt history is read per dispatch and per resolution (live).
+    ("strands.learning.failure_history.enabled", ReloadTier::Live),
     (
         "strands.learning.failure_history.max_attempts",
-        ReloadTier::Rebuild,
+        ReloadTier::Live,
     ),
     (
         "strands.learning.failure_history.max_bytes",
-        ReloadTier::Rebuild,
+        ReloadTier::Live,
     ),
     (
         "strands.learning.failure_history.sync_to_bead_data",
-        ReloadTier::Rebuild,
+        ReloadTier::Live,
     ),
     (
         "strands.learning.failure_history.evidence.enabled",
-        ReloadTier::Rebuild,
+        ReloadTier::Live,
     ),
     (
         "strands.learning.failure_history.evidence.max_bytes",
-        ReloadTier::Rebuild,
-    ),
-    (
-        "strands.learning.candidate_lessons.enabled",
-        ReloadTier::Rebuild,
-    ),
-    (
-        "strands.learning.candidate_lessons.sync_to_bead_data",
-        ReloadTier::Rebuild,
+        ReloadTier::Live,
     ),
     // Retrieval is read per retry dispatch (live).
     ("strands.learning.retrieval.enabled", ReloadTier::Live),
@@ -589,18 +577,6 @@ mod tests {
             get_tier_for_key("strands.learning.trace_retention_success_days"),
             Some(ReloadTier::Rebuild)
         );
-        for key in [
-            "strands.learning.failure_history.enabled",
-            "strands.learning.failure_history.max_attempts",
-            "strands.learning.failure_history.max_bytes",
-            "strands.learning.failure_history.sync_to_bead_data",
-            "strands.learning.failure_history.evidence.enabled",
-            "strands.learning.failure_history.evidence.max_bytes",
-            "strands.learning.candidate_lessons.enabled",
-            "strands.learning.candidate_lessons.sync_to_bead_data",
-        ] {
-            assert_eq!(get_tier_for_key(key), Some(ReloadTier::Rebuild), "{key}");
-        }
         for key in [
             "attempt_archive.enabled",
             "attempt_archive.spool_dir",

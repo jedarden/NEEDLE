@@ -409,19 +409,28 @@ impl MitosisEvaluator {
         // Check failure count conditions.
         let failure_count = self.get_failure_count(store, &bead.id).await?;
 
-        // force_failure_threshold: trigger only when failure_count reaches the threshold.
+        // force_failure_threshold: trigger only at the configured consecutive
+        // failure count. Allowing it to remain active above the threshold
+        // re-runs Mitosis after every subsequent failure even though the
+        // threshold event has already been handled.
         if self.config.force_failure_threshold > 0 {
-            if failure_count < self.config.force_failure_threshold {
+            if failure_count != self.config.force_failure_threshold {
+                let relation = if failure_count < self.config.force_failure_threshold {
+                    "below"
+                } else {
+                    "past"
+                };
                 tracing::debug!(
                     bead_id = %bead.id,
                     failure_count,
                     threshold = self.config.force_failure_threshold,
-                    "mitosis skipped: below force_failure_threshold"
+                    relation,
+                    "mitosis skipped: failure count is not at force_failure_threshold"
                 );
                 return Ok(MitosisResult::Skipped {
                     reason: format!(
-                        "failure count {} below threshold {}",
-                        failure_count, self.config.force_failure_threshold
+                        "failure count {} {relation} force_failure_threshold {}",
+                        failure_count, self.config.force_failure_threshold,
                     ),
                 });
             }
