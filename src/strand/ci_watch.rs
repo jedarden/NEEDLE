@@ -1,7 +1,7 @@
 //! ci-watch strand: file one P0 bead per distinct needle-ci red on main.
 //!
-//! Every poll interval the strand resolves the SHA `origin/main` advertises,
-//! asks for the newest *completed* CI verdict on that revision, and — when
+//! Every poll interval the strand resolves the recent `origin/main` history,
+//! asks for the newest *completed* CI verdict on those revisions, and — when
 //! that verdict is red — files a P0 bead carrying the failing step, the
 //! failing test ids, the first failing revision, that revision's parent's
 //! status, and the workflow name. The failure fingerprint is the step plus
@@ -12,9 +12,11 @@
 //! **Verdict source.** needle-ci publishes its failure summary as a Forgejo
 //! commit status (context `iad-ci/<template>`, description
 //! `needle-ci Failed: <step>: <N> failed: <test ids>`). The strand reads the
-//! status attached to the current `origin/main` revision. A missing status is
-//! retried on the next poll, preserving the workflow's own test identifiers
-//! as the fingerprint input.
+//! status attached to the newest recently verdicted `origin/main` revision.
+//! Looking behind an unverdicted tip matters because main can advance while a
+//! long CI run is still executing. A missing status is retried on the next
+//! poll, preserving the workflow's own test identifiers as the fingerprint
+//! input.
 //!
 //! **Lifecycle contract.** The strand creates and notes; it never closes. A
 //! bead it filed is closed by whoever lands the fix. When a fingerprint
@@ -64,6 +66,12 @@ const RED_PRIORITY: u8 = 0;
 
 /// Telemetry phase stamped on every ci-watch event.
 const PHASE: &str = "ci_watch";
+
+/// Number of recent mainline revisions inspected for the newest completed
+/// verdict. This comfortably covers the commits that can land during one
+/// full needle-ci run without turning an unavailable status API into an
+/// unbounded history scan.
+const VERDICT_HISTORY_LIMIT: usize = 32;
 
 // ─── Failure summary parsing ────────────────────────────────────────────────
 
@@ -281,6 +289,37 @@ pub trait CiVerdictSource: Send + Sync {
         template: &str,
         revision: &str,
     ) -> Result<Option<CiVerdict>>;
+}
+
+/// Resolve recent `origin/main` revisions, newest first.
+///
+/// `ls-remote` supplies the authoritative remote tip. The shared checkout
+/// normally already has every pushed object, so `rev-list` can walk that tip
+/// without mutating refs. If the remote advertises an object this checkout
+/// does not have yet, fall back to the tip itself and retry history on the
+/// next worker cycle after the checkout catches up.
+async fn recent_main_revisions(workspace: &Path) -> Option<Vec<String>> {
+    let tip = main_branch_sha(workspace).await?;
+    let max_count = format!("--max-count={VERDICT_HISTORY_LIMIT}");
+    let output = tokio::process::Command::new("git")
+        .args(["rev-list", &max_count, &tip])
+        .current_dir(workspace)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return Some(vec![tip]);
+    }
+    let mut revisions: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|revision| !revision.is_empty())
+        .map(str::to_string)
+        .collect();
+    if revisions.first() != Some(&tip) {
+        revisions.insert(0, tip);
+    }
+    Some(revisions)
 }
 
 /// Source for the Forgejo commit status needle-ci publishes.
@@ -745,29 +784,36 @@ impl super::Strand for CiWatchStrand {
                 return StrandResult::NoWork;
             }
         };
-        let Some(revision) = main_branch_sha(&self.workspace).await else {
+        let Some(revisions) = recent_main_revisions(&self.workspace).await else {
             tracing::warn!("ci-watch could not resolve origin/main");
             backoff(&state);
             return StrandResult::NoWork;
         };
-        let verdict = match self
-            .source
-            .verdict_for(&self.workspace, &template, &revision)
-            .await
-        {
-            Ok(verdict) => verdict,
-            Err(error) => {
-                tracing::warn!(error = %error, "ci-watch verdict source failed");
-                self.emit(
-                    "warn",
-                    serde_json::json!({ "action": "source_error", "revision": revision }),
-                );
-                backoff(&state);
-                return StrandResult::NoWork;
+        let mut verdict = None;
+        for revision in &revisions {
+            match self
+                .source
+                .verdict_for(&self.workspace, &template, revision)
+                .await
+            {
+                Ok(Some(found)) => {
+                    verdict = Some(found);
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, revision, "ci-watch verdict source failed");
+                    self.emit(
+                        "warn",
+                        serde_json::json!({ "action": "source_error", "revision": revision }),
+                    );
+                    backoff(&state);
+                    return StrandResult::NoWork;
+                }
             }
-        };
+        }
         let Some(verdict) = verdict else {
-            // No completed verdict on the tip yet (CI pending or absent).
+            // No completed verdict in the recent mainline window yet.
             backoff(&state);
             return StrandResult::NoWork;
         };

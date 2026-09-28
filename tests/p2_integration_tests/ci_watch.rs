@@ -426,11 +426,18 @@ async fn fake_forgejo_reds_dedupe_by_fingerprint_and_green_takes_no_action() {
         "failure",
         "needle-ci Failed: verify: 2 failed: tests::beta, tests::alpha",
     );
+    let pending_tip_revision = add_commit(&home, &workspace, "pending successor");
     assert!(matches!(
         strand.evaluate(&store, &Default::default()).await,
         StrandResult::WorkCreated
     ));
-    assert_eq!(store.bead_count(), 1, "the first red files one bead");
+    assert_eq!(
+        store.bead_count(),
+        1,
+        "the newest completed red files even after main advances to an unverdicted tip"
+    );
+    assert!(store.beads()[0].1.body.contains(&first_red_revision));
+    assert!(!store.beads()[0].1.body.contains(&pending_tip_revision));
 
     // The next poll can see the exact same Forgejo status again. It remains
     // one filing and does not add a duplicate recurrence note.
