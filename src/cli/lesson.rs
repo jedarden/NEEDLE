@@ -74,6 +74,7 @@ impl Expiry {
 /// Promote a reviewed lesson into a repository instruction file.
 pub(crate) fn promote(lesson_file: &Path, repo: &Path, target: Option<&Path>) -> Result<()> {
     let repo = repository_root(repo)?;
+    ensure_promotion_allowed(crate::gate_health::is_degraded(&repo)?)?;
     let lesson_file = lesson_file
         .canonicalize()
         .with_context(|| format!("resolve lesson file {}", lesson_file.display()))?;
@@ -107,6 +108,14 @@ pub(crate) fn promote(lesson_file: &Path, repo: &Path, target: Option<&Path>) ->
         lesson.id,
         target.display(),
         RESOLVED_POLICY_VERSION
+    );
+    Ok(())
+}
+
+fn ensure_promotion_allowed(gate_degraded: bool) -> Result<()> {
+    ensure!(
+        !gate_degraded,
+        "promotion refused: workspace is gate-degraded; restore the verification gate before promoting policy"
     );
     Ok(())
 }
@@ -651,6 +660,15 @@ mod tests {
         let error = promote(&lesson, root.path(), None).expect_err("unreviewed lesson must fail");
         assert!(error.to_string().contains("reviewed_by"));
         assert!(!root.path().join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn policy_promotion_is_refused_while_gate_degraded() {
+        let error =
+            ensure_promotion_allowed(true).expect_err("degraded workspace must freeze promotion");
+        assert!(error.to_string().contains("promotion refused"));
+        assert!(error.to_string().contains("gate-degraded"));
+        ensure_promotion_allowed(false).expect("healthy workspace permits promotion");
     }
 
     #[test]

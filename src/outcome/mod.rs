@@ -2918,6 +2918,9 @@ impl OutcomeHandler {
             // identity once the claim's assignee is captured, even when a
             // legacy backend cannot expose a numeric revision.
             provisional: provenance.assignee.is_none(),
+            // Attempts resolved during a degraded window remain in the
+            // ledger for health and recovery but do not train learning.
+            gate_degraded: gate_health::is_degraded(&bead.workspace).unwrap_or(true),
             provider_degraded,
             bead_id: bead.id.clone(),
             workspace: bead.workspace.display().to_string(),

@@ -81,7 +81,7 @@ fn windowed(ctx: &AuditContext) -> Vec<&LedgerRow> {
     let cutoff = ctx.collected_at - chrono::Duration::hours(ctx.config.audit.factory.window_hours);
     ctx.ledger
         .iter()
-        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
+        .filter(|row| crate::evidence_routing::is_learning_evidence_row(&row.data))
         .filter(|row| row.timestamp.is_none_or(|stamp| stamp >= cutoff))
         .collect()
 }

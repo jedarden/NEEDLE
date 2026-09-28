@@ -1466,6 +1466,43 @@ impl PromptBuilder {
             return (format!("{template_name}-default"), None);
         }
 
+        // Fail closed when gate-health state cannot be read. Learning from an
+        // unknown gate state is unsafe for the same reason as learning from a
+        // known degraded gate.
+        let gate_degraded = crate::gate_health::is_degraded(workspace).unwrap_or(true);
+        self.select_variant_with_health(template_name, workspace, attempt_id, gate_degraded)
+    }
+
+    /// Shared implementation with an explicit health input so exposure
+    /// freezing and restoration can be tested without mutating process-wide
+    /// HOME or the live gate-health state directory.
+    fn select_variant_with_health(
+        &self,
+        template_name: &str,
+        workspace: &Path,
+        attempt_id: Option<&str>,
+        gate_degraded: bool,
+    ) -> (String, Option<String>) {
+        let Some(variants) = self.variants.get(template_name) else {
+            return (format!("{template_name}-default"), None);
+        };
+
+        if variants.is_empty() {
+            return (format!("{template_name}-default"), None);
+        }
+
+        // N-T21: the baseline template runs and no variant assignment is
+        // recorded during degradation. This is a pause, not a stop, so the
+        // next healthy attempt resumes the existing experiment.
+        if gate_degraded {
+            tracing::debug!(
+                template = %template_name,
+                workspace = %workspace.display(),
+                "workspace is gate-degraded — prompt experiment exposure frozen"
+            );
+            return (format!("{template_name}-default"), None);
+        }
+
         let Some(attempt_id) = attempt_id else {
             return (format!("{template_name}-default"), None);
         };
@@ -2106,6 +2143,78 @@ mod tests {
         .unwrap();
         assert_eq!(assignments["assignments"]["attempt-canary-1"], "");
         assert_eq!(assignments["assignments"]["attempt-canary-2"], "v2");
+    }
+
+    #[test]
+    fn gate_degradation_freezes_exposure_and_evidence_until_restored() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("prompts")).unwrap();
+        std::fs::write(workspace.path().join("prompts/pluck-v2.md"), "candidate").unwrap();
+        let variants = std::collections::BTreeMap::from([(
+            "pluck".to_string(),
+            vec![crate::config::VariantConfig {
+                name: "v2".to_string(),
+                weight: 100,
+                content_file: PathBuf::from("prompts/pluck-v2.md"),
+            }],
+        )]);
+        let config = PromptConfig {
+            variants,
+            ..PromptConfig::default()
+        };
+        let state = tempfile::tempdir().unwrap();
+        let builder =
+            PromptBuilder::new(&config).with_experiment_state_dir(state.path().to_path_buf());
+
+        let mut evidence = crate::evidence_routing::AdapterEvidence {
+            adapter: "candidate-adapter".to_string(),
+            ..Default::default()
+        };
+        for dispatch in 0..8 {
+            let attempt_id = format!("degraded-{dispatch}");
+            let (version, _) = builder.select_variant_with_health(
+                "pluck",
+                workspace.path(),
+                Some(&attempt_id),
+                true,
+            );
+            assert_eq!(version, "pluck-default");
+            evidence.observe_row(&serde_json::json!({
+                "provisional": false,
+                "gate_degraded": true,
+                "adapter": "candidate-adapter",
+                "outcome": "verified_success",
+                "estimated_cost_usd": 0.01,
+            }));
+        }
+
+        assert_eq!(evidence.attempts, 0);
+        assert!(!state.path().join("pluck.exposure.json").exists());
+
+        for dispatch in 0..8 {
+            let attempt_id = format!("restored-{dispatch}");
+            let (version, _) = builder.select_variant_with_health(
+                "pluck",
+                workspace.path(),
+                Some(&attempt_id),
+                false,
+            );
+            assert_eq!(version, "pluck-v2");
+            evidence.observe_row(&serde_json::json!({
+                "provisional": false,
+                "adapter": "candidate-adapter",
+                "outcome": "verified_success",
+                "estimated_cost_usd": 0.01,
+            }));
+        }
+
+        assert_eq!(evidence.attempts, 8);
+        let assignments: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(state.path().join("pluck.exposure.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(assignments["total_attempts"], 8);
+        assert_eq!(assignments["candidate_attempts"]["v2"], 8);
     }
 
     #[test]

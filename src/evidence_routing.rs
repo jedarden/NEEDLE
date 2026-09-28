@@ -19,7 +19,8 @@
 //!   choice is recorded as explored.
 //! - **Freeze.** A gate-degraded workspace or a degraded adapter (N-T21,
 //!   N-T23) takes the static default: infrastructure noise must not move
-//!   routing.
+//!   routing. Rows resolved in gate- or provider-degraded windows are
+//!   excluded from learning windows by default (N-T21, N-T27).
 //!
 //! The evidence comes from `attempt.resolved` rows in the local telemetry
 //! logs (bounded by file date, read once per `refresh_secs`), never from an
@@ -173,16 +174,17 @@ pub fn is_authoritative_attempt_row(row: &serde_json::Value) -> bool {
     row.get("provisional").and_then(serde_json::Value::as_bool) == Some(false)
 }
 
-/// Whether the row was resolved while its provider was degraded. The marker
-/// is optional on the wire, so a missing key remains an ordinary row.
+/// Whether the row was resolved while its workspace or provider was degraded.
+/// Both markers are optional on the wire, so a missing key remains an ordinary
+/// row.
 pub fn is_degraded_window_row(row: &serde_json::Value) -> bool {
-    row.get("provider_degraded")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
+    ["gate_degraded", "provider_degraded"]
+        .iter()
+        .any(|key| row.get(*key).and_then(serde_json::Value::as_bool) == Some(true))
 }
 
 /// Whether an `attempt.resolved` row may enter a learning evidence window.
-fn is_learning_evidence_row(row: &serde_json::Value) -> bool {
+pub fn is_learning_evidence_row(row: &serde_json::Value) -> bool {
     is_authoritative_attempt_row(row) && !is_degraded_window_row(row)
 }
 
@@ -444,8 +446,9 @@ impl Evidence {
 
     /// Fold one `attempt.resolved` row into both scopes. A row without an
     /// adapter is skipped; a row without a usable workspace counts only
-    /// fleet-wide. Provisional or unmarked rows are skipped entirely: they
-    /// are visible in stats, but cannot make an authoritative routing choice.
+    /// fleet-wide. Provisional or degraded-window rows are skipped entirely:
+    /// they remain visible in stats, but cannot make an authoritative routing
+    /// choice.
     pub fn observe(&mut self, row: &serde_json::Value) {
         if !is_learning_evidence_row(row) {
             return;
@@ -575,6 +578,38 @@ pub fn retry_bias_adapter(
             tier_a.cmp(tier_b).then_with(|| name_b.cmp(name_a))
         })
         .map(|(_, name)| name.clone())
+}
+
+/// Apply the bounded retry-tier preference unless workspace health froze
+/// adapter selection. A degraded provider is also ineligible for this
+/// escalation (N-T27).
+pub fn apply_retry_tier_bias(
+    choice: &mut Choice,
+    frozen: Option<&str>,
+    preferred: Option<&str>,
+    adapter_tiers: &std::collections::BTreeMap<String, u32>,
+    loaded_adapters: &HashSet<String>,
+    degraded_adapters: &HashSet<String>,
+) -> bool {
+    if frozen.is_some() {
+        return false;
+    }
+    let Some(preferred) = preferred else {
+        return false;
+    };
+    let current_tier = adapter_tiers.get(&choice.adapter).copied().unwrap_or(0);
+    let preferred_tier = adapter_tiers.get(preferred).copied().unwrap_or(0);
+    if preferred_tier <= current_tier
+        || !loaded_adapters.contains(preferred)
+        || degraded_adapters.contains(preferred)
+    {
+        return false;
+    }
+
+    choice.reason = format!("retry_tier_bias:{preferred_tier}");
+    choice.adapter = preferred.to_string();
+    choice.explored = false;
+    true
 }
 
 /// A routing choice together with the scope that decided it.
@@ -1186,6 +1221,56 @@ mod tests {
         let choice = choose("a", &config, &evidence, &degraded, None, 0.5);
         assert_eq!(choice.adapter, "b");
         assert_eq!(choice.reason, "provider_degraded_fallback:a");
+    }
+
+    #[test]
+    fn workspace_freeze_also_blocks_retry_tier_override() {
+        let tiers = std::collections::BTreeMap::from([("a".into(), 0), ("b".into(), 2)]);
+        let loaded: HashSet<String> = ["a".to_string(), "b".to_string()].into_iter().collect();
+        let no_provider_degradation = HashSet::new();
+        let mut frozen = choose(
+            "a",
+            &cfg(),
+            &HashMap::new(),
+            &no_provider_degradation,
+            Some("workspace_degraded"),
+            0.5,
+        );
+        assert!(!apply_retry_tier_bias(
+            &mut frozen,
+            Some("workspace_degraded"),
+            Some("b"),
+            &tiers,
+            &loaded,
+            &no_provider_degradation,
+        ));
+        assert_eq!(frozen.adapter, "a");
+
+        let mut healthy = choose(
+            "a",
+            &cfg(),
+            &HashMap::new(),
+            &no_provider_degradation,
+            None,
+            0.5,
+        );
+        assert!(apply_retry_tier_bias(
+            &mut healthy,
+            None,
+            Some("b"),
+            &tiers,
+            &loaded,
+            &no_provider_degradation,
+        ));
+        assert_eq!(healthy.adapter, "b");
+    }
+
+    #[test]
+    fn degraded_attempt_rows_are_not_learning_evidence() {
+        let degraded = serde_json::json!({"provisional": false, "gate_degraded": true});
+        let restored = serde_json::json!({"provisional": false});
+        assert!(!is_learning_evidence_row(&degraded));
+        assert!(is_learning_evidence_row(&restored));
     }
 
     #[test]

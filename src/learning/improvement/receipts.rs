@@ -153,7 +153,7 @@ pub fn measure(
 ) -> CohortMeasures {
     let live: Vec<&LedgerRow> = rows
         .iter()
-        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
+        .filter(|row| crate::evidence_routing::is_learning_evidence_row(&row.data))
         .filter(|row| !state_dir::is_fixture_row(field(row, "worker"), field(row, "workspace")))
         .filter(|row| field(row, "outcome") != crate::attempt_accounting::DECOMPOSED)
         // Gate D: uncosted rows are excluded before any receipt is trusted.

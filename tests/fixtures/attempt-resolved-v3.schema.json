@@ -37,6 +37,11 @@
       "type": "boolean",
       "description": "True until accepted claim-time provenance ties the dispatch ID to a real attempt (N-T03). Consumers must not treat a provisional row as authoritative: provisional rows are excluded from learning evidence and SLOs (plan section 4.4 step 1, Gate A)."
     },
+    "gate_degraded": {
+      "type": "boolean",
+      "enum": [true],
+      "description": "Present only on rows resolved while the workspace was gate-degraded (N-T21, ADR-023). Marked rows remain in the ledger as health/recovery evidence; learning evidence windows exclude them by default."
+    },
     "provider_degraded": {
       "type": "boolean",
       "enum": [true],

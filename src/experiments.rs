@@ -89,11 +89,15 @@ pub struct StopReceipt {
     pub decision: Decision,
 }
 
-/// Aggregate `attempt.resolved` rows by template version.
+/// Aggregate `attempt.resolved` rows by template version. Rows resolved
+/// inside a gate-degraded window (`gate_degraded: true`, N-T21) are
+/// excluded: a canary must not stop or earn credit on window noise.
 pub fn variant_outcomes(rows: &[serde_json::Value]) -> HashMap<String, VariantOutcome> {
     let mut out: HashMap<String, VariantOutcome> = HashMap::new();
     for row in rows {
-        if !crate::evidence_routing::is_authoritative_attempt_row(row) {
+        if !crate::evidence_routing::is_authoritative_attempt_row(row)
+            || crate::evidence_routing::is_degraded_window_row(row)
+        {
             continue;
         }
         let version = row
@@ -256,6 +260,9 @@ pub enum ExperimentPrimaryMetric {
 pub enum ExperimentStatus {
     Running,
     Promotable,
+    /// Exposure and evaluation are held while the owning workspace's gate is
+    /// degraded. This is recoverable and must never be treated as a stop.
+    Paused,
     Stopped,
     RolledBack,
 }
@@ -310,6 +317,13 @@ pub struct ExperimentRecord {
     pub stop_condition: ExperimentStopCondition,
     pub started_at: DateTime<Utc>,
     pub status: ExperimentStatus,
+    /// Status to restore after a gate-degraded pause. Missing on records
+    /// written before N-T21 and defaults to `Running` when resumed.
+    #[serde(default)]
+    pub paused_status: Option<ExperimentStatus>,
+    /// Workspace whose degraded gate caused this pause, when known.
+    #[serde(default)]
+    pub paused_workspace: Option<String>,
     pub receipt: Option<ExperimentReceipt>,
 }
 
@@ -335,8 +349,48 @@ pub fn experiment_record(
         },
         started_at,
         status: ExperimentStatus::Running,
+        paused_status: None,
+        paused_workspace: None,
         receipt: None,
     }
+}
+
+/// Pause an active experiment without creating a terminal stop decision.
+/// Repeated calls are idempotent and preserve a prior promotable status so it
+/// can be reconsidered after the workspace gate is restored.
+pub fn pause_experiment(
+    record: &ExperimentRecord,
+    workspace: &Path,
+    paused_at: DateTime<Utc>,
+) -> ExperimentRecord {
+    if record.status.is_terminal() || record.status == ExperimentStatus::Paused {
+        return record.clone();
+    }
+
+    let mut paused = record.clone();
+    paused.paused_status = Some(record.status);
+    paused.paused_workspace = Some(
+        workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+    );
+    paused.status = ExperimentStatus::Paused;
+    let prior = record.receipt.as_ref();
+    paused.receipt = Some(ExperimentReceipt {
+        schema_version: 1,
+        decided_at: paused_at,
+        status: ExperimentStatus::Paused,
+        reason: "workspace gate-degraded; evaluation and exposure paused".to_string(),
+        baseline: prior
+            .map(|receipt| receipt.baseline.clone())
+            .unwrap_or_default(),
+        candidate: prior
+            .map(|receipt| receipt.candidate.clone())
+            .unwrap_or_default(),
+    });
+    paused
 }
 
 /// Evaluate the current ledger window for one configured variant.
@@ -405,8 +459,15 @@ pub fn evaluate_policy_experiment(
 
     // Once evidence makes a candidate promotable, keep that recommendation
     // while monitoring it. A later regression or guardrail breach still wins.
+    let previous_status = previous.map(|prior| {
+        if prior.status == ExperimentStatus::Paused {
+            prior.paused_status.unwrap_or(ExperimentStatus::Running)
+        } else {
+            prior.status
+        }
+    });
     let (status, reason) = if status == ExperimentStatus::Running
-        && previous.is_some_and(|prior| prior.status == ExperimentStatus::Promotable)
+        && previous_status == Some(ExperimentStatus::Promotable)
     {
         (
             ExperimentStatus::Promotable,
@@ -445,6 +506,7 @@ fn experiment_metrics(
 
     for row in rows {
         if !crate::evidence_routing::is_authoritative_attempt_row(row)
+            || crate::evidence_routing::is_degraded_window_row(row)
             || row.get("prompt_template").and_then(|value| value.as_str()) != Some(template)
             || row.get("template_version").and_then(|value| value.as_str()) != Some(version)
         {
@@ -579,6 +641,25 @@ pub fn load_experiment(
 /// Persist an experiment record atomically under the experiment state dir.
 /// Terminal states cannot be overwritten by a stale running evaluation.
 pub fn record_experiment(state_dir: &Path, record: &ExperimentRecord) -> Result<bool> {
+    record_experiment_inner(state_dir, record, false)
+}
+
+/// Persist an evaluation that explicitly resumed a paused experiment after
+/// workspace gate restoration. Ordinary stale evaluations cannot clear a
+/// pause written by another worker.
+pub fn record_resumed_experiment(state_dir: &Path, record: &ExperimentRecord) -> Result<bool> {
+    anyhow::ensure!(
+        record.status != ExperimentStatus::Paused,
+        "a resumed experiment must leave the paused status"
+    );
+    record_experiment_inner(state_dir, record, true)
+}
+
+fn record_experiment_inner(
+    state_dir: &Path,
+    record: &ExperimentRecord,
+    allow_resume: bool,
+) -> Result<bool> {
     anyhow::ensure!(
         record.share.is_finite() && (0.0..=1.0).contains(&record.share),
         "experiment share must be between 0 and 1"
@@ -590,6 +671,12 @@ pub fn record_experiment(state_dir: &Path, record: &ExperimentRecord) -> Result<
             .unwrap_or(&record.candidate_version);
         let path = experiment_path(state_dir, &record.template, variant);
         if let Some(current) = load_experiment(state_dir, &record.template, variant)? {
+            if current.status == ExperimentStatus::Paused
+                && record.status != ExperimentStatus::Paused
+                && !allow_resume
+            {
+                return Ok(false);
+            }
             if current.status.is_terminal() && !record.status.is_terminal() {
                 return Ok(false);
             }
@@ -976,6 +1063,76 @@ mod tests {
 
         assert_eq!(std::fs::read(template_path).unwrap(), template_before);
         assert_eq!(std::fs::read(config_path).unwrap(), config_before);
+    }
+
+    #[test]
+    fn degraded_window_pauses_without_stopping_and_restoration_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let variant = &variants()[0];
+        let config = fast_cfg();
+        let promotable = evaluate_policy_experiment(
+            "pluck",
+            variant,
+            &policy_rows((20, 10), (20, 19), 0.10),
+            &config,
+            None,
+            Utc::now(),
+        );
+        assert_eq!(promotable.status, ExperimentStatus::Promotable);
+        assert!(record_experiment(&state_dir, &promotable).unwrap());
+
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let paused = pause_experiment(&promotable, &workspace, Utc::now());
+        assert_eq!(paused.status, ExperimentStatus::Paused);
+        assert_eq!(paused.paused_status, Some(ExperimentStatus::Promotable));
+        assert_eq!(
+            paused.paused_workspace.as_deref(),
+            Some(workspace.to_str().unwrap())
+        );
+        assert!(!is_stopped(&state_dir, "pluck", "v2"));
+        assert!(record_experiment(&state_dir, &paused).unwrap());
+
+        // A stale evaluator cannot erase a pause. Once the gate is healthy,
+        // the explicit resume write restores the prior promotable state.
+        let evaluated = evaluate_policy_experiment(
+            "pluck",
+            variant,
+            &policy_rows((20, 10), (20, 19), 0.10),
+            &config,
+            Some(&paused),
+            Utc::now(),
+        );
+        assert_eq!(evaluated.status, ExperimentStatus::Promotable);
+        assert_eq!(evaluated.paused_status, None);
+        assert!(!record_experiment(&state_dir, &evaluated).unwrap());
+        assert!(record_resumed_experiment(&state_dir, &evaluated).unwrap());
+        let restored = load_experiment(&state_dir, "pluck", "v2").unwrap().unwrap();
+        assert_eq!(restored.status, ExperimentStatus::Promotable);
+        assert_eq!(restored.paused_status, None);
+        assert_eq!(restored.paused_workspace, None);
+    }
+
+    #[test]
+    fn degraded_attempts_do_not_change_canary_evidence() {
+        let mut rows = policy_rows((20, 10), (20, 19), 0.10);
+        for row in &mut rows {
+            row["gate_degraded"] = serde_json::json!(true);
+        }
+        let outcomes = variant_outcomes(&rows);
+        assert!(outcomes.is_empty());
+
+        let record = evaluate_policy_experiment(
+            "pluck",
+            &variants()[0],
+            &rows,
+            &fast_cfg(),
+            None,
+            Utc::now(),
+        );
+        assert_eq!(record.status, ExperimentStatus::Running);
+        assert!(record.receipt.is_none());
     }
 
     #[test]

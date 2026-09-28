@@ -286,7 +286,10 @@ version = 1
 # +4 N-T19 prompt-canary promotion, stop, rollback, and attempt-assignment fixtures.
 # +9 per-attempt trace layout and retention contracts (needle-2c273c10).
 # +2 N-T27 provider-degraded routing and replay contracts.
-max_tests = 4061
+# +6 N-T21 gate-degraded adaptation freeze contracts: no exposure or evidence
+# changes during degradation, evidence and exposure resume after restoration,
+# pause/resume state, retry-tier freeze and policy-promotion refusal.
+max_tests = 4067
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

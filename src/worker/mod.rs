@@ -9369,6 +9369,17 @@ impl Worker {
         let state_dir = crate::experiments::default_state_dir();
         let rows: Vec<serde_json::Value> = cache.rows.iter().map(|row| row.data.clone()).collect();
         let now = chrono::Utc::now();
+        // A gate-degraded window invalidates learning decisions. Keep the
+        // durable experiment state explicitly paused while prompt selection
+        // independently falls back to the baseline for this workspace.
+        let gate_degraded =
+            crate::gate_health::is_degraded(&self.current_workspace).unwrap_or(true);
+        let workspace_key = self
+            .current_workspace
+            .canonicalize()
+            .unwrap_or_else(|_| self.current_workspace.clone())
+            .to_string_lossy()
+            .into_owned();
         for (template, variants) in &self.config.prompt.variants {
             for variant in variants {
                 let previous = match crate::experiments::load_experiment(
@@ -9387,6 +9398,40 @@ impl Worker {
                         continue;
                     }
                 };
+                if gate_degraded {
+                    if let Some(previous) = previous.as_ref() {
+                        let paused = crate::experiments::pause_experiment(
+                            previous,
+                            &self.current_workspace,
+                            now,
+                        );
+                        if paused != *previous {
+                            match crate::experiments::record_experiment(&state_dir, &paused) {
+                                Ok(true) => tracing::info!(
+                                    template = %template,
+                                    variant = %variant.name,
+                                    "prompt experiment paused while workspace gate is degraded"
+                                ),
+                                Ok(false) => {}
+                                Err(error) => tracing::warn!(
+                                    template = %template,
+                                    variant = %variant.name,
+                                    error = %error,
+                                    "could not persist paused prompt experiment"
+                                ),
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if previous.as_ref().is_some_and(|record| {
+                    record.status == crate::experiments::ExperimentStatus::Paused
+                        && record.paused_workspace.as_deref() != Some(workspace_key.as_str())
+                }) {
+                    // A shared state directory can serve several workspaces;
+                    // only the workspace that caused a pause may resume it.
+                    continue;
+                }
                 let record = crate::experiments::evaluate_policy_experiment(
                     template,
                     variant,
@@ -9396,7 +9441,13 @@ impl Worker {
                     now,
                 );
                 let previous_status = previous.as_ref().map(|record| record.status);
-                match crate::experiments::record_experiment(&state_dir, &record) {
+                let record_result =
+                    if previous_status == Some(crate::experiments::ExperimentStatus::Paused) {
+                        crate::experiments::record_resumed_experiment(&state_dir, &record)
+                    } else {
+                        crate::experiments::record_experiment(&state_dir, &record)
+                    };
+                match record_result {
                     Ok(changed) if changed => match record.status {
                         crate::experiments::ExperimentStatus::Stopped => {
                             let receipt = record.receipt.as_ref();
@@ -9446,6 +9497,7 @@ impl Worker {
                             );
                         }
                         crate::experiments::ExperimentStatus::Running
+                        | crate::experiments::ExperimentStatus::Paused
                         | crate::experiments::ExperimentStatus::RolledBack => {}
                     },
                     Ok(_) => {}
@@ -9515,8 +9567,8 @@ impl Worker {
             None
         } else {
             match crate::gate_health::is_degraded(&self.current_workspace) {
-                Ok(true) => Some("workspace_degraded"),
-                _ => None,
+                Ok(false) => None,
+                Ok(true) | Err(_) => Some("workspace_degraded"),
             }
         };
         let roll = {
@@ -9545,35 +9597,6 @@ impl Worker {
             frozen,
             roll,
         );
-        let mut retry_bias = false;
-        if let Some(id) = bead_id {
-            let mut candidates = scoped_config.candidates.clone();
-            if !candidates.iter().any(|name| name == &static_adapter) {
-                candidates.push(static_adapter.clone());
-            }
-            if let Some(preferred) = crate::evidence_routing::retry_bias_adapter(
-                &cache.rows,
-                id.as_ref(),
-                &candidates,
-                &config.adapter_tiers,
-            ) {
-                let current_tier = config
-                    .adapter_tiers
-                    .get(&choice.adapter)
-                    .copied()
-                    .unwrap_or(0);
-                let preferred_tier = config.adapter_tiers.get(&preferred).copied().unwrap_or(0);
-                if preferred_tier > current_tier
-                    && !degraded.contains(&preferred)
-                    && self.dispatcher.adapter(&preferred).is_some()
-                {
-                    choice.reason = format!("retry_tier_bias:{preferred_tier}");
-                    choice.adapter = preferred;
-                    choice.explored = false;
-                    retry_bias = true;
-                }
-            }
-        }
         // Only an adapter the dispatcher can load is a real choice.
         let loaded: std::collections::HashSet<String> = self
             .dispatcher
@@ -9581,6 +9604,33 @@ impl Worker {
             .into_iter()
             .map(str::to_string)
             .collect();
+        // Retry-tier escalation is another adaptive selection surface. It
+        // must honor the same workspace freeze as evidence ranking, or it
+        // could replace the static result after `choose` correctly froze.
+        let preferred_retry = if frozen.is_none() {
+            bead_id.and_then(|id| {
+                let mut candidates = scoped_config.candidates.clone();
+                if !candidates.iter().any(|name| name == &static_adapter) {
+                    candidates.push(static_adapter.clone());
+                }
+                crate::evidence_routing::retry_bias_adapter(
+                    &cache.rows,
+                    id.as_ref(),
+                    &candidates,
+                    &config.adapter_tiers,
+                )
+            })
+        } else {
+            None
+        };
+        let retry_bias = crate::evidence_routing::apply_retry_tier_bias(
+            &mut choice,
+            frozen,
+            preferred_retry.as_deref(),
+            &config.adapter_tiers,
+            &loaded,
+            &degraded,
+        );
         let chosen = crate::evidence_routing::available_choice(&choice, &static_adapter, &loaded);
         if chosen == static_adapter && choice.adapter != static_adapter {
             tracing::warn!(

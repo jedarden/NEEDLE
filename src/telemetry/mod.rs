@@ -175,6 +175,10 @@ pub struct GateResultEntry {
 pub struct AttemptResolvedFields {
     pub attempt_id: String,
     pub provisional: bool,
+    /// The workspace was gate-degraded when this row resolved (N-T21).
+    /// Serialized only when true so degraded-window rows remain visible for
+    /// health and recovery while learning windows exclude them by default.
+    pub gate_degraded: bool,
     /// The adapter's provider was degraded when this attempt resolved
     /// (N-T27). Serialized only when `true`; outage attempts remain visible
     /// for health accounting but are excluded from learning windows.
@@ -4350,6 +4354,7 @@ impl EventKind {
                 let AttemptResolvedFields {
                     attempt_id,
                     provisional,
+                    gate_degraded,
                     provider_degraded,
                     bead_id,
                     workspace,
@@ -4419,6 +4424,12 @@ impl EventKind {
 
                 if let Some(kind) = override_kind {
                     data["override"] = serde_json::json!(kind);
+                }
+
+                // Optional by design (N-T21): only rows resolved inside a
+                // degraded window carry this marker; older rows remain valid.
+                if *gate_degraded {
+                    data["gate_degraded"] = serde_json::json!(true);
                 }
 
                 // Provider-outage attempts stay in the ledger, while adapter
@@ -7834,6 +7845,7 @@ mod tests {
         AttemptResolvedFields {
             attempt_id: uuid::Uuid::now_v7().to_string(),
             provisional: true,
+            gate_degraded: false,
             provider_degraded: false,
             bead_id: BeadId::from("needle-96dec90b"),
             workspace: "/home/coding/NEEDLE".to_string(),
@@ -7893,6 +7905,10 @@ mod tests {
     fn nt47_costed_is_always_serialized_and_an_uncosted_row_conforms() {
         let data = EventKind::AttemptResolved(Box::new(attempt_resolved_fields())).to_data();
         assert_eq!(data["costed"], true);
+        let mut degraded_fields = attempt_resolved_fields();
+        degraded_fields.gate_degraded = true;
+        let degraded_data = EventKind::AttemptResolved(Box::new(degraded_fields)).to_data();
+        assert_eq!(degraded_data["gate_degraded"], true);
         assert_eq!(data["model"], "glm-5.3-flash");
         assert_eq!(data["requested_model"], "glm-5.3-flash");
         assert_eq!(data["effective_model"], "glm-5.3-flash");
