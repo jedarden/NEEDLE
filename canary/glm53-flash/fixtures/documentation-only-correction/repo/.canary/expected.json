@@ -1,0 +1,1 @@
+{"required": {"README.md": "effort spelling"}, "forbidden": ["src", "tests", ".canary", "AGENTS.md"]}

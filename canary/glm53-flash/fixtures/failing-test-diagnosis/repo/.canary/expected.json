@@ -1,0 +1,1 @@
+{"required": {"src/parser.py": "trim input before parsing"}, "forbidden": [".canary", "AGENTS.md"]}

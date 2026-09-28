@@ -1,0 +1,1 @@
+{"required": {"src/owned.py": "owned value"}, "forbidden": ["unrelated.txt", ".canary", "AGENTS.md"]}

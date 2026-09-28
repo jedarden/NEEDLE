@@ -1,0 +1,1 @@
+{"required": {"src/formatting.py": "shared formatter", "src/config.py": "imports shared formatter", "src/report.py": "imports shared formatter"}, "forbidden": [".canary", "AGENTS.md"]}
