@@ -139,6 +139,12 @@ const EXPLORE_EVALUATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// avoid.
 const EXPLORE_WORKSPACE_CONCURRENCY: usize = 2;
 
+/// Maximum number of workspaces one Explore evaluation probes. A roaming
+/// worker must be able to return a ready bead without waiting for every store
+/// in a large fleet. The cursor below advances by this amount on each scan, so
+/// three floor-interval scans cover the 70-workspace fleet from the incident.
+const EXPLORE_WORKSPACES_PER_EVALUATION: usize = 24;
+
 /// A jitter source: returns a draw in `0..=100` (a percentage). Production
 /// uses entropy; cadence tests inject fixed draws to stay deterministic.
 type ExploreJitterSource = Box<dyn Fn() -> u32 + Send>;
@@ -177,6 +183,10 @@ enum ExploreScanOutcome {
     ExcludedCandidates,
     /// No ready beads in any scanned workspace — the ramp may grow.
     Empty,
+    /// Only part of the known workspace surface was scanned. This is not
+    /// evidence of an empty fleet: keep the cadence at its floor so the next
+    /// cycle advances the cursor promptly.
+    Partial,
 }
 
 struct WorkspaceFrontier {
@@ -358,6 +368,13 @@ impl ExploreScanBackoff {
                 // ramp once they end, and must not deepen either.
                 self.cycles_until_scan = self.base_interval_cycles.saturating_sub(1);
             }
+            ExploreScanOutcome::Partial => {
+                // A bounded chunk is only a partial observation of the fleet.
+                // Keep the cursor moving at the configured floor; treating it
+                // as empty would back off before the remaining workspaces are
+                // ever inspected.
+                self.cycles_until_scan = self.base_interval_cycles.saturating_sub(1);
+            }
             ExploreScanOutcome::Empty => {
                 self.consecutive_empty_scans = self.consecutive_empty_scans.saturating_add(1);
                 self.cycles_until_scan = self.jittered_interval_cycles().saturating_sub(1);
@@ -495,6 +512,10 @@ pub struct ExploreStrand {
     /// Adaptive cadence for roaming scans. This is intentionally in-memory and
     /// scoped to one worker instance.
     scan_backoff: std::sync::Mutex<ExploreScanBackoff>,
+    /// Offset into the worker's rotated workspace order. Large fleets are
+    /// scanned in bounded chunks; advancing this cursor prevents a worker from
+    /// retrying the same slow prefix forever after a partial or timed-out scan.
+    workspace_scan_cursor: AtomicU64,
     /// Last observed bounded discovery surface. A changed snapshot bypasses
     /// empty-scan backoff once so a newly created workspace is selectable
     /// without waiting for the next periodic interval.
@@ -597,6 +618,7 @@ impl ExploreStrand {
                 config.scan_interval_cycles,
                 config.max_scan_interval_cycles,
             )),
+            workspace_scan_cursor: AtomicU64::new(0),
             workspace_discovery_snapshot: std::sync::Mutex::new(
                 Self::capture_workspace_discovery_snapshot(&config.workspace_root),
             ),
@@ -663,6 +685,7 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
+            workspace_scan_cursor: AtomicU64::new(0),
             workspace_discovery_snapshot: std::sync::Mutex::new(None),
             store_watcher: std::sync::Mutex::new(ExploreStoreWatcher::new()),
             stale_claim_ttl: 300,
@@ -709,6 +732,7 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
+            workspace_scan_cursor: AtomicU64::new(0),
             workspace_discovery_snapshot: std::sync::Mutex::new(None),
             store_watcher: std::sync::Mutex::new(ExploreStoreWatcher::new()),
             stale_claim_ttl,
@@ -1760,9 +1784,27 @@ impl ExploreStrand {
                     && !matches!(crate::gate_health::is_degraded(workspace), Ok(true))
             })
             .collect();
+        let eligible_workspace_count = probe_workspaces.len();
         // Rotate before the expensive probes begin so simultaneous roamers
         // spread their first backend opens and ready queries across the fleet.
-        let probe_workspaces = self.worker_scan_order(probe_workspaces);
+        let mut probe_workspaces = self.worker_scan_order(probe_workspaces);
+        let partial_scan = probe_workspaces.len() > EXPLORE_WORKSPACES_PER_EVALUATION;
+        if partial_scan {
+            let cursor = self.workspace_scan_cursor.fetch_add(
+                EXPLORE_WORKSPACES_PER_EVALUATION as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            ) as usize
+                % probe_workspaces.len();
+            probe_workspaces.rotate_left(cursor);
+            probe_workspaces.truncate(EXPLORE_WORKSPACES_PER_EVALUATION);
+            tracing::debug!(
+                worker = %self.qualified_id,
+                eligible_workspace_count,
+                scanned_workspace_count = probe_workspaces.len(),
+                cursor,
+                "bounded Explore evaluation advanced its workspace cursor"
+            );
+        }
 
         // Store opening, backend validation, inventory probing, and ready
         // queries are independent across workspaces. Bound the fan-out so a
@@ -1937,51 +1979,6 @@ impl ExploreStrand {
             };
             let remote_store = frontier.store.clone();
 
-            // This is the final admission check for a roaming candidate. The
-            // remote store is the workspace's own store, so the status query
-            // counts claims held by workers on every host, not just this one.
-            let mut capacity_timing =
-                ExploreWorkspaceTiming::new(&self.telemetry, workspace, "capacity_recheck");
-            let capacity = self
-                .workspace_capacity(workspace, remote_store.as_ref())
-                .await;
-            capacity_timing.set_outcome(match &capacity {
-                Ok(Some(snapshot)) if snapshot.at_capacity() => "at_capacity",
-                Ok(_) => "available",
-                Err(_) => "error",
-            });
-            match capacity {
-                Ok(Some(snapshot)) if snapshot.at_capacity() => {
-                    let _ = self.telemetry.emit(
-                        crate::telemetry::EventKind::WorkspaceAtCapacity {
-                            workspace: workspace.display().to_string(),
-                            max_workers: snapshot.max_workers,
-                            active_workers: snapshot.active_workers,
-                        },
-                        Utc::now(),
-                    );
-                    exclusion_reasons.insert("workspace_at_capacity".to_string());
-                    tracing::info!(
-                        workspace = %workspace.display(),
-                        active_workers = snapshot.active_workers,
-                        max_workers = snapshot.max_workers,
-                        "workspace is at its worker capacity; skipping Explore"
-                    );
-                    continue;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    exclusion_reasons.insert("workspace_capacity_error".to_string());
-                    tracing::warn!(
-                        workspace = %workspace.display(),
-                        error = %error,
-                        "workspace capacity could not be evaluated; skipping Explore"
-                    );
-                    continue;
-                }
-            }
-            drop(capacity_timing);
-
             if frontier.filtered_candidates > 0 {
                 exclusion_reasons.insert(format!("filtered_{}", frontier.filtered_candidates));
                 excluded_ready_candidates += frontier.filtered_candidates;
@@ -2141,6 +2138,53 @@ impl ExploreStrand {
                 continue;
             }
 
+            // This is the final admission check for a roaming candidate. The
+            // remote store is the workspace's own store, so the status query
+            // counts claims held by workers on every host, not just this one.
+            // Empty frontiers skip this second query: the probe already checked
+            // capacity and there is no candidate for the recheck to admit.
+            let mut capacity_timing =
+                ExploreWorkspaceTiming::new(&self.telemetry, workspace, "capacity_recheck");
+            let capacity = self
+                .workspace_capacity(workspace, remote_store.as_ref())
+                .await;
+            capacity_timing.set_outcome(match &capacity {
+                Ok(Some(snapshot)) if snapshot.at_capacity() => "at_capacity",
+                Ok(_) => "available",
+                Err(_) => "error",
+            });
+            match capacity {
+                Ok(Some(snapshot)) if snapshot.at_capacity() => {
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::WorkspaceAtCapacity {
+                            workspace: workspace.display().to_string(),
+                            max_workers: snapshot.max_workers,
+                            active_workers: snapshot.active_workers,
+                        },
+                        Utc::now(),
+                    );
+                    exclusion_reasons.insert("workspace_at_capacity".to_string());
+                    tracing::info!(
+                        workspace = %workspace.display(),
+                        active_workers = snapshot.active_workers,
+                        max_workers = snapshot.max_workers,
+                        "workspace is at its worker capacity; skipping Explore"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    exclusion_reasons.insert("workspace_capacity_error".to_string());
+                    tracing::warn!(
+                        workspace = %workspace.display(),
+                        error = %error,
+                        "workspace capacity could not be evaluated; skipping Explore"
+                    );
+                    continue;
+                }
+            }
+            drop(capacity_timing);
+
             // Tag each candidate with the workspace it came from so the
             // worker can create the correct bead store; the global rank
             // happens once, after every workspace has been scanned.
@@ -2182,6 +2226,8 @@ impl ExploreStrand {
         // floor interval and the exclusions get a prompt re-check.
         let outcome = if !all_candidates.is_empty() {
             ExploreScanOutcome::Candidate
+        } else if partial_scan {
+            ExploreScanOutcome::Partial
         } else if excluded_ready_candidates > 0 {
             ExploreScanOutcome::ExcludedCandidates
         } else {
@@ -2743,10 +2789,10 @@ mod tests {
         assert!(candidates
             .iter()
             .any(|bead| { bead.id == candidate.id && bead.workspace == candidate_workspace }));
-        assert_eq!(
-            ready_workspaces.lock().unwrap().len(),
-            70,
-            "each workspace should be queried once in the first evaluation"
+        let ready_workspace_count = ready_workspaces.lock().unwrap().len();
+        assert!(
+            (24..=70).contains(&ready_workspace_count),
+            "bounded Explore should scan at least one chunk and no more than the fleet surface"
         );
 
         let claim_store = Arc::new(FrontierRankingStore::new(
@@ -2781,7 +2827,8 @@ mod tests {
                 .iter()
                 .filter(|event| event.data["phase"] == "frontier")
                 .count(),
-            70
+            ready_workspace_count,
+            "each probed workspace should emit one frontier timing event"
         );
     }
 
