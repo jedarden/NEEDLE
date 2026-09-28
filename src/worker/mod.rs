@@ -179,6 +179,27 @@ fn strip_source_annotation(line: &str) -> String {
         .unwrap_or_else(|| line.to_string())
 }
 
+/// State the deadline the adapter will enforce and ask the agent to preserve
+/// a compiling checkpoint before the last quarter of that budget (N-T25).
+///
+/// Activity-aware adapters may have an idle timeout without a hard cap. In
+/// that case there is no meaningful wall-clock deadline to put in the prompt.
+fn deadline_notice(
+    adapter: &crate::dispatch::AgentAdapter,
+    global_timeout_secs: u64,
+    bead_id: &BeadId,
+) -> String {
+    let timeout_secs = adapter.wall_clock_timeout_secs(global_timeout_secs);
+    if timeout_secs == 0 {
+        return String::new();
+    }
+
+    let minutes = timeout_secs.div_ceil(60);
+    format!(
+        "You have {minutes} minutes of wall clock. By the 75% mark commit what compiles and passes fmt/clippy with a `wip({bead_id}):` prefix, then continue."
+    )
+}
+
 /// Detect whether a supervisor is present at worker startup.
 ///
 /// This function checks for supervisor presence by examining:
@@ -3827,6 +3848,15 @@ impl Worker {
             bead.workspace.clone()
         };
 
+        // Build the notice from the adapter that will execute this attempt,
+        // including its legacy/global fallback or hard timeout policy. The
+        // prompt template intentionally receives text rather than timeout
+        // fields so custom templates can omit or reposition the instruction.
+        let prompt_deadline_notice = {
+            let adapter = self.resolve_adapter()?;
+            deadline_notice(&adapter, self.config.agent.timeout, &bead.id)
+        };
+
         let worker_name = self.worker_name.clone();
         let prompt_builder = self.prompt_builder.clone();
 
@@ -4015,6 +4045,7 @@ impl Worker {
         };
 
         let attempt_id_for_prompt = self.attempt_id.clone();
+        let prompt_deadline_notice_for_build = prompt_deadline_notice.clone();
         let mut prompt = match tokio::time::timeout(
             timeout_dur,
             tokio::task::spawn_blocking(move || {
@@ -4030,7 +4061,7 @@ impl Worker {
                         failure_count,
                         &failure_history,
                         &prior_fixes,
-                        "",
+                        &prompt_deadline_notice_for_build,
                     )
                 } else {
                     prompt_builder.build_pluck_with_history_for_attempt(
@@ -4040,7 +4071,7 @@ impl Worker {
                         attempt_id,
                         &failure_history,
                         &prior_fixes,
-                        "",
+                        &prompt_deadline_notice_for_build,
                     )
                 }
             }),
