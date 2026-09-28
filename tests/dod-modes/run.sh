@@ -142,8 +142,26 @@ if [[ ${#CHECKS[@]} -eq 2 \
 else
   bad "run_check attribution partition drifted (checks=${#CHECKS[@]}, pre-existing=${#PREEXISTING[@]}, failures=${#FAILURES[@]})"
 fi
+
+# A check can report diagnostics in both an in-flight file and a staged file.
+# The staged path must keep the whole check blocking even when another
+# diagnostic could otherwise classify it as pre-existing.
+run_check "mixed aggregate failure" bash -c \
+  'printf "src/other-worker.rs:5:2: error[E0003]: mixed pre-existing\\nsrc/staged.rs:9:3: error[E0004]: mixed attributable\\n"; exit 17' \
+  >>"$attribution_log" 2>&1
+
+if [[ ${#CHECKS[@]} -eq 3 \
+  && ${#PREEXISTING[@]} -eq 1 \
+  && ${#FAILURES[@]} -eq 2 \
+  && "${FAILURES[1]}" == "mixed aggregate failure: exit code 17" ]]; then
+  ok "a mixed staged and pre-existing failure remains blocking"
+else
+  bad "mixed diagnostic attribution drifted (checks=${#CHECKS[@]}, pre-existing=${#PREEXISTING[@]}, failures=${#FAILURES[@]})"
+fi
+
 if grep -q 'pre-existing' "$attribution_log" \
-  && grep -q 'attributable' "$attribution_log"; then
+  && grep -q 'attributable' "$attribution_log" \
+  && grep -q 'mixed attributable' "$attribution_log"; then
   ok "pre-existing and staged failure details remain visible"
 else
   bad "run_check attribution details were not both reported"
