@@ -291,7 +291,9 @@ version = 1
 # pause/resume state, retry-tier freeze and policy-promotion refusal.
 # +3 attempt archive spool layout and archive-gated retention contracts
 # (needle-af8e7b7d).
-max_tests = 4070
+# +5 attempt archive doctor, stats, and OTLP event contracts
+# (needle-d7b946f1).
+max_tests = 4075
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

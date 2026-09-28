@@ -999,6 +999,41 @@ pub struct StatsRow {
     pub effort_events: u64,
 }
 
+/// Archive handoff counters for the selected telemetry window.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveStats {
+    /// Number of attempts successfully published to the local spool.
+    pub spooled: u64,
+    /// Number of attempts whose local archive handoff failed.
+    pub archive_failed: u64,
+    /// Sum of bundle bytes reported by successful spool events.
+    pub bytes_spooled: u64,
+}
+
+/// Count archive handoffs without changing the grouping semantics of the
+/// regular stats dimensions. These events are deliberately independent of
+/// `attempt.resolved`: a failed handoff still needs to be visible.
+pub fn compute_archive_stats(events: &[crate::telemetry::TelemetryEvent]) -> ArchiveStats {
+    let mut stats = ArchiveStats::default();
+    for event in events {
+        match event.event_type.as_str() {
+            "attempt.spooled" => {
+                stats.spooled += 1;
+                stats.bytes_spooled = stats.bytes_spooled.saturating_add(
+                    event
+                        .data
+                        .get("bundle_bytes")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                );
+            }
+            "attempt.archive_failed" => stats.archive_failed += 1,
+            _ => {}
+        }
+    }
+    stats
+}
+
 impl StatsRow {
     /// Pass rate as a fraction in `[0.0, 1.0]`: verified successes over the
     /// attempts that could have earned one. Decomposed attempts are excluded
@@ -1672,6 +1707,39 @@ mod tests {
         assert_eq!(bravo.pass, 1);
         assert_eq!(bravo.fail, 1);
         assert!((bravo.pass_rate().unwrap() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compute_archive_stats_counts_handoffs_and_bytes() {
+        let events = vec![
+            make_tel_event(
+                "attempt.spooled",
+                "needle-alpha",
+                None,
+                serde_json::json!({"bundle_bytes": 128}),
+            ),
+            make_tel_event(
+                "attempt.spooled",
+                "needle-alpha",
+                None,
+                serde_json::json!({"bundle_bytes": 256}),
+            ),
+            make_tel_event(
+                "attempt.archive_failed",
+                "needle-alpha",
+                None,
+                serde_json::json!({"error": "spool unavailable"}),
+            ),
+        ];
+
+        assert_eq!(
+            compute_archive_stats(&events),
+            ArchiveStats {
+                spooled: 2,
+                archive_failed: 1,
+                bytes_spooled: 384,
+            }
+        );
     }
 
     #[test]

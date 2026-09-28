@@ -7,8 +7,9 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,208 @@ pub struct SpoolReceipt {
     pub sidecar: PathBuf,
     pub bundle_sha256: String,
     pub bundle_bytes: u64,
+}
+
+/// Read-only operational measurements for the local archive spool.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpoolDiagnostics {
+    /// Number of complete sidecars waiting in the spool.
+    pub entries: u64,
+    /// Bytes occupied by the corresponding bundles.
+    pub total_bytes: u64,
+    /// Age of the oldest complete sidecar, in seconds.
+    pub oldest_sidecar_age_secs: Option<u64>,
+    /// Age of the most recent drain completion, in seconds.
+    pub last_drain_age_secs: Option<u64>,
+    /// Whether a drain status file was found.
+    pub last_drain_present: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LastDrain {
+    finished_at: Option<String>,
+}
+
+/// Inspect a spool without modifying it.
+///
+/// A missing spool is an empty spool, which is the normal state immediately
+/// after enabling the feature. Invalid sidecars are still counted as entries
+/// so that a corrupt item cannot make queue depth look healthy; their bundle
+/// size falls back to the sidecar's declared size or the sibling bundle.
+pub fn inspect_spool(spool: &Path, now: SystemTime) -> Result<SpoolDiagnostics> {
+    if !spool.exists() {
+        return Ok(SpoolDiagnostics::default());
+    }
+
+    let mut sidecars = Vec::new();
+    collect_sidecars(spool, &mut sidecars)?;
+    let mut diagnostics = SpoolDiagnostics {
+        entries: sidecars.len() as u64,
+        ..Default::default()
+    };
+
+    for sidecar_path in sidecars {
+        if let Ok(metadata) = fs::metadata(&sidecar_path) {
+            if let Ok(modified) = metadata.modified() {
+                diagnostics.oldest_sidecar_age_secs = oldest_age(
+                    diagnostics.oldest_sidecar_age_secs,
+                    age_seconds(now, modified),
+                );
+            }
+        }
+
+        let sidecar = fs::read(&sidecar_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Sidecar>(&bytes).ok());
+        let declared_bytes = sidecar.as_ref().map(|value| value.bundle_bytes);
+        let bundle_path = sidecar
+            .as_ref()
+            .and_then(|value| safe_bundle_path(spool, &value.bundle_path))
+            .or_else(|| sibling_bundle_path(&sidecar_path));
+        diagnostics.total_bytes = diagnostics.total_bytes.saturating_add(
+            bundle_path
+                .and_then(|path| fs::metadata(path).ok().map(|metadata| metadata.len()))
+                .or(declared_bytes)
+                .unwrap_or(0),
+        );
+    }
+
+    let last_drain = spool.join("last-drain.json");
+    if last_drain.is_file() {
+        diagnostics.last_drain_present = true;
+        let finished_at = fs::read(&last_drain)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<LastDrain>(&bytes).ok())
+            .and_then(|value| value.finished_at)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+            .map(|value| {
+                UNIX_EPOCH
+                    + Duration::from_secs(value.timestamp().max(0) as u64)
+                    + Duration::from_nanos(u64::from(value.timestamp_subsec_nanos()))
+            });
+        let finished_at = finished_at.or_else(|| fs::metadata(&last_drain).ok()?.modified().ok());
+        diagnostics.last_drain_age_secs =
+            finished_at.map(|finished_at| age_seconds(now, finished_at));
+    }
+
+    Ok(diagnostics)
+}
+
+/// Count old attempt trace directories that have not reached the archive
+/// spool. This is the retention backlog that an unhealthy drain leaves behind.
+pub fn count_unspooled_attempt_dirs(
+    traces_dir: &Path,
+    retention_days_failed: u32,
+    retention_days_success: u32,
+    now: SystemTime,
+) -> Result<u64> {
+    if !traces_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut count = 0;
+    for bead_entry in fs::read_dir(traces_dir)
+        .with_context(|| format!("failed to read traces directory {}", traces_dir.display()))?
+    {
+        let bead_path = bead_entry?.path();
+        if !bead_path.is_dir() {
+            continue;
+        }
+        for attempt_entry in fs::read_dir(&bead_path)
+            .with_context(|| format!("failed to read trace directory {}", bead_path.display()))?
+        {
+            let attempt_path = attempt_entry?.path();
+            if !attempt_path.is_dir()
+                || attempt_path.join("spooled.json").is_file()
+                || !attempt_path.join("metadata.json").is_file()
+            {
+                continue;
+            }
+            let metadata = match fs::read(attempt_path.join("metadata.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            {
+                Some(metadata) => metadata,
+                None => continue,
+            };
+            let captured_at = metadata
+                .get("captured_at")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+            let Some(captured_at) = captured_at else {
+                continue;
+            };
+            let captured_at = UNIX_EPOCH
+                + Duration::from_secs(captured_at.timestamp().max(0) as u64)
+                + Duration::from_nanos(u64::from(captured_at.timestamp_subsec_nanos()));
+            let age = now.duration_since(captured_at).unwrap_or_default();
+            let exit_code = metadata
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            let retention_days = if exit_code == 0 {
+                retention_days_success
+            } else {
+                retention_days_failed
+            };
+            if age > Duration::from_secs(u64::from(retention_days) * 86400) {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn collect_sidecars(root: &Path, sidecars: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in
+        fs::read_dir(root).with_context(|| format!("failed to read spool {}", root.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_sidecars(&path, sidecars)?;
+        } else if file_type.is_file()
+            && path.file_name().and_then(|name| name.to_str()) != Some("last-drain.json")
+            && path.extension().and_then(|extension| extension.to_str()) == Some("json")
+        {
+            sidecars.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn safe_bundle_path(root: &Path, relative: &str) -> Option<PathBuf> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(root.join(relative))
+}
+
+fn sibling_bundle_path(sidecar: &Path) -> Option<PathBuf> {
+    let zstd = sidecar.with_extension("tar.zst");
+    if zstd.is_file() {
+        Some(zstd)
+    } else {
+        let tar = sidecar.with_extension("tar");
+        tar.is_file().then_some(tar)
+    }
+}
+
+fn age_seconds(now: SystemTime, then: SystemTime) -> u64 {
+    now.duration_since(then).unwrap_or_default().as_secs()
+}
+
+fn oldest_age(current: Option<u64>, candidate: u64) -> Option<u64> {
+    Some(current.map_or(candidate, |value| value.max(candidate)))
 }
 
 /// Spool one resolved attempt. A disabled archive returns without touching the
@@ -690,5 +893,78 @@ mod tests {
         assert_eq!(workspace_slug("/home/coding/NEEDLE"), "NEEDLE");
         assert_eq!(workspace_slug("/home/coding/project@v1"), "project_v1");
         assert_eq!(workspace_slug("/"), "unknown");
+    }
+
+    #[test]
+    fn spool_diagnostics_counts_complete_entries_and_stale_drain() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry_dir = temp.path().join("host/workspace/bead");
+        std::fs::create_dir_all(&entry_dir).unwrap();
+        let bundle = entry_dir.join("attempt.tar.zst");
+        std::fs::write(&bundle, [0u8; 11]).unwrap();
+        let sidecar = Sidecar {
+            schema_version: SIDECAR_SCHEMA_VERSION,
+            bundle_path: "host/workspace/bead/attempt.tar.zst".into(),
+            bundle_sha256: "hash".into(),
+            bundle_bytes: 11,
+            host: "host".into(),
+            workspace: "/workspace".into(),
+            workspace_slug: "workspace".into(),
+            bead_id: "bead".into(),
+            attempt_id: "attempt".into(),
+            provisional: false,
+            session_id: None,
+            adapter: "adapter".into(),
+            model: None,
+            worker_id: "worker".into(),
+            outcome: "verified_success".into(),
+            requested_action: None,
+            started_at: None,
+            finished_at: None,
+            contents: Vec::new(),
+        };
+        let sidecar_path = entry_dir.join("attempt.json");
+        std::fs::write(&sidecar_path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let last_drain = temp.path().join("last-drain.json");
+        std::fs::write(
+            &last_drain,
+            r#"{"finished_at":"2020-01-01T00:00:00Z","uploaded":1,"failed":0,"bytes":11}"#,
+        )
+        .unwrap();
+
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+        filetime::set_file_mtime(
+            &sidecar_path,
+            filetime::FileTime::from_system_time(now - Duration::from_secs(8 * 3600)),
+        )
+        .unwrap();
+        let diagnostics = inspect_spool(temp.path(), now).unwrap();
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.total_bytes, 11);
+        assert_eq!(diagnostics.oldest_sidecar_age_secs, Some(8 * 3600));
+        assert!(diagnostics.last_drain_present);
+        assert!(diagnostics.last_drain_age_secs.unwrap() > 0);
+    }
+
+    #[test]
+    fn unspooled_attempts_past_retention_are_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let attempt = temp.path().join("bead/attempt");
+        std::fs::create_dir_all(&attempt).unwrap();
+        std::fs::write(
+            attempt.join("metadata.json"),
+            r#"{"captured_at":"2020-01-01T00:00:00Z","exit_code":1}"#,
+        )
+        .unwrap();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+        assert_eq!(
+            count_unspooled_attempt_dirs(temp.path(), 1, 7, now).unwrap(),
+            1
+        );
+        std::fs::write(attempt.join("spooled.json"), b"{}\n").unwrap();
+        assert_eq!(
+            count_unspooled_attempt_dirs(temp.path(), 1, 7, now).unwrap(),
+            0
+        );
     }
 }

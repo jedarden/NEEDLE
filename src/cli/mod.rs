@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -4795,7 +4795,7 @@ fn cmd_stats(
     until: Option<String>,
     format: ListFormat,
 ) -> Result<()> {
-    use crate::stats::{compute_stats, StatsDimension};
+    use crate::stats::{compute_archive_stats, compute_stats, StatsDimension};
 
     let config = ConfigLoader::load_global()?;
     let log_dir = crate::state_dir::logs_dir_for(
@@ -4806,6 +4806,7 @@ fn cmd_stats(
     let since_dt = since.as_deref().map(telemetry::parse_since).transpose()?;
     let until_dt = until.as_deref().map(telemetry::parse_until).transpose()?;
     let events = telemetry::read_logs(&log_dir, since_dt, until_dt, None)?;
+    let archive_stats = compute_archive_stats(&events);
 
     let dimension = match by {
         StatsBy::TemplateVersion => StatsDimension::TemplateVersion,
@@ -4841,6 +4842,7 @@ fn cmd_stats(
         ListFormat::Table => {
             if rows.is_empty() {
                 println!("No telemetry data found.");
+                print_archive_stats(&archive_stats);
                 return Ok(());
             }
             let key_width = rows.iter().map(|r| r.key.len()).max().unwrap_or(16).max(16);
@@ -4938,6 +4940,7 @@ fn cmd_stats(
                     );
                 }
             }
+            print_archive_stats(&archive_stats);
         }
         ListFormat::Json => {
             let json_rows: Vec<serde_json::Value> = rows
@@ -4968,6 +4971,14 @@ fn cmd_stats(
     }
 
     Ok(())
+}
+
+fn print_archive_stats(stats: &crate::stats::ArchiveStats) {
+    println!();
+    println!(
+        "ATTEMPT ARCHIVE  SPOOLED {:>8}  ARCHIVE FAILED {:>8}  BYTES SPOOLED {:>12}",
+        stats.spooled, stats.archive_failed, stats.bytes_spooled
+    );
 }
 
 /// `needle supervise` — run the fleet supervisor daemon.
@@ -6700,6 +6711,88 @@ fn doctor_check_telemetry_logs(config: &Config, needle_home: &Path, repair: bool
     }
 }
 
+/// Report the local attempt-archive handoff without ever creating or
+/// repairing spool state. The disabled branch is intentionally first: the
+/// feature's default must not touch the configured spool path at all.
+fn doctor_check_attempt_archive(config: &Config, workspace_root: &Path) -> CheckResult {
+    if !config.attempt_archive.enabled {
+        return CheckResult::pass("Attempt archive", "attempt archive: disabled");
+    }
+
+    let spool = crate::state_dir::spool_dir_under_override().unwrap_or_else(|| {
+        PathBuf::from(crate::util::expand_tilde(
+            &config.attempt_archive.spool_dir.to_string_lossy(),
+        ))
+    });
+    let diagnostics = match crate::attempt_archive::inspect_spool(&spool, SystemTime::now()) {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => {
+            return CheckResult::warn(
+                "Attempt archive",
+                format!("cannot inspect spool {}: {error:#}", spool.display()),
+            )
+            .with_fix("drain timer not running or failing; see docs/attempt-archive.md");
+        }
+    };
+    let unspooled = match crate::attempt_archive::count_unspooled_attempt_dirs(
+        &workspace_root.join(".beads").join("traces"),
+        config.strands.learning.trace_retention_failed_days,
+        config.strands.learning.trace_retention_success_days,
+        SystemTime::now(),
+    ) {
+        Ok(count) => count,
+        Err(error) => {
+            return CheckResult::warn(
+                "Attempt archive",
+                format!("cannot inspect retained attempt traces: {error:#}"),
+            )
+            .with_fix("drain timer not running or failing; see docs/attempt-archive.md");
+        }
+    };
+
+    let threshold_secs = config
+        .attempt_archive
+        .doctor_warn_after_hours
+        .saturating_mul(3600);
+    let stale_bundle = diagnostics
+        .oldest_sidecar_age_secs
+        .is_some_and(|age| age > threshold_secs);
+    let stale_drain = !diagnostics.last_drain_present
+        || diagnostics
+            .last_drain_age_secs
+            .is_none_or(|age| age > threshold_secs);
+    let oldest_age = diagnostics
+        .oldest_sidecar_age_secs
+        .map(format_duration)
+        .unwrap_or_else(|| "none".to_string());
+    let last_drain_age = if diagnostics.last_drain_present {
+        diagnostics
+            .last_drain_age_secs
+            .map(format_duration)
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        "never".to_string()
+    };
+    let message = format!(
+        "{} spool entr{}; {} bytes; oldest bundle age {}; last drain age {}; {} unspooled attempt dir(s) past retention",
+        diagnostics.entries,
+        if diagnostics.entries == 1 { "y" } else { "ies" },
+        diagnostics.total_bytes,
+        oldest_age,
+        last_drain_age,
+        unspooled,
+    );
+    if stale_bundle || stale_drain {
+        CheckResult::warn("Attempt archive", message)
+            .with_detail(vec![
+                "drain timer not running or failing; see docs/attempt-archive.md".to_string(),
+            ])
+            .with_fix("drain timer not running or failing; see docs/attempt-archive.md")
+    } else {
+        CheckResult::pass("Attempt archive", message)
+    }
+}
+
 /// Check that all gate command paths exist.
 ///
 /// Validates both legacy `verification:` entries and new `gates:` configurations.
@@ -6906,6 +6999,10 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
 
     // Telemetry logs
     results.push(doctor_check_telemetry_logs(&config, &needle_home, repair));
+
+    // Optional attempt archive spool and drain health. This check is a pure
+    // read when enabled and does not even resolve the spool path when off.
+    results.push(doctor_check_attempt_archive(&config, &workspace_root));
 
     // Calculate summary.
     let fails = results

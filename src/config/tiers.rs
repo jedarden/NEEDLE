@@ -524,6 +524,10 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         "attempt_archive.prune_local_after_spool",
         ReloadTier::Rebuild,
     ),
+    (
+        "attempt_archive.doctor_warn_after_hours",
+        ReloadTier::Rebuild,
+    ),
 ];
 
 #[cfg(test)]
@@ -579,6 +583,7 @@ mod tests {
             "attempt_archive.include.prompt",
             "attempt_archive.compression",
             "attempt_archive.prune_local_after_spool",
+            "attempt_archive.doctor_warn_after_hours",
         ] {
             assert_eq!(get_tier_for_key(key), Some(ReloadTier::Rebuild), "{key}");
         }

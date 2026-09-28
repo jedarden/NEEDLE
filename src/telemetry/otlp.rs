@@ -1660,6 +1660,7 @@ impl OtlpSink {
             | "fleet.memory_low" // System memory below threshold
             | "worker.admission_blocked" // launch refused: host above CPU/memory policy
             | "bead.mitosis.child_count_warning" // runaway decomposition tripwire
+            | "attempt.archive_failed" // local archive handoff failed
             => (Severity::Warn, "WARN"),
 
             // INFO events (default)
@@ -3471,6 +3472,14 @@ mod tests {
             assert_eq!(severity, Severity::Warn, "{event_type}");
             assert_eq!(text, "WARN", "{event_type}");
         }
+    }
+
+    #[tokio::test]
+    async fn test_severity_for_archive_failure_is_warn() {
+        let sink = make_test_sink();
+        let (severity, text) = sink.severity_for_event("attempt.archive_failed");
+        assert_eq!(severity, Severity::Warn);
+        assert_eq!(text, "WARN");
     }
 
     #[tokio::test]

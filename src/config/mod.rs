@@ -7301,6 +7301,11 @@ pub struct AttemptArchiveConfig {
     /// exactly as it does with the archive disabled.
     #[serde(default = "AttemptArchiveConfig::default_prune_local_after_spool")]
     pub prune_local_after_spool: bool,
+    /// Age threshold used by `needle doctor` for stale spool and drain
+    /// warnings. Six hours is long enough for normal timer jitter while still
+    /// surfacing a dead drain during an operator shift.
+    #[serde(default = "AttemptArchiveConfig::default_doctor_warn_after_hours")]
+    pub doctor_warn_after_hours: u64,
 }
 
 impl Default for AttemptArchiveConfig {
@@ -7311,6 +7316,7 @@ impl Default for AttemptArchiveConfig {
             include: AttemptArchiveInclude::default(),
             compression: ArchiveCompression::default(),
             prune_local_after_spool: Self::default_prune_local_after_spool(),
+            doctor_warn_after_hours: Self::default_doctor_warn_after_hours(),
         }
     }
 }
@@ -7322,6 +7328,10 @@ impl AttemptArchiveConfig {
 
     pub fn default_prune_local_after_spool() -> bool {
         true
+    }
+
+    pub fn default_doctor_warn_after_hours() -> u64 {
+        6
     }
 }
 
@@ -9059,6 +9069,7 @@ fn validate_attempt_archive_field(
         "include",
         "compression",
         "prune_local_after_spool",
+        "doctor_warn_after_hours",
     ];
     if !valid_fields.contains(&field) {
         return Err(ConfigError::new(
@@ -10223,6 +10234,10 @@ impl ConfigLoader {
             (
                 "attempt_archive.prune_local_after_spool",
                 config.attempt_archive.prune_local_after_spool.to_string(),
+            ),
+            (
+                "attempt_archive.doctor_warn_after_hours",
+                config.attempt_archive.doctor_warn_after_hours.to_string(),
             ),
             (
                 "transitions.version",
@@ -12365,6 +12380,7 @@ transitions:
         assert!(a.include.prompt);
         assert_eq!(a.compression, ArchiveCompression::Zstd);
         assert!(a.prune_local_after_spool);
+        assert_eq!(a.doctor_warn_after_hours, 6);
         assert_eq!(*a, AttemptArchiveConfig::default());
     }
 
@@ -12380,6 +12396,7 @@ attempt_archive:
     prompt: true
   compression: none
   prune_local_after_spool: false
+  doctor_warn_after_hours: 12
 ";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         let a = config.attempt_archive.clone();
@@ -12387,6 +12404,7 @@ attempt_archive:
         assert!(!a.include.harness_transcript);
         assert_eq!(a.compression, ArchiveCompression::None);
         assert!(!a.prune_local_after_spool);
+        assert_eq!(a.doctor_warn_after_hours, 12);
 
         // Serialize -> deserialize is identity.
         let dumped = serde_yaml::to_string(&a).unwrap();
@@ -12435,6 +12453,7 @@ attempt_archive:
             "attempt_archive.include.prompt",
             "attempt_archive.compression",
             "attempt_archive.prune_local_after_spool",
+            "attempt_archive.doctor_warn_after_hours",
         ] {
             assert!(
                 validate_key_path(ok).is_ok(),
@@ -12466,6 +12485,7 @@ attempt_archive:
             "attempt_archive.include.trace: true",
             "attempt_archive.compression: zstd",
             "attempt_archive.prune_local_after_spool: true",
+            "attempt_archive.doctor_warn_after_hours: 6",
         ] {
             assert!(
                 lines.iter().any(|l| l.starts_with(prefix)),

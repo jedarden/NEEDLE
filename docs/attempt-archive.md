@@ -36,6 +36,7 @@ attempt_archive:
     prompt: true
   compression: zstd              # zstd (default) or none
   prune_local_after_spool: true
+  doctor_warn_after_hours: 6     # stale spool/drain warning threshold
 ```
 
 With `enabled: false`, every other key is inert. With `enabled: true`, the
@@ -43,6 +44,8 @@ producer writes only to `spool_dir`; it still does not upload anything. The
 spool can therefore be used as a local archive without installing a drain.
 `prune_local_after_spool` controls retention of the source trace after a
 complete local spool pair has been accepted; it does not delete a spool pair.
+`doctor_warn_after_hours` controls when `needle doctor` warns about the oldest
+queued sidecar or the age of the last drain completion.
 
 ## A6 spool contract (verbatim)
 

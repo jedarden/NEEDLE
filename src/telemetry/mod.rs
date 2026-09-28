@@ -7485,6 +7485,33 @@ mod tests {
     }
 
     #[test]
+    fn attempt_archive_events_keep_their_otlp_event_types_and_payloads() {
+        let spooled = EventKind::AttemptSpooled {
+            attempt_id: "attempt-1".to_string(),
+            bundle_bytes: 4096,
+            duration_ms: 12,
+        };
+        assert_eq!(spooled.event_type(), "attempt.spooled");
+        assert_eq!(
+            spooled.to_data(),
+            serde_json::json!({
+                "attempt_id": "attempt-1",
+                "bundle_bytes": 4096,
+                "duration_ms": 12,
+            })
+        );
+
+        let failed = EventKind::AttemptArchiveFailed {
+            attempt_id: "attempt-2".to_string(),
+            error: "spool unavailable".to_string(),
+        };
+        assert_eq!(failed.event_type(), "attempt.archive_failed");
+        let event = Telemetry::new("needle-test".to_string()).make_event(&failed, Utc::now());
+        assert_eq!(event.event_type, "attempt.archive_failed");
+        assert_eq!(event.data["attempt_id"], "attempt-2");
+    }
+
+    #[test]
     fn test_execution_started_serializes_start_timestamp() {
         let start_timestamp = "2026-09-14T10:30:00.123Z";
         let kind = EventKind::TestExecutionStarted {

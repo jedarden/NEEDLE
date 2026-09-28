@@ -1407,6 +1407,10 @@ attempt_archive:
   # When true, trace retention may delete an attempt directory once its bundle
   # has been accepted by the spool. When false, retention is unchanged.
   prune_local_after_spool: true
+
+  # `needle doctor` warns when queued bundles or the last drain are older than
+  # this many hours (default: 6).
+  doctor_warn_after_hours: 6
 ```
 
 **Reload tier:** B (rebuild) for every key — a change takes effect at the next
