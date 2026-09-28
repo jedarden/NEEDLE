@@ -125,10 +125,13 @@ STAGED_PATHS=(src/staged.rs)
 CHECKS=()
 FAILURES=()
 PREEXISTING=()
+attribution_log="$test_tmp_root/attribution.log"
 run_check "pre-existing aggregate failure" bash -c \
-  'printf "src/other-worker.rs:4:2: error[E0001]: pre-existing\\n"; exit 11'
+  'printf "src/other-worker.rs:4:2: error[E0001]: pre-existing\\n"; exit 11' \
+  >>"$attribution_log" 2>&1
 run_check "staged aggregate failure" bash -c \
-  'printf "src/staged.rs:8:3: error[E0002]: attributable\\n"; exit 13'
+  'printf "src/staged.rs:8:3: error[E0002]: attributable\\n"; exit 13' \
+  >>"$attribution_log" 2>&1
 
 if [[ ${#CHECKS[@]} -eq 2 \
   && ${#PREEXISTING[@]} -eq 1 \
@@ -138,6 +141,12 @@ if [[ ${#CHECKS[@]} -eq 2 \
   ok "run_check separates pre-existing failures from staged-file failures"
 else
   bad "run_check attribution partition drifted (checks=${#CHECKS[@]}, pre-existing=${#PREEXISTING[@]}, failures=${#FAILURES[@]})"
+fi
+if grep -q 'pre-existing' "$attribution_log" \
+  && grep -q 'attributable' "$attribution_log"; then
+  ok "pre-existing and staged failure details remain visible"
+else
+  bad "run_check attribution details were not both reported"
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
