@@ -787,6 +787,44 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
             .into_iter()
             .collect(),
         "claim_auto" => [("actor", "worker-01")].into_iter().collect(),
+        "claim_fenced" | "renew_claim_fenced" => [
+            ("id", "test-id"),
+            ("actor", "worker-01"),
+            ("lease_ttl", "300"),
+        ]
+        .into_iter()
+        .collect(),
+        "release_fenced" | "update_fenced" => [
+            ("id", "test-id"),
+            ("if_revision", "3"),
+            ("status", "in_progress"),
+        ]
+        .into_iter()
+        .collect(),
+        "close_fenced" => [("id", "test-id"), ("reason", "Done"), ("if_revision", "3")]
+            .into_iter()
+            .collect(),
+        "resolve_fenced" => [
+            ("id", "test-id"),
+            ("attempt_id", "0192-attempt"),
+            ("outcome", "work_failure"),
+            ("actor", "worker-01"),
+            ("model", "glm-5.3-flash"),
+            ("harness", "needle"),
+            ("harness_version", "0.6.1"),
+            ("resolve_reason", "gate:default_rust"),
+            ("evidence_ref", "commit:abc123"),
+            ("if_revision", "3"),
+        ]
+        .into_iter()
+        .collect(),
+        "resource_lock_fenced" => [
+            ("id", "test-id"),
+            ("resource_key", "workspace:/tmp/test"),
+            ("resource_action", "acquire"),
+        ]
+        .into_iter()
+        .collect(),
         "label_add" | "label_remove" => [("id", "test-id"), ("label", "bug")].into_iter().collect(),
         "create" => [
             ("title", "Test"),
