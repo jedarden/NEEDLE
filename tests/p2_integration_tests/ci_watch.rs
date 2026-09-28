@@ -279,7 +279,7 @@ impl FakeForgejo {
         self.statuses.lock().unwrap().insert(
             revision.to_string(),
             vec![serde_json::json!({
-                "state": state,
+                "status": state,
                 "context": "iad-ci/needle-ci",
                 "sha": revision,
                 "description": description,

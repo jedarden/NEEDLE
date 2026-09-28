@@ -407,7 +407,9 @@ impl ForgejoStatusSource {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ForgejoCommitStatus {
-    #[serde(default)]
+    // Forgejo's commit-status response calls this field `status`; older
+    // Gitea-compatible fixtures and deployments used `state`.
+    #[serde(default, alias = "status")]
     state: String,
     #[serde(default)]
     context: String,
@@ -1080,14 +1082,14 @@ mod tests {
 
     #[test]
     fn forgejo_status_context_and_states_map_to_circuit_verdicts() {
-        let status = ForgejoCommitStatus {
-            state: "failure".to_string(),
-            context: "iad-ci/needle-ci".to_string(),
-            sha: Some("abc123".to_string()),
-            description: Some("cargo check failed".to_string()),
-            updated_at: Some("2026-09-17T12:00:00Z".to_string()),
-            created_at: None,
-        };
+        let status: ForgejoCommitStatus = serde_json::from_value(serde_json::json!({
+            "status": "failure",
+            "context": "iad-ci/needle-ci",
+            "sha": "abc123",
+            "description": "cargo check failed",
+            "updated_at": "2026-09-17T12:00:00Z"
+        }))
+        .unwrap();
         let run = forgejo_status_run(&status, "needle-ci", "fallback");
         assert_eq!(run.status(), BuildStatus::Failing);
         assert_eq!(run.commit_sha.as_deref(), Some("abc123"));
