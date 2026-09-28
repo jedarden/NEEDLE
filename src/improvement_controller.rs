@@ -22,7 +22,7 @@
 //! visible, none admitted — then one admitted L4 proposal per day. Both are
 //! [`AdmissionPolicy`] settings, and the default is shadow.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -187,13 +187,17 @@ pub async fn submit(
                     .unwrap_or_default()
             })
     };
+    let controller_available = |_proposal: &ImprovementProposal| false;
 
     let world = AdmissionWorld {
         owner_of: &owner_of,
         non_executable: &non_executable,
         owning_workspace: &owning,
         admitted_today: admitted_today(journal, ctx.now),
-        open_admitted: 0,
+        open_admitted: open_admitted(journal)?,
+        // No L1–L3 controller currently consumes improvement decisions. Keep
+        // those proposals visible as explicit refusals until one is wired in.
+        controller_available: &controller_available,
     };
 
     let lookup = |signature: &str| index.get(signature).cloned();
@@ -217,10 +221,10 @@ pub async fn submit(
                     continue;
                 };
                 match route {
-                    // L1–L3 belong to the controller that owns the envelope —
-                    // routing, experiments, numeric bounds. Applying the change
-                    // here would put two writers on one knob, so the decision
-                    // is recorded and the owning controller acts on it.
+                    // Admission only selects routes a registered consumer can
+                    // apply. The live adapter currently marks every L1–L3
+                    // controller unavailable, so this arm is reserved for a
+                    // future controller wired into this submission path.
                     AdmissionRoute::Controller { .. } => {
                         summary.routed.push(record.signature.clone());
                     }
@@ -360,6 +364,50 @@ fn admitted_today(journal: &Path, now: DateTime<Utc>) -> usize {
         .iter()
         .filter(|record| record.decision.is_admitted())
         .count()
+}
+
+/// Count admitted proposals whose receipt has not reached a terminal outcome.
+///
+/// Admission decisions and receipts are append-only. Holds do not complete an
+/// admission, so only a promote or withdraw receipt releases backpressure.
+fn open_admitted(journal: &Path) -> Result<usize> {
+    let decisions = crate::cli::improvements::read_decisions(journal).with_context(|| {
+        format!(
+            "failed to read improvement decisions from {}",
+            journal.display()
+        )
+    })?;
+    let receipts_path = journal
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("receipts.jsonl");
+    let receipts =
+        crate::learning::improvement::read_receipts(&receipts_path).with_context(|| {
+            format!(
+                "failed to read improvement receipts from {}",
+                receipts_path.display()
+            )
+        })?;
+    let terminal: BTreeSet<&str> = receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.applied_exposure.is_some()
+                && matches!(
+                    receipt.decision,
+                    crate::learning::improvement::ReceiptDecision::Promote
+                        | crate::learning::improvement::ReceiptDecision::Withdraw { .. }
+                )
+        })
+        .map(|receipt| receipt.signature.as_str())
+        .collect();
+
+    Ok(decisions
+        .iter()
+        .filter(|record| record.decision.is_admitted())
+        .filter(|record| !terminal.contains(record.signature.as_str()))
+        .map(|record| record.signature.as_str())
+        .collect::<BTreeSet<_>>()
+        .len())
 }
 
 /// The title of the bead an admitted L4 proposal creates.

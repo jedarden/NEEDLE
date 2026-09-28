@@ -8,9 +8,10 @@
 use chrono::{DateTime, TimeZone, Utc};
 use needle::evidence_routing::LedgerRow;
 use needle::learning::improvement::{
-    append_receipt, decide_receipt, measure_cohort, read_receipts, revert_proposal,
-    AcceptanceMeasure, Cohort, CohortMeasures, Contamination, Direction, EvidenceClass,
-    EvidenceKind, EvidenceRef, ImpactMeasure, ImprovementProposal, ProposalScope, ReceiptDecision,
+    append_applied_exposure, append_receipt, decide_receipt, measure_cohort,
+    read_applied_exposures, read_receipts, revert_proposal, AcceptanceMeasure, AppliedExposure,
+    Cohort, CohortMeasures, Contamination, Direction, EvidenceClass, EvidenceKind, EvidenceRef,
+    ImpactMeasure, ImprovementProposal, ProposalScope, ReceiptDecision, ReceiptEvidence,
     ReceiptThresholds, Rollback, IMPACT_RECEIPT_SCHEMA_VERSION, RECEIPT_REF_NAMESPACE,
 };
 use serde_json::json;
@@ -68,13 +69,39 @@ fn thresholds() -> ReceiptThresholds {
     ReceiptThresholds::default()
 }
 
+/// Run a receipt with the exposure record the prior test contract assumes.
+fn decide_with_exposure(
+    proposal: &ImprovementProposal,
+    cohort: Cohort,
+    baseline: CohortMeasures,
+    observed: CohortMeasures,
+    contamination: Vec<Contamination>,
+    thresholds: &ReceiptThresholds,
+    decided_at: DateTime<Utc>,
+) -> needle::learning::improvement::ImpactReceipt {
+    let exposure = AppliedExposure::new(proposal.signature.clone(), "fixture-controller", at(20));
+    let exposures = [exposure];
+    decide_receipt(
+        proposal,
+        ReceiptEvidence {
+            applied_exposures: &exposures,
+            cohort,
+            baseline,
+            observed,
+        },
+        contamination,
+        thresholds,
+        decided_at,
+    )
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // The three outcomes the acceptance criteria name
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn an_improved_cohort_promotes() {
-    let receipt = decide_receipt(
+    let receipt = decide_with_exposure(
         &proposal(),
         cohort(),
         window(20, 4),  // 20%
@@ -98,9 +125,36 @@ fn an_improved_cohort_promotes() {
 }
 
 #[test]
+fn a_missing_applied_exposure_holds_even_when_the_cohort_would_promote() {
+    let receipt = decide_receipt(
+        &proposal(),
+        ReceiptEvidence {
+            applied_exposures: &[],
+            cohort: cohort(),
+            baseline: window(20, 4),
+            observed: window(20, 18),
+        },
+        Vec::new(),
+        &thresholds(),
+        at(21),
+    );
+
+    assert!(matches!(
+        &receipt.decision,
+        ReceiptDecision::Hold { detail }
+            if detail.contains("no applied-exposure record")
+    ));
+    assert!(receipt.applied_exposure.is_none());
+    assert!(
+        revert_proposal(&receipt, &proposal(), at(21)).is_none(),
+        "a receipt without exposure cannot trigger promotion or withdrawal"
+    );
+}
+
+#[test]
 fn an_unchanged_cohort_withdraws_and_emits_exactly_one_revert_proposal() {
     let original = proposal();
-    let receipt = decide_receipt(
+    let receipt = decide_with_exposure(
         &original,
         cohort(),
         window(20, 8),
@@ -137,7 +191,7 @@ fn an_unchanged_cohort_withdraws_and_emits_exactly_one_revert_proposal() {
 #[test]
 fn a_promoted_receipt_emits_no_revert_proposal() {
     let original = proposal();
-    let receipt = decide_receipt(
+    let receipt = decide_with_exposure(
         &original,
         cohort(),
         window(20, 4),
@@ -154,7 +208,7 @@ fn a_contaminated_cohort_holds_rather_than_deciding() {
     let original = proposal();
     // The measures would otherwise promote — contamination must override that,
     // not merely break a tie.
-    let receipt = decide_receipt(
+    let receipt = decide_with_exposure(
         &original,
         cohort(),
         window(20, 4),
@@ -178,7 +232,7 @@ fn a_contaminated_cohort_holds_rather_than_deciding() {
 
 #[test]
 fn a_concurrent_proposal_on_the_same_cohort_also_holds() {
-    let receipt = decide_receipt(
+    let receipt = decide_with_exposure(
         &proposal(),
         cohort(),
         window(20, 12),
@@ -197,7 +251,7 @@ fn a_concurrent_proposal_on_the_same_cohort_also_holds() {
 
 #[test]
 fn a_cohort_too_small_to_decide_holds() {
-    let receipt = decide_receipt(
+    let receipt = decide_with_exposure(
         &proposal(),
         cohort(),
         window(3, 0),
@@ -235,7 +289,7 @@ fn a_decrease_measure_is_judged_in_its_own_direction() {
         ..CohortMeasures::default()
     };
 
-    let receipt = decide_receipt(
+    let receipt = decide_with_exposure(
         &recurrence,
         cohort(),
         before,
@@ -372,7 +426,7 @@ fn receipts_survive_a_restart_unchanged_and_are_never_rewritten() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("improvements/receipts.jsonl");
 
-    let first = decide_receipt(
+    let first = decide_with_exposure(
         &proposal(),
         cohort(),
         window(20, 4),
@@ -381,7 +435,7 @@ fn receipts_survive_a_restart_unchanged_and_are_never_rewritten() {
         &thresholds(),
         at(21),
     );
-    let second = decide_receipt(
+    let second = decide_with_exposure(
         &proposal(),
         cohort(),
         window(20, 12),
@@ -410,7 +464,7 @@ fn receipts_survive_a_restart_unchanged_and_are_never_rewritten() {
 
     // A third append about the same proposal adds a record; it does not edit
     // either existing one.
-    let third = decide_receipt(
+    let third = decide_with_exposure(
         &proposal(),
         cohort(),
         window(20, 12),
@@ -429,6 +483,33 @@ fn receipts_survive_a_restart_unchanged_and_are_never_rewritten() {
 }
 
 #[test]
+fn applied_exposure_records_are_persisted_and_read_for_receipt_decisions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("improvements/exposures.jsonl");
+    let source = proposal();
+    let exposure = AppliedExposure::new(source.signature.clone(), "fixture-controller", at(20));
+
+    append_applied_exposure(&path, &exposure).expect("append exposure");
+    let read = read_applied_exposures(&path).expect("read exposures");
+    assert_eq!(read, vec![exposure]);
+
+    let receipt = decide_receipt(
+        &source,
+        ReceiptEvidence {
+            applied_exposures: &read,
+            cohort: cohort(),
+            baseline: window(20, 4),
+            observed: window(20, 12),
+        },
+        Vec::new(),
+        &thresholds(),
+        at(21),
+    );
+    assert_eq!(receipt.decision, ReceiptDecision::Promote);
+    assert_eq!(receipt.applied_exposure, Some(read[0].clone()));
+}
+
+#[test]
 fn reading_a_missing_receipts_file_is_empty_rather_than_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let receipts = read_receipts(&dir.path().join("nothing/here.jsonl")).expect("ok");
@@ -441,7 +522,7 @@ fn one_malformed_line_does_not_make_the_other_receipts_unreadable() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("receipts.jsonl");
 
-    let good = decide_receipt(
+    let good = decide_with_exposure(
         &proposal(),
         cohort(),
         window(20, 4),

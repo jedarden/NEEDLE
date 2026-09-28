@@ -68,7 +68,7 @@ pub fn live_policy() -> AdmissionPolicy {
 }
 
 /// The state of the world admission reads, as a fixture.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct World {
     /// An owner returned for every proposal.
     pub owner: Option<String>,
@@ -80,6 +80,23 @@ pub struct World {
     pub admitted_today: usize,
     /// Admitted proposals still open.
     pub open_admitted: usize,
+    /// Whether this fixture registers an owning controller for L1–L3 routes.
+    pub controller_available: bool,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        Self {
+            owner: None,
+            owner_for: None,
+            non_executable: false,
+            admitted_today: 0,
+            open_admitted: 0,
+            // Pure policy tests model the controller as available unless a
+            // case explicitly exercises the missing-controller refusal.
+            controller_available: true,
+        }
+    }
 }
 
 /// Rank `proposals` neutrally and run admission over them.
@@ -145,6 +162,10 @@ pub fn run(
             .cloned()
             .unwrap_or_else(|| "NEEDLE".to_string())
     };
+    let controller_available_flag = world.controller_available;
+    let controller_available = move |proposal: &ImprovementProposal| {
+        controller_available_flag && proposal.authority.applied_by_controller()
+    };
 
     let index: std::collections::BTreeMap<String, ImprovementProposal> = proposals
         .iter()
@@ -156,6 +177,7 @@ pub fn run(
         owner_of: &owner_of,
         non_executable: &non_executable,
         owning_workspace: &owning_workspace,
+        controller_available: &controller_available,
         admitted_today: world.admitted_today,
         open_admitted: world.open_admitted,
     };

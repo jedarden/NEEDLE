@@ -69,6 +69,27 @@ fn an_l1_proposal_is_admitted_to_its_owning_controller_rather_than_a_bead() {
 }
 
 #[test]
+fn a_controller_route_without_a_consumer_is_refused_before_budget_accounting() {
+    let proposals = vec![proposal(EvidenceClass::WorkspaceAdapterRegret, "pdftract")];
+    let world = World {
+        controller_available: false,
+        admitted_today: 1,
+        ..World::default()
+    };
+    let records = run(&proposals, &live_policy(), world);
+
+    assert_eq!(
+        records[0].decision,
+        AdmissionDecision::Refused {
+            reason: RefusalReason::NoOwningController {
+                authority: AuthorityLevel::L1
+            }
+        },
+        "an unavailable controller is reported even if the daily budget is spent"
+    );
+}
+
+#[test]
 fn an_l5_proposal_is_refused_until_gate_d() {
     let proposals = vec![l5_proposal()];
 
@@ -253,6 +274,10 @@ fn every_refusal_reason_carries_a_stable_wire_tag() {
             detail: "x".to_string(),
         }
         .tag(),
+        RefusalReason::NoOwningController {
+            authority: AuthorityLevel::L1,
+        }
+        .tag(),
         RefusalReason::ShadowMode.tag(),
     ];
     assert_eq!(
@@ -264,6 +289,7 @@ fn every_refusal_reason_carries_a_stable_wire_tag() {
             "backpressure",
             "authority_not_permitted",
             "not_executable",
+            "no_owning_controller",
             "shadow_mode",
         ]
     );

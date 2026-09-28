@@ -8,7 +8,7 @@
 //! they can see what was admitted. A proposal that vanished because a budget
 //! was full looks identical, from the outside, to a generator that never ran.
 //!
-//! The four things admission enforces, in the order they are checked:
+//! The admission checks, in the order they are checked:
 //!
 //! 1. **Authority.** L5 is refused until Gate D (plan section 9). This is
 //!    checked first because no amount of budget or novelty makes a
@@ -17,9 +17,12 @@
 //!    already owns unchanged retries (R1/R2), operator overrides (N-T20) and
 //!    several other classes; a generator that filed its own bead for owned
 //!    evidence would recreate the duplicate-work failure ADR-015 documents.
-//! 3. **Backpressure.** If admitted work is already piling up unfinished, more
+//! 3. **Shadow and controller availability.** Shadow runs admit nothing, and a
+//!    live controller-routed proposal is refused when no controller can apply
+//!    it.
+//! 4. **Backpressure.** If admitted work is already piling up unfinished, more
 //!    proposals make the pile deeper, not the factory faster.
-//! 4. **Budget.** `improvements.admission.per_day`, default 1.
+//! 5. **Budget.** `improvements.admission.per_day`, default 1.
 //!
 //! Pure: callers pass the world in as [`AdmissionWorld`] and a timestamp.
 
@@ -116,6 +119,11 @@ pub enum RefusalReason {
         /// The executability failure, rendered.
         detail: String,
     },
+    /// No controller is registered to apply this L1–L3 proposal.
+    NoOwningController {
+        /// The controller authority level requested by the proposal.
+        authority: AuthorityLevel,
+    },
     /// Shadow mode: decided, deliberately not admitted.
     ShadowMode,
 }
@@ -130,6 +138,7 @@ impl RefusalReason {
             RefusalReason::Backpressure { .. } => "backpressure",
             RefusalReason::AuthorityNotPermitted { .. } => "authority_not_permitted",
             RefusalReason::NotExecutable { .. } => "not_executable",
+            RefusalReason::NoOwningController { .. } => "no_owning_controller",
             RefusalReason::ShadowMode => "shadow_mode",
         }
     }
@@ -184,6 +193,10 @@ pub struct AdmissionWorld<'a> {
     pub non_executable: &'a dyn Fn(&ImprovementProposal) -> Option<NonExecutable>,
     /// Resolves the workspace whose store owns an L4 bead.
     pub owning_workspace: &'a dyn Fn(&ImprovementProposal) -> String,
+    /// Whether a registered controller can apply this proposal's L1–L3
+    /// change. The submission adapter reports false for routes it cannot
+    /// consume.
+    pub controller_available: &'a dyn Fn(&ImprovementProposal) -> bool,
     /// How many proposals have already been admitted today.
     pub admitted_today: usize,
     /// How many admitted proposals are still open.
@@ -264,7 +277,23 @@ fn decide(
         };
     }
 
-    // 4. Backpressure, then budget.
+    // 4. Shadow still reports that the run was observational. In live mode,
+    //    refuse controller routes that have no consumer before they can use
+    //    either backpressure capacity or a daily admission slot.
+    if policy.shadow {
+        return AdmissionDecision::Refused {
+            reason: RefusalReason::ShadowMode,
+        };
+    }
+    if proposal.authority.applied_by_controller() && !(world.controller_available)(proposal) {
+        return AdmissionDecision::Refused {
+            reason: RefusalReason::NoOwningController {
+                authority: proposal.authority,
+            },
+        };
+    }
+
+    // 5. Backpressure, then budget.
     if world.open_admitted >= policy.max_open_admitted {
         return AdmissionDecision::Refused {
             reason: RefusalReason::Backpressure {
@@ -278,15 +307,6 @@ fn decide(
             reason: RefusalReason::BudgetExhausted {
                 per_day: policy.per_day,
             },
-        };
-    }
-
-    // 5. Shadow mode is last, so a shadow run still reports exactly which
-    //    proposal *would* have been admitted rather than refusing everything
-    //    at the door.
-    if policy.shadow {
-        return AdmissionDecision::Refused {
-            reason: RefusalReason::ShadowMode,
         };
     }
 

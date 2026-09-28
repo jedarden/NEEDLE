@@ -12,8 +12,9 @@ use needle::cli::improvements::{
 };
 use needle::learning::improvement::{
     decide_receipt, read_receipts, AcceptanceMeasure, AdmissionDecision, AdmissionRecord,
-    AdmissionRoute, Cohort, CohortMeasures, Direction, EvidenceClass, EvidenceKind, EvidenceRef,
-    ImpactMeasure, ImprovementProposal, ProposalScope, ReceiptThresholds, RefusalReason, Rollback,
+    AdmissionRoute, AppliedExposure, Cohort, CohortMeasures, Direction, EvidenceClass,
+    EvidenceKind, EvidenceRef, ImpactMeasure, ImprovementProposal, ProposalScope, ReceiptEvidence,
+    ReceiptThresholds, RefusalReason, Rollback,
 };
 
 fn at(day: u32) -> DateTime<Utc> {
@@ -58,11 +59,19 @@ fn window(total: u64, verified: u64) -> CohortMeasures {
 /// A report with one of everything, so both renderers are exercised fully.
 fn report() -> ImprovementsReport {
     let subject = proposal();
+    let exposures = [AppliedExposure::new(
+        subject.signature.clone(),
+        "fixture-controller",
+        at(20),
+    )];
     let receipt = decide_receipt(
         &subject,
-        Cohort::from_scope(&subject.scope, vec!["needle-aaaa1111".to_string()]),
-        window(20, 4),
-        window(20, 12),
+        ReceiptEvidence {
+            applied_exposures: &exposures,
+            cohort: Cohort::from_scope(&subject.scope, vec!["needle-aaaa1111".to_string()]),
+            baseline: window(20, 4),
+            observed: window(20, 12),
+        },
         Vec::new(),
         &ReceiptThresholds::default(),
         at(21),

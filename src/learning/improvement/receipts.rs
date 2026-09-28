@@ -43,13 +43,65 @@ use crate::evidence_routing::LedgerRow;
 use crate::state_dir;
 
 /// Schema version of a persisted receipt.
-pub const IMPACT_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const IMPACT_RECEIPT_SCHEMA_VERSION: u32 = 2;
 
 /// bead-rs ref namespace linking a receipt to the bead it judged.
 pub const RECEIPT_REF_NAMESPACE: &str = "needle-receipt";
 
 /// File receipts are appended to, under the state directory.
 pub const RECEIPTS_FILE: &str = "improvements/receipts.jsonl";
+
+/// File containing append-only records that a proposal actually reached
+/// exposure.
+pub const APPLIED_EXPOSURES_FILE: &str = "improvements/exposures.jsonl";
+
+/// Schema version of a recorded applied exposure.
+pub const APPLIED_EXPOSURE_SCHEMA_VERSION: u32 = 1;
+
+/// Evidence that the change addressed by a proposal was applied.
+///
+/// Receipt decisions require this record. Admission alone is not exposure:
+/// without it, ordinary cohort movement cannot be attributed to the proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedExposure {
+    /// Schema version of this record.
+    pub schema_version: u32,
+    /// Proposal whose change was applied.
+    pub signature: String,
+    /// Controller or implementation worker that applied the change.
+    pub applied_by: String,
+    /// When the change first reached the measured cohort.
+    pub applied_at: DateTime<Utc>,
+}
+
+impl AppliedExposure {
+    /// Build an applied-exposure record for a proposal.
+    pub fn new(
+        signature: impl Into<String>,
+        applied_by: impl Into<String>,
+        applied_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            schema_version: APPLIED_EXPOSURE_SCHEMA_VERSION,
+            signature: signature.into(),
+            applied_by: applied_by.into(),
+            applied_at,
+        }
+    }
+}
+
+/// Evidence gathered for one receipt decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReceiptEvidence<'a> {
+    /// Recorded applied exposures, loaded from the exposure journal.
+    pub applied_exposures: &'a [AppliedExposure],
+    /// Population measured.
+    pub cohort: Cohort,
+    /// Measures before exposure.
+    pub baseline: CohortMeasures,
+    /// Measures at the horizon.
+    pub observed: CohortMeasures,
+}
 
 /// Thresholds governing promote/withdraw.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -257,6 +309,10 @@ pub struct ImpactReceipt {
     pub schema_version: u32,
     /// The proposal this judges.
     pub signature: String,
+    /// The record proving this proposal reached exposure. Older receipts did
+    /// not carry one and deserialize as `None` for history compatibility.
+    #[serde(default)]
+    pub applied_exposure: Option<AppliedExposure>,
     /// The evidence class it came from.
     pub evidence_class: EvidenceClass,
     /// The population measured.
@@ -286,17 +342,52 @@ impl ImpactReceipt {
 
 /// Decide promote, withdraw or hold for one admitted proposal.
 ///
-/// Pure. The contamination list is supplied by the caller, which is what knows
-/// about commits and other admissions.
+/// Pure. The caller supplies exposure records and contamination evidence,
+/// which is what knows whether the change was applied and what else touched
+/// the measured cohort. Missing, mismatched or ambiguous exposure records
+/// produce a hold rather than a promote or withdraw decision.
 pub fn decide(
     proposal: &ImprovementProposal,
-    cohort: Cohort,
-    baseline: CohortMeasures,
-    observed: CohortMeasures,
+    evidence: ReceiptEvidence<'_>,
     contamination: Vec<Contamination>,
     thresholds: &ReceiptThresholds,
     decided_at: DateTime<Utc>,
 ) -> ImpactReceipt {
+    let ReceiptEvidence {
+        applied_exposures,
+        cohort,
+        baseline,
+        observed,
+    } = evidence;
+    let matching: Vec<&AppliedExposure> = applied_exposures
+        .iter()
+        .filter(|exposure| exposure.signature == proposal.signature)
+        .collect();
+    let (applied_exposure, exposure_problem) = match matching.as_slice() {
+        [] => (
+            None,
+            Some("no applied-exposure record exists for this proposal".to_string()),
+        ),
+        [exposure]
+            if exposure.schema_version == APPLIED_EXPOSURE_SCHEMA_VERSION
+                && !exposure.applied_by.trim().is_empty()
+                && exposure.applied_at <= decided_at =>
+        {
+            (Some((*exposure).clone()), None)
+        }
+        [_] => (
+            None,
+            Some("the applied-exposure record is invalid or postdates this receipt".to_string()),
+        ),
+        _ => (
+            None,
+            Some(
+                "multiple applied-exposure records make this proposal's exposure ambiguous"
+                    .to_string(),
+            ),
+        ),
+    };
+
     let measure = proposal.acceptance.measure;
     let before = baseline.value(measure);
     let after = observed.value(measure);
@@ -308,7 +399,9 @@ pub fn decide(
         super::envelope::Direction::Decrease => before - after,
     };
 
-    let decision = if !contamination.is_empty() {
+    let decision = if let Some(detail) = exposure_problem {
+        ReceiptDecision::Hold { detail }
+    } else if !contamination.is_empty() {
         // Contamination is checked first: an unattributable delta must not be
         // promoted *or* withdrawn, whichever way it happens to point.
         ReceiptDecision::Hold {
@@ -348,6 +441,7 @@ pub fn decide(
     ImpactReceipt {
         schema_version: IMPACT_RECEIPT_SCHEMA_VERSION,
         signature: proposal.signature.clone(),
+        applied_exposure,
         evidence_class: proposal.evidence_class,
         cohort,
         acceptance: proposal.acceptance,
@@ -401,19 +495,43 @@ pub fn receipts_path() -> PathBuf {
     state_dir::state_root().join(RECEIPTS_FILE)
 }
 
+/// Where applied-exposure records are appended.
+pub fn applied_exposures_path() -> PathBuf {
+    state_dir::state_root().join(APPLIED_EXPOSURES_FILE)
+}
+
+/// Append an applied-exposure record, creating the file if needed.
+pub fn append_applied_exposure(path: &Path, exposure: &AppliedExposure) -> Result<()> {
+    append_json_line(path, exposure, "applied exposure")
+}
+
+/// Read every applied-exposure record, oldest first.
+///
+/// A malformed line is skipped rather than failing the read, matching receipt
+/// journal behavior.
+pub fn read_applied_exposures(path: &Path) -> Result<Vec<AppliedExposure>> {
+    read_json_lines(path)
+}
+
 /// Append a receipt, creating the file if needed.
 ///
 /// Append-only by construction: there is no update or delete here. A receipt
 /// records a decision that was already taken, and a rewritable audit trail is
 /// not an audit trail.
 pub fn append(path: &Path, receipt: &ImpactReceipt) -> Result<()> {
+    append_json_line(path, receipt, "impact receipt")
+}
+
+/// Append one JSON value to an append-only journal.
+fn append_json_line<T: Serialize>(path: &Path, value: &T, description: &str) -> Result<()> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let mut line = serde_json::to_string(receipt).context("failed to encode an impact receipt")?;
+    let mut line = serde_json::to_string(value)
+        .with_context(|| format!("failed to encode an {description}"))?;
     line.push('\n');
 
     let mut file = std::fs::OpenOptions::new()
@@ -425,11 +543,8 @@ pub fn append(path: &Path, receipt: &ImpactReceipt) -> Result<()> {
         .with_context(|| format!("failed to append to {}", path.display()))
 }
 
-/// Read every receipt, oldest first.
-///
-/// A malformed line is skipped rather than failing the read: one bad record
-/// must not make every other receipt unreadable.
-pub fn read_all(path: &Path) -> Result<Vec<ImpactReceipt>> {
+/// Read JSONL records while preserving all valid rows around malformed ones.
+fn read_json_lines<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -440,4 +555,12 @@ pub fn read_all(path: &Path) -> Result<Vec<ImpactReceipt>> {
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect())
+}
+
+/// Read every receipt, oldest first.
+///
+/// A malformed line is skipped rather than failing the read: one bad record
+/// must not make every other receipt unreadable.
+pub fn read_all(path: &Path) -> Result<Vec<ImpactReceipt>> {
+    read_json_lines(path)
 }

@@ -14,13 +14,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use needle::bead_store::{BeadStore, Filters, RepairReport};
-use needle::cli::improvements::read_decisions;
+use needle::cli::improvements::{append_decision, read_decisions};
 use needle::evidence_routing::LedgerRow;
 use needle::improvement_controller::{
     plan_owners, submit, SubmissionContext, IMPROVEMENT_LABEL, SIGNATURE_LABEL_PREFIX,
 };
 use needle::learning::improvement::{
-    AdmissionPolicy, EvidenceClass, GeneratorThresholds, WorkspaceImpactProfile,
+    AdmissionDecision, AdmissionPolicy, AdmissionRecord, AdmissionRoute, EvidenceClass,
+    GeneratorThresholds, WorkspaceImpactProfile,
 };
 use needle::types::{Bead, BeadId, ClaimResult};
 use serde_json::json;
@@ -169,6 +170,7 @@ fn row(
         timestamp: Some(at(day)),
         data: json!({
             "attempt_id": attempt,
+            "provisional": false,
             "bead_id": bead,
             "workspace": format!("/fixture-root/{workspace}"),
             "worker": "glm-roam-18",
@@ -213,6 +215,24 @@ fn red_baseline_rows() -> Vec<LedgerRow> {
                 "signal:9",
                 13,
                 false,
+            )
+        })
+        .collect()
+}
+
+/// A workspace with enough costed unverified spend to generate an L3 proposal.
+fn unverified_spend_rows() -> Vec<LedgerRow> {
+    (0..12)
+        .map(|n| {
+            row(
+                "spaxel",
+                "claude-code-glm-5.3",
+                "indeterminate",
+                &format!("spaxel-{n}"),
+                &format!("spaxel-attempt-{n}"),
+                "signal:9",
+                13,
+                true,
             )
         })
         .collect()
@@ -429,6 +449,62 @@ async fn a_new_evidence_class_creates_exactly_one_bead_across_two_submissions() 
         1,
         "exactly one bead exists for the class"
     );
+}
+
+#[tokio::test]
+async fn an_l3_proposal_without_a_controller_is_refused_without_spending_the_l4_budget() {
+    let harness = Harness::new(Vec::new());
+    let rows = unverified_spend_rows();
+
+    // The daily budget admits one proposal. Refusing the L1 controller route
+    // must leave that slot available for the L4 implementation bead.
+    let summary = harness.submit(&rows, live()).await.expect("submit");
+
+    assert_eq!(
+        summary.refusals.get("no_owning_controller").copied(),
+        Some(1)
+    );
+    assert_eq!(summary.created.len(), 1);
+    assert!(summary.routed.is_empty());
+    assert_eq!(
+        read_decisions(&harness.journal())
+            .expect("journal")
+            .iter()
+            .filter(|record| record.decision.is_admitted())
+            .count(),
+        1,
+        "only the L4 proposal consumes the one-per-day budget"
+    );
+}
+
+#[tokio::test]
+async fn unfinished_admissions_in_the_journal_engage_backpressure() {
+    let harness = Harness::new(Vec::new());
+    for rank in 0..AdmissionPolicy::default().max_open_admitted {
+        append_decision(
+            &harness.journal(),
+            &AdmissionRecord {
+                signature: format!("prior-admission-{rank}"),
+                decision: AdmissionDecision::Admitted {
+                    route: AdmissionRoute::ImplementationBead {
+                        workspace: "commitgraph".to_string(),
+                    },
+                },
+                rank,
+            },
+        )
+        .expect("append prior admission");
+    }
+
+    let mut policy = live();
+    policy.per_day = 10;
+    let summary = harness
+        .submit(&red_baseline_rows(), policy)
+        .await
+        .expect("submit");
+
+    assert_eq!(summary.refusals.get("backpressure").copied(), Some(1));
+    assert!(summary.created.is_empty());
 }
 
 #[tokio::test]

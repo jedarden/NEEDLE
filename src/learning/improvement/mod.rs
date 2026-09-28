@@ -51,9 +51,11 @@ pub use impact::{
     IMPACT_CONTRACT_SCHEMA_VERSION,
 };
 pub use receipts::{
-    append as append_receipt, decide as decide_receipt, measure as measure_cohort,
-    read_all as read_receipts, receipts_path, revert_proposal, Cohort, CohortMeasures,
-    Contamination, ImpactReceipt, ReceiptDecision, ReceiptThresholds,
+    append as append_receipt, append_applied_exposure, applied_exposures_path,
+    decide as decide_receipt, measure as measure_cohort, read_all as read_receipts,
+    read_applied_exposures, receipts_path, revert_proposal, AppliedExposure, Cohort,
+    CohortMeasures, Contamination, ImpactReceipt, ReceiptDecision, ReceiptEvidence,
+    ReceiptThresholds, APPLIED_EXPOSURES_FILE, APPLIED_EXPOSURE_SCHEMA_VERSION,
     IMPACT_RECEIPT_SCHEMA_VERSION, RECEIPT_REF_NAMESPACE,
 };
 pub use scoring::{
