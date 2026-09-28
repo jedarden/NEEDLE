@@ -314,6 +314,8 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("strands.pulse.max_beads_per_run", ReloadTier::Live),
     ("strands.pulse.cooldown_hours", ReloadTier::Live),
     ("strands.pulse.severity_threshold", ReloadTier::Live),
+    ("strands.ci_watch.enabled", ReloadTier::Live),
+    ("strands.ci_watch.poll_interval_secs", ReloadTier::Live),
     ("strands.reflect.min_beads_since_last", ReloadTier::Live),
     ("strands.reflect.cooldown_hours", ReloadTier::Live),
     ("strands.reflect.max_learnings_per_run", ReloadTier::Live),

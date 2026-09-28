@@ -7,6 +7,7 @@
 //! Depends on: `types`, `config`, `bead_store`.
 
 pub mod analyze;
+pub mod ci_watch;
 mod explore;
 mod generation;
 mod knot;
@@ -64,6 +65,7 @@ pub struct SelectOutcome {
 }
 
 pub use analyze::{AnalysisAgent, AnalyzeStrand};
+pub use ci_watch::CiWatchStrand;
 pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
 pub use mend::{cleanup_orphaned_in_progress, MendStrand};
@@ -186,6 +188,12 @@ impl StrandRunner {
         let state_base = state_root.join("state");
         let heartbeat_dir = state_base.join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
+        let ci_watch = CiWatchStrand::new(
+            config.strands.ci_watch.clone(),
+            config.workspace.default.clone(),
+            state_base.join("ci_watch"),
+            telemetry.clone(),
+        );
 
         let pluck = PluckStrand::with_persistent_records(
             config.strands.pluck.exclude_labels.clone(),
@@ -403,19 +411,24 @@ impl StrandRunner {
             config.workspace.default.clone(),
         );
         let cycle_outcome_recorded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut strands: Vec<Box<dyn Strand>> = Vec::with_capacity(11);
+        if config.strands.ci_watch.enabled {
+            strands.push(Box::new(ci_watch));
+        }
+        strands.extend(vec![
+            Box::new(pluck) as Box<dyn Strand>,
+            Box::new(mend),
+            Box::new(explore),
+            weave,
+            Box::new(unravel),
+            Box::new(analyze),
+            Box::new(pulse),
+            Box::new(reflect),
+            Box::new(splice),
+            Box::new(knot.with_cycle_outcome_guard(cycle_outcome_recorded.clone())),
+        ]);
         StrandRunner {
-            strands: vec![
-                Box::new(pluck),
-                Box::new(mend),
-                Box::new(explore),
-                weave,
-                Box::new(unravel),
-                Box::new(analyze),
-                Box::new(pulse),
-                Box::new(reflect),
-                Box::new(splice),
-                Box::new(knot.with_cycle_outcome_guard(cycle_outcome_recorded.clone())),
-            ],
+            strands,
             telemetry: runner_telemetry,
             cycle_outcome_recorded,
         }

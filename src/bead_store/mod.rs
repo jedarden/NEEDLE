@@ -1508,6 +1508,18 @@ pub struct NewChild<'a> {
     pub resource_keys: &'a [&'a str],
 }
 
+/// Result of creating a bead with an atomic backend idempotency reference.
+///
+/// A repeated reference identifies the original bead instead of creating a
+/// duplicate. Closed references remain visible so callers can decide how a
+/// later recurrence should be handled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DedupCreate {
+    Created(BeadId),
+    Existed(BeadId),
+    ExistedClosed(BeadId),
+}
+
 // ─── BeadStore trait ─────────────────────────────────────────────────────────
 
 /// Abstract interface to the bead backend.
@@ -1952,6 +1964,22 @@ pub trait BeadStore: Send + Sync {
         bail!(
             "configured bead backend does not implement explicit priority creation (requested P{priority})"
         )
+    }
+
+    /// Create a bead with a backend-enforced unique reference.
+    ///
+    /// This operation must be atomic with bead creation. Backends that cannot
+    /// bind unique references fail explicitly instead of approximating the
+    /// guarantee with a racy search-then-create sequence.
+    async fn create_bead_with_unique_ref(
+        &self,
+        _title: &str,
+        _body: &str,
+        _labels: &[&str],
+        _priority: u8,
+        _unique_ref: &str,
+    ) -> Result<DedupCreate> {
+        bail!("configured bead backend does not implement atomic unique-ref creation")
     }
 
     /// Add a dependency link: `blocker_id` blocks `blocked_id`.

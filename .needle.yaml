@@ -84,6 +84,9 @@ strands:
     cooldown_hours: 24
     severity_threshold: 3
     prompt_template: null
+  ci_watch:
+    enabled: true
+    poll_interval_secs: 60
   reflect:
     # Legacy text-similarity Reflect is off (ADR-026); its output fed
     # .beads/learnings.md with sentence fragments. needle-026f551a.

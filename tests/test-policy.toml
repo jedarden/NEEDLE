@@ -291,9 +291,10 @@ version = 1
 # pause/resume state, retry-tier freeze and policy-promotion refusal.
 # +3 attempt archive spool layout and archive-gated retention contracts
 # (needle-af8e7b7d).
-# +5 attempt archive doctor, stats, and OTLP event contracts
-# (needle-d7b946f1).
-max_tests = 4075
+# +11 CI watcher parsing, fingerprint, recovery, and state-machine contracts
+# (needle-7434c5cb).
+# +1 workspace configuration override for the CI watcher (needle-7434c5cb).
+max_tests = 4087
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -310,7 +311,8 @@ max_tests = 4075
 # no-configured-gate / configured-gate pair.
 # +1 N-T25 deadline checkpoint integration contract (needle-212f3568):
 # adapter-specific prompt deadlines and terminal resolved-row accounting.
-push = 677
+# +1 fake-Forgejo CI watcher deduplication scenario (needle-7434c5cb).
+push = 678
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -510,7 +512,9 @@ tier = "push"
 # — no configured Node gate passes as `gate.no_verifier` with nothing run
 # and is never released as gate_failed, and a configured gate is honored
 # with a real verdict in both directions.
-max_tests = 129
+# +1 fake-Forgejo CI red filing, fingerprint deduplication, and green no-op
+# scenario with an isolated HOME (needle-7434c5cb).
+max_tests = 130
 owner = "component:pluck-mend-explore"
 
 [[harness]]

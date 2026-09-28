@@ -348,6 +348,23 @@ impl ForgejoStatusSource {
         }
     }
 
+    /// Create a source pointed at an explicit Forgejo API base URL.
+    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: Some(base_url.into()),
+            token_env: FORGEJO_TOKEN_ENV.to_string(),
+        }
+    }
+
+    /// Create an explicit endpoint source without reading or sending a token.
+    /// Intended for local fake-server tests.
+    pub fn with_base_url_no_auth(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: Some(base_url.into()),
+            token_env: String::new(),
+        }
+    }
+
     fn endpoint(&self, workspace: &Path, template: &str, sha: &str) -> Result<String> {
         let remote = remote_origin(workspace)?;
         let (host, owner, repo) = repository_parts(&remote)?;

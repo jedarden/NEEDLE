@@ -19,8 +19,9 @@ use crate::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
 
 use super::{
     execute_create_id_strategy, execute_labels_strategy, validate_strategy_name, BeadBackend,
-    BeadOperationSpec, BeadStore, ClaimAttemptResult, ClaimMutationResult, ClaimStrategy, Filters,
-    NewChild, ParseShape, ParsedStrategy, RecoveryReleaseOutcome, RepairReport,
+    BeadOperationSpec, BeadStore, ClaimAttemptResult, ClaimMutationResult, ClaimStrategy,
+    DedupCreate, Filters, NewChild, ParseShape, ParsedStrategy, RecoveryReleaseOutcome,
+    RepairReport,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -1787,6 +1788,63 @@ impl BeadStore for CliBeadStore {
     ) -> Result<BeadId> {
         self.create_bead_at_priority(title, body, labels, priority, true)
             .await
+    }
+
+    async fn create_bead_with_unique_ref(
+        &self,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+        priority: u8,
+        unique_ref: &str,
+    ) -> Result<DedupCreate> {
+        if self.backend.name != "bead-rs" {
+            bail!(
+                "backend '{}' does not support the bead-rs --unique-ref create contract",
+                self.backend.name
+            );
+        }
+        if priority > 4 {
+            bail!("bead priority must be between 0 and 4, got {priority}");
+        }
+        if !unique_ref.contains(':') || unique_ref.trim() != unique_ref {
+            bail!("unique-ref must use the NAMESPACE:KEY form");
+        }
+
+        let mut args = vec![
+            "create".to_string(),
+            "--title".to_string(),
+            title.to_string(),
+            "--description".to_string(),
+            body.to_string(),
+            "--priority".to_string(),
+            priority.to_string(),
+            "--unique-ref".to_string(),
+            unique_ref.to_string(),
+        ];
+        for label in labels {
+            args.push("--label".to_string());
+            args.push((*label).to_string());
+        }
+        let output = self.run_argv("create", &args, DEFAULT_TIMEOUT_SECS).await?;
+        let output = output.trim();
+        if let Some(id) = output.strip_prefix("EXISTING_CLOSED ") {
+            return Ok(DedupCreate::ExistedClosed(BeadId::from(id.trim())));
+        }
+        if let Some(id) = output.strip_prefix("EXISTING ") {
+            return Ok(DedupCreate::Existed(BeadId::from(id.trim())));
+        }
+
+        let id_strategy = match self.strategy("create_id")? {
+            ParsedStrategy::CreateId(strategy) => strategy,
+            _ => bail!(
+                "backend '{}' has invalid create_id strategy",
+                self.backend.name
+            ),
+        };
+        Ok(DedupCreate::Created(BeadId::from(
+            execute_create_id_strategy(id_strategy, output)?,
+        )))
     }
 
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {

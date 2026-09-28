@@ -20,6 +20,8 @@
 mod atomic_spawn_verification;
 #[path = "p2_integration_tests/bead_cli_argv_assertions.rs"]
 mod bead_cli_argv_assertions;
+#[path = "p2_integration_tests/ci_watch.rs"]
+mod ci_watch;
 #[path = "p2_integration_tests/claim_cycle_span_depth_regression.rs"]
 mod claim_cycle_span_depth_regression;
 #[path = "p2_integration_tests/claim_strategies.rs"]

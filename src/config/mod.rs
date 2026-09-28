@@ -5012,6 +5012,39 @@ pub struct PulseConfig {
     pub prompt_template: Option<String>,
 }
 
+/// Polling configuration for the main-branch CI red alert strand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiWatchConfig {
+    /// Whether this workspace polls its main-branch CI status (default: off).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Minimum seconds between Forgejo status polls (default: 60).
+    #[serde(default = "CiWatchConfig::default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+}
+
+impl Default for CiWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: Self::default_poll_interval_secs(),
+        }
+    }
+}
+
+impl CiWatchConfig {
+    fn default_poll_interval_secs() -> u64 {
+        60
+    }
+}
+
+impl ConfigTier for CiWatchConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        ReloadTier::Live
+    }
+}
+
 /// Configuration for a single scanner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannerConfig {
@@ -5311,6 +5344,8 @@ pub struct StrandsConfig {
     pub unravel: UnravelConfig,
     #[serde(default)]
     pub pulse: PulseConfig,
+    #[serde(default)]
+    pub ci_watch: CiWatchConfig,
     #[serde(default)]
     pub reflect: ReflectConfig,
     #[serde(default)]
@@ -7577,6 +7612,8 @@ pub struct WorkspaceStrandsOverrides {
     #[serde(default)]
     pub pulse: Option<serde_yaml::Value>,
     #[serde(default)]
+    pub ci_watch: Option<CiWatchConfig>,
+    #[serde(default)]
     pub unravel: Option<serde_yaml::Value>,
     #[serde(default)]
     pub reflect: Option<ReflectConfig>,
@@ -8801,6 +8838,7 @@ fn validate_strands_field(
         "weave",
         "unravel",
         "pulse",
+        "ci_watch",
         "reflect",
         "learning",
         "splice",
@@ -8825,6 +8863,7 @@ fn validate_strands_field(
             "generation" => validate_generation_field(third, key_path),
             "weave" => validate_weave_field(third, key_path),
             "pulse" => validate_pulse_field(third, &remaining[1..], key_path),
+            "ci_watch" => validate_ci_watch_field(third, key_path),
             "learning" => validate_learning_field(third, key_path),
             "splice" => validate_splice_field(third, key_path),
             "resolve" => validate_resolve_field(third, key_path),
@@ -8832,6 +8871,20 @@ fn validate_strands_field(
         }
     } else {
         Ok(())
+    }
+}
+
+fn validate_ci_watch_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["enabled", "poll_interval_secs"];
+    if valid_fields.contains(&field) {
+        Ok(())
+    } else {
+        Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(str::to_string).to_vec(),
+            "strands.ci_watch".to_string(),
+        ))
     }
 }
 
@@ -9394,6 +9447,10 @@ impl ConfigLoader {
                     config.strands.pulse = pulse_cfg;
                 }
                 sources.insert("strands.pulse".to_string(), source.clone());
+            }
+            if let Some(ref ci_watch) = strands.ci_watch {
+                config.strands.ci_watch = ci_watch.clone();
+                sources.insert("strands.ci_watch".to_string(), source.clone());
             }
             if let Some(ref unravel_val) = strands.unravel {
                 if let Ok(unravel_cfg) =
@@ -11762,6 +11819,25 @@ strands:
         ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
 
         assert!(sources.contains_key("strands.pulse"));
+    }
+
+    #[test]
+    fn workspace_config_overrides_ci_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "strands:\n  ci_watch:\n    enabled: true\n    poll_interval_secs: 45\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert!(config.strands.ci_watch.enabled);
+        assert_eq!(config.strands.ci_watch.poll_interval_secs, 45);
+        assert!(sources.contains_key("strands.ci_watch"));
     }
 
     #[test]
@@ -15344,6 +15420,8 @@ timeout_secs: 60
             "strands.weave",
             "strands.unravel",
             "strands.pulse",
+            "strands.ci_watch.enabled",
+            "strands.ci_watch.poll_interval_secs",
             "strands.reflect",
             "strands.learning",
             "strands.splice",
