@@ -40,12 +40,12 @@
     "gate_degraded": {
       "type": "boolean",
       "enum": [true],
-      "description": "Present only on rows resolved while the workspace was gate-degraded (N-T21, ADR-023). Marked rows remain in the ledger as health/recovery evidence; learning evidence windows exclude them by default."
+      "description": "Present only on rows resolved while the workspace was gate-degraded (N-T21, ADR-023). Marked rows remain in the ledger as health/recovery evidence; learning evidence windows (adapter routing, prompt canaries, retry-tier bias) exclude them by default."
     },
     "provider_degraded": {
       "type": "boolean",
       "enum": [true],
-      "description": "Present only on rows resolved while the selected adapter's provider was degraded (N-T27). Marked rows remain in the ledger for health/recovery accounting; adapter evidence windows exclude them by default and retain prior evidence on restoration."
+      "description": "Present only on rows resolved while the selected adapter's provider was degraded (N-T27). Marked rows remain in the ledger for health/recovery accounting; adapter evidence windows exclude them by default and retain the prior evidence on restoration."
     },
     "bead_id": {
       "type": "string",
@@ -138,6 +138,29 @@
     "context_manifest_hash": {
       "type": "string",
       "description": "Hash of the ContextManifest the attempt saw. Absent until N-T10 ships manifest hashing."
+    },
+    "profile_version": {
+      "type": "string",
+      "description": "Version of the adapter's managed profile block (needle-0810eb14). Absent for unmanaged adapters; optional by design like `override`, so legacy rows remain valid without a schema version bump."
+    },
+    "context_mode": {
+      "type": "string",
+      "enum": ["standard", "1m"],
+      "description": "Declared context window mode of the adapter's profile: provider default or the 1M canary."
+    },
+    "effort": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "xhigh", "max"],
+      "description": "Declared reasoning effort the adapter's invocation passes."
+    },
+    "max_turns": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Agent turn ceiling passed by the adapter's invocation."
+    },
+    "timeout_policy": {
+      "type": "string",
+      "description": "Timeout policy in force for the attempt (e.g. \"idle 900s / hard 3600s\")."
     },
     "gate_results": {
       "type": "array",
