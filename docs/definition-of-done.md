@@ -145,7 +145,7 @@ git commit --allow-empty -m "test pre-commit"  # Should fail if fast lane fails
 git commit --allow-empty --no-verify -m "bypass test"  # Check bypass log
 
 # Test NEEDLE gate (via bead closure)
-bf close <test-bead> --reason "test gate"
+bead close <test-bead> --reason "test gate"
 # Check that gate ran and accepted/rejected the commit
 ```
 

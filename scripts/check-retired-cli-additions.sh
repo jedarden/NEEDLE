@@ -22,6 +22,11 @@ fi
 
 awk -v root="$REPO_ROOT" '
   function in_scope(path) {
+    if (path == "scripts/check-retired-cli-usage.sh" ||
+        path ~ /^tests\/retired-cli-usage\// ||
+        path == "scripts/retired-cli-usage-baseline.txt") {
+      return 0
+    }
     return path ~ /^(src|prompt|prompts|scripts|tests|docs)\// ||
       path == ".needle.yaml" || path == "AGENTS.md" ||
       path == "README.md" || path == "CHANGELOG.md" || path == "CLAUDE.md" ||
@@ -34,9 +39,16 @@ awk -v root="$REPO_ROOT" '
   }
   BEGIN {
     cli = sprintf("%c%c", 98, 114)
+    legacy_cli = sprintf("%c%c", 98, 102)
     cli_token = "(^|[^[:alnum:]_])" cli "([^[:alnum:]_]|$)"
+    legacy_words = "(init|sync|create|list|show|update|close|reopen|release|claim|ready|dep|label|ref|capabilities|doctor|mend|export|import|checkpoint|archive|help|version)"
+    legacy_command = "(^|[^[:alnum:]_])" legacy_cli "[[:space:]]+" legacy_words "([^[:alnum:]_-]|$)"
+    legacy_probe = "(which|command[[:space:]]+-v)[[:space:]]+" legacy_cli "([^[:alnum:]_-]|$)"
+    legacy_handle_name = sprintf("%c%c%c%c%c%c", 66, 70, 95, 66, 73, 78)
+    legacy_handle = "(^|[^[:alnum:]_])" legacy_handle_name "([^[:alnum:]_]|$)"
     notice = "Historical/non-operational reference:"
     marker = "<!-- retired-" cli ": historical-only -->"
+    unified_marker = "<!-- retired-cli: historical-only -->"
   }
   /^\+\+\+ b\// {
     path = substr($0, 7)
@@ -45,8 +57,8 @@ awk -v root="$REPO_ROOT" '
   /^diff --git / { path = ""; next }
   /^\+/ && path != "/dev/null" && in_scope(path) {
     line = substr($0, 2)
-    if (line ~ cli_token) {
-      allowlist_check = "grep -Fq " shq(notice) " " shq(root "/" path) " && grep -Fq " shq(marker) " " shq(root "/" path)
+    if (line ~ cli_token || line ~ legacy_command || line ~ legacy_probe || line ~ legacy_handle) {
+      allowlist_check = "grep -Fq " shq(notice) " " shq(root "/" path) " && (grep -Fq " shq(marker) " " shq(root "/" path) " || grep -Fq " shq(unified_marker) " " shq(root "/" path) ")"
       historical = is_document(path) && system(allowlist_check) == 0
       if (!historical) {
         printf "%s\t%s\n", path, line

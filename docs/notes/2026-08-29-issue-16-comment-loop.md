@@ -1,5 +1,10 @@
 # GitHub Issue #16 Comment Loop Incident
 
+> Historical/non-operational reference: this document preserves retired CLI
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-cli: historical-only -->
+
 ## Timeline
 
 - **2026-08-28T21:43Z**: Bead `needle-0fbf5145` ("Post comment to GitHub issue #16") first closed

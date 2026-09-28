@@ -1,5 +1,10 @@
 # Rolling a NEEDLE binary back
 
+> Historical/non-operational reference: this document preserves retired CLI
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-cli: historical-only -->
+
 This procedure assumes NEEDLE itself is broken. It does not use `needle` for
 any step, and no step depends on dispatching a bead — if the claim path is what
 broke, dispatching is exactly what you cannot do.

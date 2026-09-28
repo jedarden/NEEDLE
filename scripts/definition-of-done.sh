@@ -847,6 +847,13 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   run_check "retired CLI addition policy" bash scripts/check-retired-cli-additions.sh
   run_check "retired CLI addition policy tests" bash tests/retired-cli-additions/run.sh
 
+  # Reject newly introduced command-shaped uses of either retired CLI across
+  # active source, prompts, scripts, tests, and documentation. Existing
+  # compatibility narration is kept in a reviewed baseline; documentation
+  # requires an explicit historical-only marker.
+  run_check "retired CLI usage policy" bash scripts/check-retired-cli-usage.sh
+  run_check "retired CLI usage fixtures" bash tests/retired-cli-usage/run.sh
+
   # Hold the whole tree, not just the candidate diff, to the retired-CLI
   # policy: this catches committed baseline drift and runs identically in the
   # git-less archive extractions the verification gate uses. The guard's path

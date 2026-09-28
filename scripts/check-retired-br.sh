@@ -84,7 +84,6 @@ GRANDFATHER=(
   'tests/integration_spawn/stop_kills_process_tree.rs|manual-recovery comment quotes retired commands'
   'tests/integration_tests/bead_cli_config_serde.rs|deprecated backend-name serde coverage'
   'tests/p2_integration_tests/test_bead_visibility.rs|doc comment cites retired ready output'
-  'scripts/check-documentation.sh|documentation guard quotes its own pattern and remediation'
 )
 
 # This guard's own path: it necessarily quotes the patterns and the legacy
@@ -152,7 +151,9 @@ main() {
   while IFS= read -r -d '' file; do
     file="${file#"$REPO_ROOT"/}"
     case "$file" in
-      .beads/* | notes/* | target/*) continue ;;
+      .beads/* | notes/* | target/* | scripts/check-retired-cli-usage.sh \
+        | scripts/retired-cli-usage-baseline.txt \
+        | tests/retired-cli-usage/*) continue ;;
     esac
     [[ -f "$REPO_ROOT/$file" ]] || continue
     scanned=$((scanned + 1))

@@ -218,7 +218,7 @@ Each workspace is checked and may be excluded:
 | Home workspace | `workspace == config.workspace.default` | Pluck covers it |
 | Missing `.beads/` | `!has_beads_dir(workspace)` | `"no_beads_dir"` |
 | Store error | BeadStore creation fails | Error message |
-| Empty candidates | `bf ready --limit 1` returns nothing | Cross-workspace mend |
+| Empty candidates | `bead list --ready --limit 1` returns nothing | Cross-workspace mend |
 | All excluded | Deferred, human, blocked labels | Continue to next |
 | All assigned | Every ready bead has assignee | Continue to next |
 
@@ -251,7 +251,7 @@ For each discovered workspace:
 1. **Home workspace check**: Skip if matches `config.workspace.default` (Pluck covers it)
 2. **Bead directory check**: Skip if `.beads/` doesn't exist
 3. **Store creation**: Attempt to create `BeadStore` for workspace
-4. **Candidate query**: Run `bf ready --limit 1` in workspace
+4. **Candidate query**: Run `bead list --ready --limit 1` in workspace
 5. **Cross-workspace mend**: If empty, run mend then re-query
 6. **Label filtering**: Exclude deferred, human, blocked labels
 7. **Assignment check**: Exclude beads already assigned to live workers

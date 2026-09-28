@@ -10,6 +10,7 @@ trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 passes=0
 failures=0
+legacy_cli_name="$(printf '\142\146')"
 
 ok() {
   echo "PASS: $1"
@@ -71,6 +72,14 @@ EOF
 expect_success "current bead commands are accepted" \
   env NEEDLE_DOCUMENTATION_ROOT="$fixture_root" "$CHECKER"
 
+cat >"$fixture_root/docs/active.md" <<EOF
+# Active instructions
+
+Run ${legacy_cli_name} close ITEM after verification.
+EOF
+expect_failure "unmarked legacy CLI commands are rejected" \
+  env NEEDLE_DOCUMENTATION_ROOT="$fixture_root" "$CHECKER"
+
 cat >"$fixture_root/docs/active.md" <<'EOF'
 # Active instructions
 
@@ -91,6 +100,19 @@ The incident used `br ready` before the migration.
 EOF
 rm -f "$fixture_root/docs/active.md"
 expect_success "marked historical excerpts are accepted" \
+  env NEEDLE_DOCUMENTATION_ROOT="$fixture_root" "$CHECKER"
+
+cat >"$fixture_root/docs/historical-legacy-cli.md" <<EOF
+# Incident excerpt
+
+> Historical/non-operational reference: this document preserves retired CLI
+> commands from an earlier implementation. Do not run them; use \`bead\`.
+<!-- retired-cli: historical-only -->
+
+The incident records ${legacy_cli_name} sync --flush-only.
+EOF
+rm -f "$fixture_root/docs/historical.md"
+expect_success "unified historical marker accepts legacy CLI commands" \
   env NEEDLE_DOCUMENTATION_ROOT="$fixture_root" "$CHECKER"
 
 echo "documentation checker tests: $passes passed, $failures failed"

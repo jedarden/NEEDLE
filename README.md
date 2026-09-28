@@ -266,7 +266,7 @@ Query the bead queue for the next claimable bead in **deterministic priority ord
 
 ### 🔒 Step 2: Claim
 
-Attempt an **atomic claim** via the bead CLI (`bead claim` for bead-rs, `bf claim` for bead-forge). SQLite transaction isolation guarantees exactly one worker succeeds. If the claim fails (race lost), return to Step 1 with the losing candidate excluded.
+Attempt an **atomic claim** via the bead CLI (`bead claim`; legacy bead-forge commands are no longer supported). SQLite transaction isolation guarantees exactly one worker succeeds. If the claim fails (race lost), return to Step 1 with the losing candidate excluded.
 
 ### 📋 Step 3: Build
 

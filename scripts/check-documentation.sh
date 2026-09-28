@@ -7,14 +7,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DOC_ROOT="${NEEDLE_DOCUMENTATION_ROOT:-$REPO_ROOT}"
 
-# This matches the standalone CLI name, including bare invocations and paths
-# that end in `/br`, while not matching words such as "braces". A historical
+# This matches command-shaped uses of either retired CLI while not matching
+# words such as "braces" or backend names in ordinary prose. A historical
 # document may retain an incident's exact command, but it must carry the
 # visible notice and machine-readable marker below so readers do not mistake
 # it for current guidance.
-RETIRED_BR_PATTERN='(^|[^[:alnum:]_])br([^[:alnum:]_]|$)'
+retired_br="$(printf '\142\162')"
+retired_bf="$(printf '\142\146')"
+RETIRED_BR_PATTERN="(^|[^[:alnum:]_])${retired_br}([^[:alnum:]_]|$)"
+RETIRED_BF_PATTERN="(^|[^[:alnum:]_])${retired_bf}[[:space:]]+(init|sync|create|list|show|update|close|reopen|release|claim|ready|dep|label|ref|capabilities|doctor|mend|export|import|checkpoint|archive|help|version)([^[:alnum:]_-]|$)"
 HISTORICAL_NOTICE='Historical/non-operational reference:'
-HISTORICAL_MARKER='<!-- retired-br: historical-only -->'
+HISTORICAL_MARKERS=(
+  "<!-- retired-${retired_br}: historical-only -->"
+  '<!-- retired-cli: historical-only -->'
+)
+
+has_historical_marker() {
+  local file="$1" marker
+  for marker in "${HISTORICAL_MARKERS[@]}"; do
+    grep -Fq "$marker" "$file" && return 0
+  done
+  return 1
+}
 
 documentation_files() {
   [[ -d "$DOC_ROOT/docs" ]] && find "$DOC_ROOT/docs" -type f \( \
@@ -28,12 +42,12 @@ documentation_files() {
 
 failures=0
 while IFS= read -r -d '' file; do
-  matches="$(grep -nE "$RETIRED_BR_PATTERN" "$file" || true)"
+  matches="$(grep -nE "$RETIRED_BR_PATTERN|$RETIRED_BF_PATTERN" "$file" || true)"
   [[ -n "$matches" ]] || continue
 
   if ! grep -Fq "$HISTORICAL_NOTICE" "$file" || \
-      ! grep -Fq "$HISTORICAL_MARKER" "$file"; then
-    printf 'retired br command reference in operational documentation: %s\n%s\n' \
+      ! has_historical_marker "$file"; then
+    printf 'retired CLI command reference in operational documentation: %s\n%s\n' \
       "${file#"$DOC_ROOT/"}" "$matches" >&2
     failures=$((failures + 1))
   fi
@@ -41,13 +55,9 @@ done < <(documentation_files)
 
 if [[ "$failures" -ne 0 ]]; then
   cat >&2 <<'EOF'
-Use the current `bead` CLI in operational documentation. If an exact `br`
-command must remain as historical evidence, add this visible notice and marker:
-
-> Historical/non-operational reference: this document preserves retired `br`
-> commands from an earlier implementation or incident. Do not run them; use
-> the current `bead` CLI for active work.
-<!-- retired-br: historical-only -->
+Use the current `bead` CLI in operational documentation. If an exact retired
+command must remain as historical evidence, add the visible historical notice
+and a retired-cli historical-only marker used by the repository.
 EOF
   exit 1
 fi
@@ -57,4 +67,4 @@ if [[ -f "$DOC_ROOT/README.md" && -f "$DOC_ROOT/install.sh" ]]; then
     "$SCRIPT_DIR/check-release-authority.sh"
 fi
 
-echo 'documentation check: no unmarked retired br commands'
+echo 'documentation check: no unmarked retired CLI commands'

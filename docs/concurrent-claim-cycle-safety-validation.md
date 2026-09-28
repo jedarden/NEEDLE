@@ -1,5 +1,10 @@
 # Concurrent Claim Cycle Safety Validation
 
+> Historical/non-operational reference: this document preserves retired CLI
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-cli: historical-only -->
+
 ## Executive Summary
 
 This document validates that the NEEDLE worker design supports multiple concurrent claim cycles without scope leakage or cross-contamination. The analysis confirms that all scope management is LIFO-compliant, spans are properly bounded, and race conditions are handled correctly through flock serialization and exclusion tracking.

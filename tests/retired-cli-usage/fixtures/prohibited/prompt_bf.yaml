@@ -1,0 +1,4 @@
+agent:
+  prompt: |
+    Complete the task, then record the outcome with bf dep add.
+

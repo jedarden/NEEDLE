@@ -1,5 +1,10 @@
 # Bead-forge to bead-rs agent-guided rehydration
 
+> Historical/non-operational reference: this document preserves retired CLI
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-cli: historical-only -->
+
 Status: proven on isolated fixtures against bead-rs v0.1.3; fleet cutover is
 blocked only on the NEEDLE staged-rollout gate.
 

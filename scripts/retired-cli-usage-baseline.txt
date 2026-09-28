@@ -1,0 +1,203 @@
+scripts/check-retired-br.sh	 'tests/e2e/|legacy end-to-end suite executes the retired binary via BR_BIN; migrate to bead'
+scripts/check-retired-br.sh	# or the legacy e2e harness's BR_BIN handle. Bare mentions (the word itself,
+scripts/check-retired-br.sh	retired_cli_handle='(^|[^A-Za-z0-9_])BR_BIN([^A-Za-z0-9_]|$)'
+src/bead_store/mod.rs	 /// Full rebuild (rm db + br sync --import) succeeded.
+src/bead_store/mod.rs	 /// Run `br doctor --repair` and return the report.
+src/bead_store/mod.rs	 /// Run `br doctor` (without `--repair`) to check database health.
+src/bead_store/mod.rs	 /// Runs `br sync --flush-only` to ensure any local writes are persisted
+src/bead_store/mod.rs	 /// Uses `br dep add <blocker_id> --blocks <blocked_id>`.
+src/bead_store/mod.rs	 /// Uses `br dep remove <blocked_id> <blocker_id>`.
+src/bead_store/mod.rs	 /// `br doctor --repair` fixed the issue.
+src/bead_store/mod.rs	/// Check if an error message indicates a br sync conflict.
+src/bead_store/mod.rs	/// Known error strings that indicate br sync conflicts.
+src/bead_store/mod.rs	/// Summary from `br doctor --repair`.
+src/bead_store/mod.rs	/// This is a distinct error type so callers can detect when br sync
+src/bead_store/strategies.rs	 // Example: `bf create ...` prints `bf-46m05\n`
+src/bead_store/strategies.rs	 // Example: `br create --json ...` prints `{"id":"bf-46m05",...}\n`
+src/bead_store/strategies.rs	 // Used by: `bf claim` which performs scoring and UPDATE in a single
+src/bead_store/strategies.rs	 /// Example: `bf create --label bug --label priority --title Fix bug`
+src/bead_store/strategies.rs	 /// Example: `bf create --labels bug,priority --title Fix bug`
+src/bead_store/strategies.rs	 /// Example: `bf sync --import-only`
+src/bead_store/strategies.rs	/// Example: Loop calling `br create` then `br dep add` for each child.
+src/bead_store/strategies.rs	/// Example: `bf claim --assignee worker-1` which internally scans and claims
+src/bead_store/strategies.rs	/// Example: `br ready --json --limit 1` → parse → `br update {id} --assignee worker`
+src/claim/mod.rs	 .any(|kv| kv.contains("br update exited with code 1")),
+src/claim/mod.rs	 assert!(error.to_string().contains("br update exited with code 1"));
+src/claim/mod.rs	 assert!(last_error.contains("br update exited with code 1"));
+src/claim/mod.rs	 reason: "br update exited with code 1".to_string(),
+src/config/mod.rs	 /// Run `br doctor` after every N beads processed (0 = disabled).
+src/mitosis/mod.rs	 /// FrankenSQLite index corruption where `br dep add` creates the
+src/mitosis/mod.rs	 /// `br show --json` output.
+src/outcome/mod.rs	 /// NEEDLE does NOT auto-close — the agent owns closure via `br close`.
+src/prompt/mod.rs	 assert!(!pluck.content.contains("bf close needle-abc"));
+src/prompt/mod.rs	 assert!(!split.content.contains("bf dep add"));
+src/spawn_version.rs	 // Test basic bf version format
+src/strand/mend.rs	 "br doctor --repair failed, attempting full rebuild"
+src/strand/mend.rs	 // Step 1: Probe with `br doctor` (no repair).
+src/strand/mend.rs	 // Step 2: Try `br doctor --repair`.
+src/strand/mend.rs	 // Step 3: Full rebuild — rm db + br sync --import + verify.
+src/strand/mend.rs	 /// 1. `br doctor` (check only) → if warnings found:
+src/strand/mend.rs	 /// 2. `br doctor --repair` → if fails:
+src/strand/mend.rs	 /// 3. Full rebuild (rm .beads/beads.db + br sync --import + verify)
+src/strand/mend.rs	 /// Run `br doctor` to check database health. If issues are found,
+src/strand/mend.rs	 tracing::info!(warnings, fixed, "br doctor --repair completed");
+src/strand/pluck.rs	 // SELECTING→CLAIMING→RETRYING spin loop observed when br ready --json
+src/strand/pluck.rs	 // without applying label exclusion — simulating a backend (e.g. br ready
+src/strand/pluck.rs	 /// does not apply label exclusion (e.g. br ready --json omitting labels).
+src/types/mod.rs	 // br ready --json omits updated_at; default to now so explore can deserialize it
+src/types/mod.rs	 // br show --json emits both "dependencies" and "dependents" as separate arrays.
+src/types/mod.rs	 /// Comments on this bead, returned by `bf show --json`.
+src/types/mod.rs	 /// `br show --json` emits `"closed"` for done beads. Treat as equivalent
+src/validation/mod.rs	 /// from external state (e.g. `br list --json` assignee) — see GitHub issue
+src/validation/predispatch.rs	/// to its conservative path — the same outcome the pre-migration `bf show`
+src/version_probe.rs	 // Some tools output version like: "bf version 0.3.0 (abcd123)"
+src/version_probe.rs	 /// - `bf version 0.3.0` → `bf`
+src/version_probe.rs	 assert!(!is_valid_backend_name("bf version")); // Contains space
+src/version_probe.rs	 let output = "bf version 0.3.0 (abcd123)";
+src/version_probe.rs	 let output = "bf version 0.3.0";
+src/version_probe.rs	 probe.parse_version_output("bf version 0.3.0"),
+src/version_probe.rs	/// assert!(!is_valid_backend_name("bf version")); // Contains space
+tests/documentation/run.sh	The incident used `br ready` before the migration.
+tests/e2e/additive_launch.sh	 echo "FATAL: br init failed"
+tests/e2e/additive_launch.sh	(cd "$WORKSPACE" && "$BR_BIN" create --title "collision-test bead" --silent 2>/dev/null) || true
+tests/e2e/additive_launch.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/additive_launch.sh	BR_BIN="$(which br 2>/dev/null || echo "$REAL_HOME/.local/bin/br")"
+tests/e2e/additive_launch.sh	invoke_template: "cd ${WORKSPACE} && $BR_BIN close {bead_id} --reason 'collision-test' 2>/dev/null || true"
+tests/e2e/auto_split.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/auto_split.sh	 BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
+tests/e2e/auto_split.sh	 BR_BIN: "$BR_BIN"
+tests/e2e/auto_split.sh	 CHILD1="\$(cd '{workspace}' && $BR_BIN create --title "E2E-CHILD-ALPHA: Implement core" --description "Implement the core functionality" --label split-child 2>&1 | head -1 | tr -d '\n\r')"
+tests/e2e/auto_split.sh	 CHILD2="\$(cd '{workspace}' && $BR_BIN create --title "E2E-CHILD-BETA: Add tests" --description "Add comprehensive tests" --label split-child 2>&1 | head -1 | tr -d '\n\r')"
+tests/e2e/auto_split.sh	 CHILD3="\$(cd '{workspace}' && $BR_BIN create --title "E2E-CHILD-GAMMA: Write docs" --description "Write documentation" --label split-child 2>&1 | head -1 | tr -d '\n\r')"
+tests/e2e/auto_split.sh	 cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null || true
+tests/e2e/auto_split.sh	 cd '{workspace}' && $BR_BIN close "\$BEAD_ID" --reason 'E2E child completed' 2>/dev/null || true
+tests/e2e/auto_split.sh	 cd '{workspace}' && $BR_BIN dep add "\$CHILD2" "\$CHILD1" 2>/dev/null || true
+tests/e2e/auto_split.sh	 cd '{workspace}' && $BR_BIN dep add "\$CHILD3" "\$CHILD2" 2>/dev/null || true
+tests/e2e/auto_split.sh	 cd '{workspace}' && $BR_BIN dep add "\$PARENT_ID" "\$CHILD3" 2>/dev/null || true
+tests/e2e/auto_split.sh	 cd '{workspace}' && $BR_BIN label add "\$PARENT_ID" "umbrella" 2>/dev/null || true
+tests/e2e/auto_split.sh	 echo "FATAL: br init failed"
+tests/e2e/auto_split.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/auto_split.sh	BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
+tests/e2e/auto_split.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/auto_split.sh	CHILD_BEADS="$(cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null | grep "E2E-CHILD-" || echo "")"
+tests/e2e/auto_split.sh	PARENT_LABELS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | grep -E "label|Label" || echo "")"
+tests/e2e/auto_split.sh	PARENT_SHOW="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null || echo "ERROR")"
+tests/e2e/auto_split.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/failure_counter.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/failure_counter.sh	 BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
+tests/e2e/failure_counter.sh	 BR_BIN: "$BR_BIN"
+tests/e2e/failure_counter.sh	 CHILD_COUNT="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | grep -c "blocks\|dep\|child" || echo 0)"
+tests/e2e/failure_counter.sh	 cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null || true
+tests/e2e/failure_counter.sh	 cd '{workspace}' && $BR_BIN close '{bead_id}' --reason 'E2E child completed'
+tests/e2e/failure_counter.sh	 echo "FATAL: br init failed"
+tests/e2e/failure_counter.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/failure_counter.sh	BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
+tests/e2e/failure_counter.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/failure_counter.sh	CHILD_BEADS="$(cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null | grep "E2E-SPLIT-" || echo "")"
+tests/e2e/failure_counter.sh	PARENT_LABELS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | grep "failure-count" || echo "")"
+tests/e2e/failure_counter.sh	PARENT_STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/failure_counter.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/failure_counter_persistence.sh	 (cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null) || true
+tests/e2e/failure_counter_persistence.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/failure_counter_persistence.sh	 BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create --title "Multi-task implementation" \
+tests/e2e/failure_counter_persistence.sh	 echo "FATAL: br init failed"
+tests/e2e/failure_counter_persistence.sh	 info "Dependencies not visible in br show, but mitosis created $CHILDREN_CREATED children"
+tests/e2e/failure_counter_persistence.sh	# Check via br show output for dependency lines.
+tests/e2e/failure_counter_persistence.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/failure_counter_persistence.sh	BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create --title "Multi-task implementation" \
+tests/e2e/failure_counter_persistence.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/failure_counter_persistence.sh	PARENT_INFO="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null || echo "")"
+tests/e2e/failure_counter_persistence.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/forced_mitosis.sh	 (cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null) || true
+tests/e2e/forced_mitosis.sh	 (cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null) || true
+tests/e2e/forced_mitosis.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/forced_mitosis.sh	 ALL_BEADS="$(cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null || echo "")"
+tests/e2e/forced_mitosis.sh	 BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
+tests/e2e/forced_mitosis.sh	 BEAD_LABELS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | grep -i label || true)"
+tests/e2e/forced_mitosis.sh	 BEAD_STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/forced_mitosis.sh	 PARENT_INFO="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null || echo "")"
+tests/e2e/forced_mitosis.sh	 echo "FATAL: br init failed"
+tests/e2e/forced_mitosis.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/forced_mitosis.sh	(cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/forced_mitosis.sh	BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
+tests/e2e/forced_mitosis.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/forced_mitosis.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/graceful_shutdown.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/graceful_shutdown.sh	 BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create --title "Long-running task for SIGTERM test" \
+tests/e2e/graceful_shutdown.sh	 echo "FATAL: br init failed"
+tests/e2e/graceful_shutdown.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/graceful_shutdown.sh	BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create --title "Long-running task for SIGTERM test" \
+tests/e2e/graceful_shutdown.sh	BEAD_STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/graceful_shutdown.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/graceful_shutdown.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/heartbeat_peer_recovery.sh	 (cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null) || true
+tests/e2e/heartbeat_peer_recovery.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/heartbeat_peer_recovery.sh	 STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/heartbeat_peer_recovery.sh	 bead_id="$(cd "$WORKSPACE" && "$BR_BIN" create --title "$title" \
+tests/e2e/heartbeat_peer_recovery.sh	 echo "FATAL: br init failed"
+tests/e2e/heartbeat_peer_recovery.sh	 info "br update --status in_progress failed"
+tests/e2e/heartbeat_peer_recovery.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/heartbeat_peer_recovery.sh	(cd "$WORKSPACE" && "$BR_BIN" update "$BEAD_1" --status in_progress --assignee "$DEAD_WORKER_ID" 2>&1) || {
+tests/e2e/heartbeat_peer_recovery.sh	BEAD1_FINAL="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_1" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/heartbeat_peer_recovery.sh	BEAD1_STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_1" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/heartbeat_peer_recovery.sh	BEAD2_STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_2" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/heartbeat_peer_recovery.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/heartbeat_peer_recovery.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/heartbeat_peer_recovery.sh	invoke_template: "cd {workspace} && echo done > DONE-{bead_id} && $BR_BIN close {bead_id} --reason 'E2E peer recovery test completed'"
+tests/e2e/lib/workspace.sh	 (cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/lib/workspace.sh	 (cd "$workspace_path" && "$BR_BIN" init 2>&1) || {
+tests/e2e/lib/workspace.sh	 (cd "$workspace_path" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/lib/workspace.sh	 bead_id="$(cd "$workspace_path" && "$BR_BIN" create \
+tests/e2e/lib/workspace.sh	 echo "FATAL: BR_BIN not set. Set it before calling create_home_workspace."
+tests/e2e/lib/workspace.sh	 echo "FATAL: BR_BIN not set. Set it before calling create_remote_workspace_with_bead."
+tests/e2e/lib/workspace.sh	 echo "FATAL: BR_BIN not set. Set it before calling setup_beads_workspace."
+tests/e2e/lib/workspace.sh	 echo "FATAL: br create failed in $workspace_path"
+tests/e2e/lib/workspace.sh	 echo "FATAL: br init failed for home workspace at $workspace_path"
+tests/e2e/lib/workspace.sh	 echo "FATAL: br init failed for remote workspace at $workspace_path"
+tests/e2e/lib/workspace.sh	 echo "FATAL: br init failed"
+tests/e2e/lib/workspace.sh	 if [ -z "${BR_BIN:-}" ]; then
+tests/e2e/lib/workspace.sh	# BR_BIN - path to br CLI (required)
+tests/e2e/lib/workspace.sh	# BR_BIN - path to br CLI (required, should be set by caller)
+tests/e2e/multi_worker.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/multi_worker.sh	 BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
+tests/e2e/multi_worker.sh	 STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$bead_id" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/multi_worker.sh	 cd "$WORKSPACE" && "$BR_BIN" show "$bead_id" 2>/dev/null | head -2 || true
+tests/e2e/multi_worker.sh	 echo "FATAL: br init failed"
+tests/e2e/multi_worker.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/multi_worker.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/multi_worker.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/multi_worker.sh	invoke_template: "cd {workspace} && mkdir -p markers && touch markers/{bead_id} && $BR_BIN close {bead_id} --reason 'E2E multi-worker test'"
+tests/e2e/single_worker.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/single_worker.sh	 BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create --title "Create a file called DONE" \
+tests/e2e/single_worker.sh	 echo "FATAL: br init failed"
+tests/e2e/single_worker.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/single_worker.sh	BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create --title "Create a file called DONE" \
+tests/e2e/single_worker.sh	BEAD_STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/single_worker.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/single_worker.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/single_worker.sh	invoke_template: "cd {workspace} && echo done > DONE && $BR_BIN close {bead_id} --reason 'E2E test completed'"
+tests/e2e/strand_waterfall.sh	BEAD_STATUS="$(cd "$REMOTE_WS_A" && "$BR_BIN" show "$REMOTE_BEAD_ID" 2>/dev/null | head -1 || echo "ERROR")"
+tests/e2e/strand_waterfall.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/strand_waterfall.sh	HOME_BEADS="$(cd "$HOME_WS_A" && "$BR_BIN" list --status open 2>/dev/null | wc -l || echo 0)"
+tests/e2e/strand_waterfall.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/strand_waterfall.sh	invoke_template: "cd {workspace} && ($BR_BIN sync --flush-only 2>/dev/null || true) && echo done > DONE && $BR_BIN close {bead_id} --reason 'E2E waterfall test completed'"
+tests/e2e/telemetry_completeness.sh	 (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+tests/e2e/telemetry_completeness.sh	 BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create --title "Create a file called DONE" \
+tests/e2e/telemetry_completeness.sh	 echo "FATAL: br init failed"
+tests/e2e/telemetry_completeness.sh	(cd "$WORKSPACE" && "$BR_BIN" init 2>&1) || {
+tests/e2e/telemetry_completeness.sh	BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create --title "Create a file called DONE" \
+tests/e2e/telemetry_completeness.sh	BR_BIN="$(which br 2>/dev/null || echo "$HOME/.local/bin/br")"
+tests/e2e/telemetry_completeness.sh	if [ ! -x "$BR_BIN" ]; then
+tests/e2e/telemetry_completeness.sh	invoke_template: "cd {workspace} && echo done > DONE && $BR_BIN close {bead_id} --reason 'E2E test completed'"
+tests/fixtures/test-echo.yaml	 cd {workspace} && echo "done" > DONE && bf close {bead_id} --reason "E2E test completed"
+tests/integration_spawn/stop_kills_process_tree.rs	 // 2. Initialize bead store: cd /tmp/test-needle-stop && br init
+tests/integration_spawn/stop_kills_process_tree.rs	 // 3. Create a test bead: br create --type task "Test stop kills process tree"
+tests/p2_integration_tests/test_bead_visibility.rs	//! is what production `br ready` / bead-rs computes.
+tests/real_br_integration_tests/bead_rehydration_verification.rs	 let bf = PathBuf::from(std::env::var_os("BF_BIN").expect("BF_BIN is required"));
+tests/real_br_integration_tests/bead_rehydration_verification.rs	#[ignore = "release gate requiring BF_BIN and BEAD_RS_BIN"]
+tests/real_br_integration_tests/workspace_equality_tests.rs	 "bf create failed: {}",
+tests/real_br_integration_tests/workspace_equality_tests.rs	 "bf init failed: {}",
+tests/real_br_integration_tests/workspace_equality_tests.rs	 "bf list failed: {}",
+tests/real_br_integration_tests/workspace_equality_tests.rs	 .expect("bf create failed");
+tests/real_br_integration_tests/workspace_equality_tests.rs	 .expect("bf init failed");
+tests/real_br_integration_tests/workspace_equality_tests.rs	 .expect("bf list failed");
