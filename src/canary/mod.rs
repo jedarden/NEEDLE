@@ -781,6 +781,57 @@ impl CanaryRunner {
         Ok(())
     }
 
+    /// Resolve the completed trace metadata for one canary dispatch.
+    ///
+    /// Current workers write one directory per attempt while older workers
+    /// wrote `metadata.json` directly below the bead directory. Canary
+    /// promotion must understand both layouts: otherwise an attempt-scoped
+    /// worker can finish successfully while the launcher waits until the
+    /// full canary timeout.
+    fn trace_metadata_path(&self, bead_id: &str) -> Result<Option<PathBuf>> {
+        let bead_trace_dir = self.canary_workspace.join(".beads/traces").join(bead_id);
+        let legacy = bead_trace_dir.join("metadata.json");
+        if legacy.is_file() {
+            return Ok(Some(legacy));
+        }
+
+        let entries = match std::fs::read_dir(&bead_trace_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect canary trace directory: {}",
+                        bead_trace_dir.display()
+                    )
+                });
+            }
+        };
+        let mut attempt_metadata = Vec::new();
+        for entry in entries {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to inspect an entry in canary trace directory: {}",
+                    bead_trace_dir.display()
+                )
+            })?;
+            if entry
+                .file_type()
+                .with_context(|| format!("failed to inspect {}", entry.path().display()))?
+                .is_dir()
+            {
+                let metadata = entry.path().join("metadata.json");
+                if metadata.is_file() {
+                    attempt_metadata.push(metadata);
+                }
+            }
+        }
+        // Attempt ids are UUIDv7 values, so lexical order also selects the
+        // newest attempt when a retained fixture contains more than one.
+        attempt_metadata.sort();
+        Ok(attempt_metadata.pop())
+    }
+
     fn resolved_bead_cli(&self) -> Result<(crate::config::Backend, PathBuf)> {
         let workspace_config = crate::config::ConfigLoader::load_workspace(&self.canary_workspace)?
             .with_context(|| {
@@ -1016,17 +1067,24 @@ impl CanaryRunner {
         // and the state machine has left HANDLING, then stop the now-idle
         // worker. Scoring the detached/long-lived launcher was the source of
         // the old canary's false results.
-        let trace_metadata = self
-            .canary_workspace
-            .join(".beads/traces")
-            .join(bead_id)
-            .join("metadata.json");
         let log_dir = isolated_home.path().join(".needle/logs");
         let exit_code = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.code(),
                 Ok(None) => {
-                    let handling_complete = trace_metadata.is_file()
+                    let trace_complete = match self.trace_metadata_path(bead_id) {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(error) => {
+                            child.kill().ok();
+                            child.wait().ok();
+                            return CanaryTestResult::Error {
+                                bead_id: bead_id.to_string(),
+                                message: format!("failed to inspect canary trace: {error:#}"),
+                            };
+                        }
+                    };
+                    let handling_complete = trace_complete
                         && read_state_transitions(&log_dir)
                             .is_ok_and(|states| states.iter().any(|state| state == "LOGGING"));
                     if handling_complete {
@@ -1114,12 +1172,8 @@ impl CanaryRunner {
         // `needle run` normally exits successfully after it handles a failed
         // or timed-out agent. The agent outcome belongs to the per-bead trace,
         // not the outer worker process.
-        let metadata_path = self
-            .canary_workspace
-            .join(".beads/traces")
-            .join(bead_id)
-            .join("metadata.json");
-        let exit_code = if metadata_path.is_file() {
+        let metadata_path = self.trace_metadata_path(bead_id)?;
+        let exit_code = if let Some(metadata_path) = metadata_path {
             let metadata: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&metadata_path).with_context(|| {
                     format!("failed to read trace metadata: {}", metadata_path.display())
