@@ -132,11 +132,12 @@ const JITTER_DRAW_BASIS_PERCENT: u32 = 100;
 /// Weave and later strands reachable while that migration is completed.
 const EXPLORE_EVALUATION_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Maximum number of independent workspace probes in flight at once. Explore
-/// used to probe every workspace serially, so backend identity checks and
-/// inventory reads across a large fleet could consume the whole evaluation
-/// budget before a ready query was reached.
-const EXPLORE_WORKSPACE_CONCURRENCY: usize = 8;
+/// Maximum number of independent workspace probes in flight per worker.
+/// Keep this low because many roamers scan the same fleet concurrently; a
+/// fan-out of eight multiplied across 27 workers can create 216 simultaneous
+/// backend probes and intensify the lock and process contention Explore must
+/// avoid.
+const EXPLORE_WORKSPACE_CONCURRENCY: usize = 2;
 
 /// A jitter source: returns a draw in `0..=100` (a percentage). Production
 /// uses entropy; cadence tests inject fixed draws to stay deterministic.
@@ -181,6 +182,50 @@ enum ExploreScanOutcome {
 struct WorkspaceFrontier {
     store: Arc<dyn BeadStore>,
     candidates: Vec<crate::types::Bead>,
+    filtered_candidates: usize,
+    split_out_of_scope_candidates: usize,
+}
+
+/// Emits one timing event when the measured workspace phase finishes. Guards
+/// are created before bounded probes start, so their duration includes time in
+/// the queue. Dropping a pending guard records `cancelled`, including queued
+/// workspaces when the outer Explore budget expires.
+struct ExploreWorkspaceTiming {
+    telemetry: Telemetry,
+    workspace: String,
+    phase: String,
+    outcome: String,
+    started: std::time::Instant,
+}
+
+impl ExploreWorkspaceTiming {
+    fn new(telemetry: &Telemetry, workspace: &Path, phase: &str) -> Self {
+        Self {
+            telemetry: telemetry.clone(),
+            workspace: workspace.display().to_string(),
+            phase: phase.to_string(),
+            outcome: "cancelled".to_string(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn set_outcome(&mut self, outcome: &str) {
+        self.outcome = outcome.to_string();
+    }
+}
+
+impl Drop for ExploreWorkspaceTiming {
+    fn drop(&mut self) {
+        let _ = self.telemetry.emit(
+            crate::telemetry::EventKind::ExploreWorkspaceTiming {
+                workspace: self.workspace.clone(),
+                phase: self.phase.clone(),
+                outcome: self.outcome.clone(),
+                duration_ms: self.started.elapsed().as_millis() as u64,
+            },
+            Utc::now(),
+        );
+    }
 }
 
 /// In-memory cadence state for Explore's roaming scan.
@@ -1560,12 +1605,16 @@ impl ExploreStrand {
         let mut candidates = remote_store.ready(filters).await?;
         self.filter_circuit_candidates(workspace, &mut candidates)
             .await;
+        let before_admission = candidates.len();
         let mut candidates = self
             .admit_candidates(remote_store.as_ref(), candidates, filters)
             .await;
+        let filtered_candidates = before_admission - candidates.len();
+        let before_scope_filter = candidates.len();
         candidates.retain(|bead| {
             !crate::mitosis::would_release_as_split_out_of_scope(bead, self.split_after_failures)
         });
+        let split_out_of_scope_candidates = before_scope_filter - candidates.len();
 
         // The store passed both backend/inventory admission and the frontier
         // query. Clear any prior quarantine only now; an inventory probe that
@@ -1575,6 +1624,8 @@ impl ExploreStrand {
         Ok(Some(WorkspaceFrontier {
             store: remote_store,
             candidates,
+            filtered_candidates,
+            split_out_of_scope_candidates,
         }))
     }
 
@@ -1709,42 +1760,41 @@ impl ExploreStrand {
                     && !matches!(crate::gate_health::is_degraded(workspace), Ok(true))
             })
             .collect();
+        // Rotate before the expensive probes begin so simultaneous roamers
+        // spread their first backend opens and ready queries across the fleet.
+        let probe_workspaces = self.worker_scan_order(probe_workspaces);
 
         // Store opening, backend validation, inventory probing, and ready
         // queries are independent across workspaces. Bound the fan-out so a
         // fleet of explorers does not replace serial latency with an
         // unbounded subprocess storm.
-        let probe_results = stream::iter(probe_workspaces)
+        let probe_jobs: Vec<_> = probe_workspaces
+            .into_iter()
             .map(|workspace| {
                 let workspace_filters = filters.clone();
-                async move {
-                    let started = Instant::now();
-                    let result = self
-                        .probe_workspace_frontier(&workspace, &workspace_filters)
-                        .await;
-                    let outcome = match &result {
-                        Ok(Some(_)) => "ready",
-                        Ok(None) => "excluded",
-                        Err(_) => "error",
-                    };
-                    let _ = self.telemetry.emit(
-                        crate::telemetry::EventKind::ExploreWorkspaceTiming {
-                            workspace: workspace.display().to_string(),
-                            phase: "frontier".to_string(),
-                            outcome: outcome.to_string(),
-                            duration_ms: started.elapsed().as_millis() as u64,
-                        },
-                        Utc::now(),
-                    );
-                    (workspace, result)
-                }
+                let timing = ExploreWorkspaceTiming::new(&self.telemetry, &workspace, "frontier");
+                (workspace, workspace_filters, timing)
+            })
+            .collect();
+
+        let probe_results = stream::iter(probe_jobs)
+            .map(|(workspace, workspace_filters, mut timing)| async move {
+                let result = self
+                    .probe_workspace_frontier(&workspace, &workspace_filters)
+                    .await;
+                timing.set_outcome(match &result {
+                    Ok(Some(_)) => "ready",
+                    Ok(None) => "excluded",
+                    Err(_) => "error",
+                });
+                (workspace, result)
             })
             .buffer_unordered(EXPLORE_WORKSPACE_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
 
         let mut workspace_health: Vec<WorkspaceHealth> = Vec::new();
-        let mut validated_stores: HashMap<PathBuf, Arc<dyn BeadStore>> = HashMap::new();
+        let mut validated_frontiers: HashMap<PathBuf, WorkspaceFrontier> = HashMap::new();
         for (workspace, result) in probe_results {
             let Some(frontier) = (match result {
                 Ok(frontier) => frontier,
@@ -1769,7 +1819,7 @@ impl ExploreStrand {
                 .max()
                 .unwrap_or(0);
 
-            validated_stores.insert(workspace.clone(), frontier.store);
+            validated_frontiers.insert(workspace.clone(), frontier);
             workspace_health.push(WorkspaceHealth {
                 path: workspace,
                 p0_count,
@@ -1877,22 +1927,30 @@ impl ExploreStrand {
                 continue;
             }
 
-            // Reuse the store that passed the frontier probe. The old
-            // implementation reopened and revalidated every workspace here,
-            // doubling the expensive backend identity and inventory work in a
-            // single evaluation.
-            let Some(remote_store) = validated_stores.get(workspace).cloned() else {
+            // Reuse both the store and its already admitted ready frontier.
+            // Re-reading every workspace's queue here doubled the backend
+            // queries after the ranking pass and amplified contention when
+            // many explorers scanned the same fleet together.
+            let Some(frontier) = validated_frontiers.get(workspace) else {
                 exclusion_reasons.insert("frontier_store_missing".to_string());
                 continue;
             };
+            let remote_store = frontier.store.clone();
 
             // This is the final admission check for a roaming candidate. The
             // remote store is the workspace's own store, so the status query
             // counts claims held by workers on every host, not just this one.
-            match self
+            let mut capacity_timing =
+                ExploreWorkspaceTiming::new(&self.telemetry, workspace, "capacity_recheck");
+            let capacity = self
                 .workspace_capacity(workspace, remote_store.as_ref())
-                .await
-            {
+                .await;
+            capacity_timing.set_outcome(match &capacity {
+                Ok(Some(snapshot)) if snapshot.at_capacity() => "at_capacity",
+                Ok(_) => "available",
+                Err(_) => "error",
+            });
+            match capacity {
                 Ok(Some(snapshot)) if snapshot.at_capacity() => {
                     let _ = self.telemetry.emit(
                         crate::telemetry::EventKind::WorkspaceAtCapacity {
@@ -1922,240 +1980,187 @@ impl ExploreStrand {
                     continue;
                 }
             }
+            drop(capacity_timing);
 
-            match remote_store.ready(&filters).await {
-                Ok(mut candidates) => {
-                    self.filter_circuit_candidates(workspace, &mut candidates)
-                        .await;
-                    let before_count = candidates.len();
-                    let mut candidates = self
-                        .admit_candidates(remote_store.as_ref(), candidates, &filters)
-                        .await;
-                    let filtered_count = before_count - candidates.len();
+            if frontier.filtered_candidates > 0 {
+                exclusion_reasons.insert(format!("filtered_{}", frontier.filtered_candidates));
+                excluded_ready_candidates += frontier.filtered_candidates;
+            }
 
-                    if filtered_count > 0 {
-                        exclusion_reasons.insert(format!("filtered_{}", filtered_count));
-                        excluded_ready_candidates += filtered_count;
-                    }
+            if frontier.split_out_of_scope_candidates > 0 {
+                exclusion_reasons.insert(format!(
+                    "split_out_of_scope_ineligible_{}",
+                    frontier.split_out_of_scope_candidates
+                ));
+                excluded_ready_candidates += frontier.split_out_of_scope_candidates;
+                tracing::info!(
+                    workspace = %workspace.display(),
+                    ineligible_count = frontier.split_out_of_scope_candidates,
+                    "rejected candidates that would release as split_out_of_scope"
+                );
+            }
 
-                    // Reject candidates the worker would claim and then release
-                    // unchanged as `split_out_of_scope`. Without this the same
-                    // bead is reselected on the very next scan, because nothing
-                    // about it changed — a livelock that burned 1382
-                    // claim/release cycles across 3 beads and 15 workers in a
-                    // single day with zero dispatches (needle-ee024ae4).
-                    //
-                    // This runs BEFORE ranking and claim, and every worker
-                    // applies the same predicate, so concurrent workers cannot
-                    // form a claim/release storm on the same rejected bead.
-                    let before_ineligible = candidates.len();
-                    let split_after_failures = self.split_after_failures;
-                    candidates.retain(|b| {
-                        !crate::mitosis::would_release_as_split_out_of_scope(
-                            b,
-                            split_after_failures,
-                        )
-                    });
-                    let ineligible_count = before_ineligible - candidates.len();
+            let mut candidates = frontier.candidates.clone();
+            if candidates.is_empty() {
+                // No ready candidates. Run cross-workspace mend to release
+                // orphaned in-progress beads, then re-query.
+                tracing::debug!(
+                    workspace = %workspace.display(),
+                    "no ready candidates, running cross-workspace mend"
+                );
+                exclusion_reasons.insert("no_ready_candidates".to_string());
 
-                    if ineligible_count > 0 {
-                        // Distinct from `filtered_*` so telemetry separates
-                        // rejected-before-claim from the worker's late
-                        // post-claim fallback.
-                        exclusion_reasons.insert(format!(
-                            "split_out_of_scope_ineligible_{}",
-                            ineligible_count
-                        ));
-                        excluded_ready_candidates += ineligible_count;
-                        tracing::info!(
+                // Only run cleanup if there are actually in-progress beads.
+                // This avoids unnecessary spawn_blocking calls that can deadlock
+                // in test environments with limited blocking thread pools.
+                let in_progress = match remote_store.list_in_progress().await {
+                    Ok(beads) => beads,
+                    Err(e) => {
+                        tracing::warn!(
                             workspace = %workspace.display(),
-                            ineligible_count,
-                            "rejected candidates that would release as split_out_of_scope"
+                            error = %e,
+                            "failed to list beads for orphan check, skipping"
                         );
-                    }
-
-                    if candidates.is_empty() {
-                        // No ready candidates. Run cross-workspace mend to release
-                        // orphaned in-progress beads, then re-query.
-                        tracing::debug!(
-                            workspace = %workspace.display(),
-                            "no ready candidates, running cross-workspace mend"
-                        );
-                        exclusion_reasons.insert("no_ready_candidates".to_string());
-
-                        // Only run cleanup if there are actually in-progress beads.
-                        // This avoids unnecessary spawn_blocking calls that can deadlock
-                        // in test environments with limited blocking thread pools.
-                        let all_beads = match remote_store.list_all().await {
-                            Ok(beads) => beads,
-                            Err(e) => {
-                                tracing::warn!(
-                                    workspace = %workspace.display(),
-                                    error = %e,
-                                    "failed to list beads for orphan check, skipping"
-                                );
-                                exclusion_reasons.insert(format!("list_error: {}", e));
-                                continue;
-                            }
-                        };
-
-                        let has_in_progress = all_beads
-                            .iter()
-                            .any(|b| b.status == crate::types::BeadStatus::InProgress);
-
-                        if !has_in_progress {
-                            tracing::debug!(
-                                workspace = %workspace.display(),
-                                "no in-progress beads, skipping orphan cleanup"
-                            );
-                            exclusion_reasons.insert("no_in_progress".to_string());
-                            continue;
-                        }
-
-                        match super::cleanup_orphaned_in_progress(
-                            remote_store.as_ref(),
-                            &self.registry,
-                            &self.telemetry,
-                            Some(Duration::from_secs(self.stale_claim_ttl)),
-                            self.heartbeat_ttl,
-                        )
-                        .await
-                        {
-                            Ok(released) if released > 0 => {
-                                tracing::info!(
-                                    workspace = %workspace.display(),
-                                    released,
-                                    "cross-workspace mend released claims on confirmed ownership evidence, re-querying"
-                                );
-
-                                // Re-query ready after cleanup.
-                                match remote_store.ready(&filters).await {
-                                    Ok(mut retry_candidates) => {
-                                        // Apply the same candidate guards as the
-                                        // first query of this workspace.
-                                        self.filter_circuit_candidates(
-                                            workspace,
-                                            &mut retry_candidates,
-                                        )
-                                        .await;
-                                        let retry_before = retry_candidates.len();
-                                        let mut retry_candidates = self
-                                            .admit_candidates(
-                                                remote_store.as_ref(),
-                                                retry_candidates,
-                                                &filters,
-                                            )
-                                            .await;
-                                        let retry_filtered = retry_before - retry_candidates.len();
-
-                                        if retry_filtered > 0 {
-                                            exclusion_reasons.insert(format!(
-                                                "retry_filtered_{}",
-                                                retry_filtered
-                                            ));
-                                            excluded_ready_candidates += retry_filtered;
-                                        }
-
-                                        if !retry_candidates.is_empty() {
-                                            // Found candidates after releasing orphans.
-                                            // Tag them with their workspace; the global
-                                            // rank happens once, after the full scan.
-                                            for bead in &mut retry_candidates {
-                                                bead.workspace = workspace.clone();
-                                            }
-
-                                            workspaces_with_candidates.push(workspace_str.clone());
-                                            total_candidates += retry_candidates.len();
-
-                                            tracing::info!(
-                                                workspace = %workspace.display(),
-                                                candidates = retry_candidates.len(),
-                                                "explore found candidates in remote workspace after cross-workspace mend"
-                                            );
-
-                                            // Accumulate instead of returning early (bf-4df1e):
-                                            // keep scanning the remaining workspaces this cycle.
-                                            all_candidates.append(&mut retry_candidates);
-                                        } else {
-                                            // Orphans were released but re-query found no candidates.
-                                            // Do NOT return WorkCreated — the beads will become available
-                                            // in the next natural selection cycle when Pluck re-scans the
-                                            // ready queue. Returning WorkCreated here causes restart loops
-                                            // when released beads don't pass filters (e.g., still blocked).
-                                            tracing::info!(
-                                                workspace = %workspace.display(),
-                                                released,
-                                                "cross-workspace mend released orphans but re-query found no candidates (beads may not pass filters), continuing to next workspace"
-                                            );
-                                            exclusion_reasons.insert(
-                                                "orphans_released_no_candidates".to_string(),
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            workspace = %workspace.display(),
-                                            error = %e,
-                                            "failed to re-query workspace after cross-workspace mend, skipping"
-                                        );
-                                        exclusion_reasons.insert(format!("requery_error: {}", e));
-                                    }
-                                }
-                            }
-                            Ok(_) => {
-                                // No orphans released, workspace is truly empty.
-                                tracing::debug!(
-                                    workspace = %workspace.display(),
-                                    "cross-workspace mend found no orphans"
-                                );
-                                exclusion_reasons.insert("no_orphans".to_string());
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    workspace = %workspace.display(),
-                                    error = %e,
-                                    "cross-workspace mend failed, skipping workspace"
-                                );
-                                exclusion_reasons.insert(format!("mend_error: {}", e));
-                            }
-                        }
-
-                        // Advance to next workspace (candidates empty after mend).
+                        exclusion_reasons.insert(format!("list_error: {}", e));
                         continue;
                     }
+                };
 
-                    // Tag each candidate with the workspace it came from so the
-                    // worker can create the correct bead store; the global rank
-                    // happens once, after every workspace has been scanned.
-                    for bead in &mut candidates {
-                        bead.workspace = workspace.clone();
-                    }
-
-                    // Track successful workspace scan.
-                    workspaces_with_candidates.push(workspace_str.clone());
-                    total_candidates += candidates.len();
-
-                    tracing::info!(
+                if in_progress.is_empty() {
+                    tracing::debug!(
                         workspace = %workspace.display(),
-                        candidates = candidates.len(),
-                        "explore found candidates in remote workspace"
+                        "no in-progress beads, skipping orphan cleanup"
                     );
-
-                    // Accumulate instead of returning early (bf-4df1e / bf-47bfm):
-                    // continue scanning all remaining workspaces this cycle.
-                    all_candidates.append(&mut candidates);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        workspace = %workspace.display(),
-                        error = %e,
-                        "failed to query workspace, skipping"
-                    );
-                    exclusion_reasons.insert(format!("query_error: {}", e));
-                    self.record_store_failure(workspace, &e);
+                    exclusion_reasons.insert("no_in_progress".to_string());
                     continue;
                 }
+
+                match super::cleanup_orphaned_in_progress(
+                    remote_store.as_ref(),
+                    &self.registry,
+                    &self.telemetry,
+                    Some(Duration::from_secs(self.stale_claim_ttl)),
+                    self.heartbeat_ttl,
+                )
+                .await
+                {
+                    Ok(released) if released > 0 => {
+                        tracing::info!(
+                            workspace = %workspace.display(),
+                            released,
+                            "cross-workspace mend released claims on confirmed ownership evidence, re-querying"
+                        );
+
+                        // Re-query ready after cleanup.
+                        match remote_store.ready(&filters).await {
+                            Ok(mut retry_candidates) => {
+                                // Apply the same candidate guards as the
+                                // first query of this workspace.
+                                self.filter_circuit_candidates(workspace, &mut retry_candidates)
+                                    .await;
+                                let retry_before = retry_candidates.len();
+                                let mut retry_candidates = self
+                                    .admit_candidates(
+                                        remote_store.as_ref(),
+                                        retry_candidates,
+                                        &filters,
+                                    )
+                                    .await;
+                                let retry_filtered = retry_before - retry_candidates.len();
+
+                                if retry_filtered > 0 {
+                                    exclusion_reasons
+                                        .insert(format!("retry_filtered_{}", retry_filtered));
+                                    excluded_ready_candidates += retry_filtered;
+                                }
+
+                                if !retry_candidates.is_empty() {
+                                    // Found candidates after releasing orphans.
+                                    // Tag them with their workspace; the global
+                                    // rank happens once, after the full scan.
+                                    for bead in &mut retry_candidates {
+                                        bead.workspace = workspace.clone();
+                                    }
+
+                                    workspaces_with_candidates.push(workspace_str.clone());
+                                    total_candidates += retry_candidates.len();
+
+                                    tracing::info!(
+                                        workspace = %workspace.display(),
+                                        candidates = retry_candidates.len(),
+                                        "explore found candidates in remote workspace after cross-workspace mend"
+                                    );
+
+                                    // Accumulate instead of returning early (bf-4df1e):
+                                    // keep scanning the remaining workspaces this cycle.
+                                    all_candidates.append(&mut retry_candidates);
+                                } else {
+                                    // Orphans were released but re-query found no candidates.
+                                    // Do NOT return WorkCreated — the beads will become available
+                                    // in the next natural selection cycle when Pluck re-scans the
+                                    // ready queue. Returning WorkCreated here causes restart loops
+                                    // when released beads don't pass filters (e.g., still blocked).
+                                    tracing::info!(
+                                        workspace = %workspace.display(),
+                                        released,
+                                        "cross-workspace mend released orphans but re-query found no candidates (beads may not pass filters), continuing to next workspace"
+                                    );
+                                    exclusion_reasons
+                                        .insert("orphans_released_no_candidates".to_string());
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    workspace = %workspace.display(),
+                                    error = %e,
+                                    "failed to re-query workspace after cross-workspace mend, skipping"
+                                );
+                                exclusion_reasons.insert(format!("requery_error: {}", e));
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        // No orphans released, workspace is truly empty.
+                        tracing::debug!(
+                            workspace = %workspace.display(),
+                            "cross-workspace mend found no orphans"
+                        );
+                        exclusion_reasons.insert("no_orphans".to_string());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace = %workspace.display(),
+                            error = %e,
+                            "cross-workspace mend failed, skipping workspace"
+                        );
+                        exclusion_reasons.insert(format!("mend_error: {}", e));
+                    }
+                }
+
+                // Advance to next workspace (candidates empty after mend).
+                continue;
             }
+
+            // Tag each candidate with the workspace it came from so the
+            // worker can create the correct bead store; the global rank
+            // happens once, after every workspace has been scanned.
+            for bead in &mut candidates {
+                bead.workspace = workspace.clone();
+            }
+
+            // Track successful workspace scan.
+            workspaces_with_candidates.push(workspace_str.clone());
+            total_candidates += candidates.len();
+
+            tracing::info!(
+                workspace = %workspace.display(),
+                candidates = candidates.len(),
+                "explore found candidates in remote workspace"
+            );
+
+            // Accumulate instead of returning early (bf-4df1e / bf-47bfm):
+            // continue scanning all remaining workspaces this cycle.
+            all_candidates.append(&mut candidates);
         }
 
         // Emit the scan summary once, covering every workspace visited this cycle.
@@ -2579,15 +2584,24 @@ mod tests {
         assert!(matches!(result, StrandResult::NoWork));
 
         let workspace_root = tempfile::tempdir().unwrap();
-        let workspace = workspace_root.path().join("slow-workspace");
-        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+        let workspaces: Vec<PathBuf> = (0..3)
+            .map(|index| {
+                workspace_root
+                    .path()
+                    .join(format!("slow-workspace-{index}"))
+            })
+            .collect();
+        for workspace in &workspaces {
+            std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+        }
 
         let state_dir = tempfile::tempdir().unwrap();
+        let helper = TestHelper::new("timeout-test-worker");
         let strand = ExploreStrand::new_with_store_factory(
-            vec![workspace],
+            workspaces,
             workspace_root.path().join("home"),
             Registry::new(state_dir.path()),
-            Telemetry::new("timeout-test-worker".to_string()),
+            helper.telemetry_handle(),
             "timeout-test-worker".to_string(),
             Arc::new(SlowStoreFactory),
             300,
@@ -2602,6 +2616,14 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "Explore did not yield near its configured timeout"
         );
+        helper.sync().await;
+        let timing_events = helper.events_by_type("explore.workspace_timing");
+        assert_eq!(timing_events.len(), 3);
+        assert!(timing_events.iter().all(|event| {
+            event.data["phase"] == "frontier"
+                && event.data["outcome"] == "cancelled"
+                && event.data["duration_ms"].is_u64()
+        }));
     }
 
     async fn assert_explore_emits_per_workspace_timing_event() {
@@ -2618,24 +2640,148 @@ mod tests {
             helper.telemetry_handle(),
             "explore-timing-test".to_string(),
             Arc::new(AdaptiveScanFactory {
-                ready_calls,
-                candidate_on_ready_call: 2,
+                ready_calls: ready_calls.clone(),
+                candidate_on_ready_call: 1,
             }),
             300,
         );
 
         let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::BeadFound(_)));
+        assert_eq!(
+            ready_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Explore should use the ranked ready frontier instead of querying it again"
+        );
         helper.sync().await;
 
         let events = helper.events_by_type("explore.workspace_timing");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data["workspace"], workspace.display().to_string());
-        assert_eq!(events[0].data["phase"], "frontier");
-        assert!(events[0].data["duration_ms"].is_u64());
+        let frontier = events
+            .iter()
+            .find(|event| event.data["phase"] == "frontier")
+            .expect("frontier probe timing event should be emitted");
+        assert_eq!(frontier.data["workspace"], workspace.display().to_string());
+        assert_eq!(frontier.data["outcome"], "ready");
+        assert!(frontier.data["duration_ms"].is_u64());
+        assert_eq!(frontier.duration_ms, frontier.data["duration_ms"].as_u64());
+
+        let capacity = events
+            .iter()
+            .find(|event| event.data["phase"] == "capacity_recheck")
+            .expect("capacity recheck timing event should be emitted");
+        assert_eq!(capacity.data["workspace"], workspace.display().to_string());
+        assert_eq!(capacity.data["outcome"], "available");
+        assert!(capacity.data["duration_ms"].is_u64());
+    }
+
+    async fn assert_empty_home_roamer_claims_from_a_large_frontier_within_three_cycles() {
+        let temp_root = tempfile::tempdir().unwrap();
+        let home = temp_root.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let candidate_workspace = temp_root.path().join("remote-37");
+        let candidate = Bead {
+            id: BeadId::from("remote-ready-bead"),
+            title: "Remote ready bead".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec![],
+            workspace: candidate_workspace.clone(),
+            dependencies: vec![],
+            dependents: vec![],
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mut workspaces = Vec::new();
+        let mut workspace_data = Vec::new();
+        for index in 0..70 {
+            let workspace = temp_root.path().join(format!("remote-{index}"));
+            fs::create_dir_all(workspace.join(".beads")).unwrap();
+            let beads = if workspace == candidate_workspace {
+                vec![candidate.clone()]
+            } else {
+                vec![]
+            };
+            workspaces.push(workspace.clone());
+            workspace_data.push((workspace, beads));
+        }
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let helper = TestHelper::new("empty-home-roamer-test");
+        let ready_workspaces = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let strand = ExploreStrand::new_with_store_factory(
+            workspaces,
+            home,
+            Registry::new(state_dir.path()),
+            helper.telemetry_handle(),
+            "empty-home-roamer-test".to_string(),
+            Arc::new(
+                FrontierRankingFactory::new(workspace_data)
+                    .with_ready_calls(ready_workspaces.clone()),
+            ),
+            300,
+        );
+
+        let mut found = None;
+        for cycle in 1..=3 {
+            match strand.evaluate(&DummyStore, &HashSet::new()).await {
+                StrandResult::BeadFound(candidates) => {
+                    found = Some((cycle, candidates));
+                    break;
+                }
+                StrandResult::NoWork => {}
+                other => panic!("unexpected Explore result for roam-only worker: {other:?}"),
+            }
+        }
+
+        let (cycle, candidates) =
+            found.expect("Explore should find the remote bead within 3 cycles");
+        assert!(cycle <= 3);
+        assert!(candidates
+            .iter()
+            .any(|bead| { bead.id == candidate.id && bead.workspace == candidate_workspace }));
         assert_eq!(
-            events[0].duration_ms,
-            events[0].data["duration_ms"].as_u64()
+            ready_workspaces.lock().unwrap().len(),
+            70,
+            "each workspace should be queried once in the first evaluation"
+        );
+
+        let claim_store = Arc::new(FrontierRankingStore::new(
+            candidate_workspace,
+            vec![candidate.clone()],
+        ));
+        let claimer = Claimer::new(
+            claim_store,
+            temp_root.path().join("claim-locks"),
+            5,
+            0,
+            helper.telemetry_handle(),
+        );
+        let claimed = claimer
+            .claim_next(
+                &candidates,
+                "empty-home-roamer-test",
+                &HashSet::new(),
+                "explore",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            claimed,
+            crate::types::ClaimOutcome::Claimed(ref bead) if bead.id == candidate.id
+        ));
+
+        helper.sync().await;
+        let timing_events = helper.events_by_type("explore.workspace_timing");
+        assert_eq!(
+            timing_events
+                .iter()
+                .filter(|event| event.data["phase"] == "frontier")
+                .count(),
+            70
         );
     }
 
@@ -3903,7 +4049,6 @@ mod tests {
                     panic!("unexpected FoundButExcluded result");
                 }
             }
-        assert_explore_emits_per_workspace_timing_event().await;
         });
     }
 
@@ -6655,11 +6800,12 @@ mod tests {
         }
     }
 
-    /// Regression for poisoned-frontier and multi-worker herding scenarios:
-    /// excluded work must not rank its workspace ahead of claimable work, and
-    /// different workers must rotate across the remaining frontier.
+    /// Regression for poisoned-frontier, multi-worker herding, and empty-home
+    /// roaming scenarios. Excluded work must not rank its workspace ahead of
+    /// claimable work, workers must rotate across the frontier, and a roamer
+    /// must claim from a large remote queue while per-workspace timing emits.
     #[test]
-    fn frontier_ranking_skips_poisoned_workspace_and_rotates_workers() {
+    fn frontier_ranking_and_empty_home_roaming_preserve_claimability_and_timing() {
         let runtime = create_test_runtime();
         runtime.block_on(async {
             let temp_root = tempfile::tempdir().unwrap();
@@ -6724,18 +6870,20 @@ mod tests {
                 300,
             );
 
-            let claimable_order = strand1.worker_scan_order(vec![ws2.clone(), ws3.clone()]);
+            let probe_order =
+                strand1.worker_scan_order(vec![ws1.clone(), ws2.clone(), ws3.clone()]);
             let worker2_id = (0..128)
                 .map(|index| format!("worker-bravo-{index}"))
                 .find(|worker_id| {
                     let candidate = ExploreStrand::new_for_test(
-                        vec![ws2.clone(), ws3.clone()],
+                        vec![ws1.clone(), ws2.clone(), ws3.clone()],
                         home.clone(),
                         crate::registry::Registry::new(tempfile::tempdir().unwrap().path()),
                         Telemetry::new(worker_id.clone()),
                         worker_id.clone(),
                     );
-                    candidate.worker_scan_order(vec![ws2.clone(), ws3.clone()]) != claimable_order
+                    candidate.worker_scan_order(vec![ws1.clone(), ws2.clone(), ws3.clone()])
+                        != probe_order
                 })
                 .expect("worker identities should produce more than one frontier rotation");
 
@@ -6792,19 +6940,14 @@ mod tests {
 
             let calls1 = calls1.lock().unwrap().clone();
             let calls2 = calls2.lock().unwrap().clone();
-            assert_eq!(calls1.len(), 6);
-            assert_eq!(calls2.len(), 6);
-            assert_eq!(
-                &calls1[3..],
-                &[
-                    claimable_order[0].clone(),
-                    claimable_order[1].clone(),
-                    ws1.clone()
-                ]
-            );
-            assert_ne!(&calls1[3..5], &calls2[3..5]);
-            assert_eq!(&calls1[5], &ws1);
-            assert_eq!(&calls2[5], &ws1);
+            let probe_order2 =
+                strand2.worker_scan_order(vec![ws1.clone(), ws2.clone(), ws3.clone()]);
+            assert_eq!(calls1, probe_order);
+            assert_eq!(calls2, probe_order2);
+            assert_ne!(calls1, calls2, "workers should spread their first probes");
+
+            assert_explore_emits_per_workspace_timing_event().await;
+            assert_empty_home_roamer_claims_from_a_large_frontier_within_three_cycles().await;
         });
     }
 
