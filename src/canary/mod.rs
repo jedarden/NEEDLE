@@ -1120,14 +1120,25 @@ impl CanaryRunner {
             }
         };
 
-        let actual = match self.get_actual_outcome(bead_id, exit_code, isolated_home.path()) {
-            Ok(a) => a,
-            Err(e) => {
-                return CanaryTestResult::Error {
-                    bead_id: bead_id.to_string(),
-                    message: format!("failed to get actual outcome: {e}"),
-                };
+        // bead-rs may publish the labels and final projected status in adjacent
+        // transactions. The worker has already been stopped at the LOGGING
+        // boundary, so allow that projection a short bounded interval to settle
+        // without giving the persistent fixture a chance to be reclaimed.
+        let settlement_deadline = Instant::now() + Duration::from_secs(2);
+        let actual = loop {
+            let actual = match self.get_actual_outcome(bead_id, exit_code, isolated_home.path()) {
+                Ok(actual) => actual,
+                Err(error) => {
+                    return CanaryTestResult::Error {
+                        bead_id: bead_id.to_string(),
+                        message: format!("failed to get actual outcome: {error}"),
+                    };
+                }
+            };
+            if self.outcomes_match(expected, &actual) || Instant::now() >= settlement_deadline {
+                break actual;
             }
+            std::thread::sleep(Duration::from_millis(25));
         };
 
         // Compare actual vs expected.
