@@ -1074,6 +1074,44 @@ async fn cleanup_unverifiable_claim_context(
     }
 }
 
+/// Give a last-resort dispatch on a degraded provider extra recovery time.
+/// Healthy fallback selection remains preferred; this is only used when no
+/// allowed healthy adapter can take the attempt (N-T27).
+fn extend_degraded_timeout(adapter: &mut crate::dispatch::AgentAdapter, global_timeout_secs: u64) {
+    const DEGRADED_TIMEOUT_FACTOR: u64 = 2;
+    match adapter.timeout_policy() {
+        crate::dispatch::TimeoutPolicy::Legacy => {
+            let base = if adapter.timeout_secs == 0 {
+                global_timeout_secs
+            } else {
+                adapter.timeout_secs
+            };
+            adapter.timeout_secs = base.saturating_mul(DEGRADED_TIMEOUT_FACTOR);
+        }
+        crate::dispatch::TimeoutPolicy::New {
+            idle_enabled,
+            hard_enabled,
+        } => {
+            if idle_enabled {
+                adapter.idle_timeout_secs = adapter
+                    .idle_timeout_secs
+                    .saturating_mul(DEGRADED_TIMEOUT_FACTOR);
+            }
+            if hard_enabled {
+                adapter.hard_timeout_secs = adapter
+                    .hard_timeout_secs
+                    .saturating_mul(DEGRADED_TIMEOUT_FACTOR);
+            }
+        }
+        crate::dispatch::TimeoutPolicy::Global => {
+            let extended = global_timeout_secs.saturating_mul(DEGRADED_TIMEOUT_FACTOR);
+            if extended > 0 {
+                adapter.timeout_secs = extended;
+            }
+        }
+    }
+}
+
 impl Worker {
     /// Construct a worker using a pre-existing telemetry instance.
     ///
@@ -4119,6 +4157,9 @@ impl Worker {
 
         // Check rate limits before dispatching.
         let adapter = self.resolve_adapter()?;
+        self.attempt_provenance.provider_degraded |=
+            crate::provider_health::is_degraded(&adapter.name, adapter.provider.as_deref())
+                .unwrap_or(false);
         let provider = adapter.provider.as_deref();
         let model = adapter.model.as_deref();
         self.health.update_adapter(Some(&adapter.name));
@@ -4362,6 +4403,9 @@ impl Worker {
         };
 
         let adapter = self.resolve_adapter()?;
+        self.attempt_provenance.provider_degraded |=
+            crate::provider_health::is_degraded(&adapter.name, adapter.provider.as_deref())
+                .unwrap_or(false);
         let attempt_id = self
             .attempt_id
             .clone()
@@ -4919,6 +4963,7 @@ impl Worker {
                 actor: self.qualified_id(),
                 model: adapter.model.clone(),
                 provider: adapter.provider.clone(),
+                provider_degraded: self.attempt_provenance.provider_degraded,
                 // The prompt has been taken out of built_prompt above; its
                 // template identity is all the ledger needs from it.
                 prompt_template: prompt.template_name.clone(),
@@ -9199,7 +9244,7 @@ impl Worker {
         }
 
         // Resolve the chosen adapter.
-        let adapter = self.dispatcher.adapter(&chosen_adapter_name)
+        let mut adapter = self.dispatcher.adapter(&chosen_adapter_name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(
                 "routed adapter '{}' could not be loaded — routing matched model '{}' with pattern '{}', but the adapter YAML could not be loaded",
@@ -9207,6 +9252,13 @@ impl Worker {
                 default_adapter.model.as_deref().unwrap_or("unknown"),
                 matched_rule
             ))?;
+
+        let provider_degraded =
+            crate::provider_health::is_degraded(&adapter.name, adapter.provider.as_deref())
+                .unwrap_or(false);
+        if provider_degraded {
+            extend_degraded_timeout(&mut adapter, self.config.agent.timeout);
+        }
 
         Ok(adapter)
     }
@@ -9417,7 +9469,25 @@ impl Worker {
         bead_id: Option<&BeadId>,
     ) -> (String, String) {
         let config = &self.config.agent.evidence_routing;
+        let degraded = self.degraded_adapter_names();
         if !config.enabled || config.candidates.is_empty() {
+            if degraded.contains(&static_adapter) {
+                let fallback = config
+                    .candidates
+                    .iter()
+                    .find(|name| {
+                        name.as_str() != static_adapter
+                            && !degraded.contains(name.as_str())
+                            && self.dispatcher.adapter(name).is_some()
+                    })
+                    .cloned();
+                if let Some(fallback) = fallback {
+                    return (
+                        fallback,
+                        format!("provider_degraded_fallback:{static_adapter}"),
+                    );
+                }
+            }
             return (static_adapter, matched_rule);
         }
         // One choice per attempt: a later resolution for the same bead
@@ -9428,7 +9498,7 @@ impl Worker {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if let Some((bead, chosen, rule)) = sticky.as_ref() {
-                if bead == id {
+                if bead == id && !degraded.contains(chosen) {
                     return (chosen.clone(), rule.clone());
                 }
             }
@@ -9441,28 +9511,6 @@ impl Worker {
             return (static_adapter, matched_rule);
         };
         let cache = self.ledger_snapshot();
-        // N-T51: a degraded provider takes its whole adapter group out of
-        // routing at once. The degraded states are expanded against the
-        // dispatcher's configured adapters, so every adapter behind a
-        // degraded gateway — and only those — is excluded from the choice.
-        let provider_keyed = self.config.workspace_health.provider_keyed_health;
-        let known = self.dispatcher.adapter_names().into_iter().map(|name| {
-            let provider = provider_keyed
-                .then(|| {
-                    self.dispatcher
-                        .adapter(name)
-                        .and_then(|a| a.provider.clone())
-                })
-                .flatten();
-            (name.to_string(), provider)
-        });
-        let degraded: std::collections::HashSet<String> =
-            crate::provider_health::expand_degraded_adapters(
-                &crate::provider_health::degraded_adapters(),
-                known,
-            )
-            .into_iter()
-            .collect();
         let frozen = if is_workspace_unset(&self.current_workspace) {
             None
         } else {
@@ -9515,7 +9563,10 @@ impl Worker {
                     .copied()
                     .unwrap_or(0);
                 let preferred_tier = config.adapter_tiers.get(&preferred).copied().unwrap_or(0);
-                if preferred_tier > current_tier && self.dispatcher.adapter(&preferred).is_some() {
+                if preferred_tier > current_tier
+                    && !degraded.contains(&preferred)
+                    && self.dispatcher.adapter(&preferred).is_some()
+                {
                     choice.reason = format!("retry_tier_bias:{preferred_tier}");
                     choice.adapter = preferred;
                     choice.explored = false;
@@ -9582,6 +9633,28 @@ impl Worker {
                 Some((id.clone(), result.0.clone(), result.1.clone()));
         }
         result
+    }
+
+    /// Read the live provider-health state and expand provider-keyed health to
+    /// every configured adapter behind that provider (N-T27).
+    fn degraded_adapter_names(&self) -> std::collections::HashSet<String> {
+        let provider_keyed = self.config.workspace_health.provider_keyed_health;
+        let known = self.dispatcher.adapter_names().into_iter().map(|name| {
+            let provider = provider_keyed
+                .then(|| {
+                    self.dispatcher
+                        .adapter(name)
+                        .and_then(|adapter| adapter.provider.clone())
+                })
+                .flatten();
+            (name.to_string(), provider)
+        });
+        crate::provider_health::expand_degraded_adapters(
+            &crate::provider_health::degraded_adapters(),
+            known,
+        )
+        .into_iter()
+        .collect()
     }
 
     /// Apply routing rules to determine the final adapter.

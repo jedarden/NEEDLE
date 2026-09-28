@@ -37,6 +37,11 @@
       "type": "boolean",
       "description": "True until accepted claim-time provenance ties the dispatch ID to a real attempt (N-T03). Consumers must not treat a provisional row as authoritative: provisional rows are excluded from learning evidence and SLOs (plan section 4.4 step 1, Gate A)."
     },
+    "provider_degraded": {
+      "type": "boolean",
+      "enum": [true],
+      "description": "Present only on rows resolved while the selected adapter's provider was degraded (N-T27). Marked rows remain in the ledger for health/recovery accounting; adapter evidence windows exclude them by default and retain prior evidence on restoration."
+    },
     "bead_id": {
       "type": "string",
       "description": "Bead the attempt worked on."

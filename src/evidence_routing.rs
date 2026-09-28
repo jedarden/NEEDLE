@@ -75,7 +75,7 @@ impl AdapterEvidence {
     /// resolution class is classified in one place. A decomposed row still
     /// adds its cost — splitting is spend without a verified success.
     pub fn observe_row(&mut self, row: &serde_json::Value) {
-        if !is_authoritative_attempt_row(row) {
+        if !is_learning_evidence_row(row) {
             return;
         }
         self.attempts += 1;
@@ -173,6 +173,19 @@ pub fn is_authoritative_attempt_row(row: &serde_json::Value) -> bool {
     row.get("provisional").and_then(serde_json::Value::as_bool) == Some(false)
 }
 
+/// Whether the row was resolved while its provider was degraded. The marker
+/// is optional on the wire, so a missing key remains an ordinary row.
+pub fn is_degraded_window_row(row: &serde_json::Value) -> bool {
+    row.get("provider_degraded")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+/// Whether an `attempt.resolved` row may enter a learning evidence window.
+fn is_learning_evidence_row(row: &serde_json::Value) -> bool {
+    is_authoritative_attempt_row(row) && !is_degraded_window_row(row)
+}
+
 /// One routing decision, with everything needed to explain it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Choice {
@@ -220,7 +233,11 @@ pub fn choose(
     if eligible.is_empty() {
         return Choice {
             adapter: default.to_string(),
-            reason: "no_eligible_candidate".to_string(),
+            reason: if degraded_adapters.contains(default) {
+                "provider_degraded_no_fallback".to_string()
+            } else {
+                "no_eligible_candidate".to_string()
+            },
             explored: false,
             considered,
         };
@@ -261,6 +278,20 @@ pub fn choose(
     }
 
     let Some(best) = ranked.first() else {
+        // A degraded default must not be sent back into a known outage merely
+        // because the healthy configured fallback has no history yet. The
+        // evidence floor still protects ordinary defaults from a no-evidence
+        // switch; this branch is the provider-health escape hatch.
+        if degraded_adapters.contains(default) {
+            if let Some(fallback) = eligible.first() {
+                return Choice {
+                    adapter: fallback.adapter.clone(),
+                    reason: format!("provider_degraded_fallback:{default}"),
+                    explored: false,
+                    considered,
+                };
+            }
+        }
         return Choice {
             adapter: default.to_string(),
             reason: format!("insufficient_evidence:min_attempts={}", config.min_attempts),
@@ -416,7 +447,7 @@ impl Evidence {
     /// fleet-wide. Provisional or unmarked rows are skipped entirely: they
     /// are visible in stats, but cannot make an authoritative routing choice.
     pub fn observe(&mut self, row: &serde_json::Value) {
-        if !is_authoritative_attempt_row(row) {
+        if !is_learning_evidence_row(row) {
             return;
         }
         let Some(adapter) = row
@@ -516,7 +547,7 @@ pub fn retry_bias_adapter(
         .iter()
         .filter(|row| {
             row.data.get("bead_id").and_then(|v| v.as_str()) == Some(bead_id)
-                && is_authoritative_attempt_row(&row.data)
+                && is_learning_evidence_row(&row.data)
         })
         .collect();
     attempts.sort_by_key(|row| row.timestamp);
@@ -578,6 +609,8 @@ fn is_poor(considered: &[AdapterEvidence], config: &EvidenceRoutingConfig) -> bo
 fn is_static_fallback(reason: &str) -> bool {
     reason.starts_with("frozen:")
         || reason.starts_with("insufficient_evidence")
+        || reason.starts_with("provider_degraded_fallback:")
+        || reason == "provider_degraded_no_fallback"
         || reason == "no_eligible_candidate"
 }
 
@@ -1145,6 +1178,17 @@ mod tests {
     }
 
     #[test]
+    fn nt27_degraded_default_uses_configured_fallback_without_history() {
+        let mut config = cfg();
+        config.min_attempts = 20;
+        let evidence = HashMap::new();
+        let degraded: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let choice = choose("a", &config, &evidence, &degraded, None, 0.5);
+        assert_eq!(choice.adapter, "b");
+        assert_eq!(choice.reason, "provider_degraded_fallback:a");
+    }
+
+    #[test]
     fn exploration_is_bounded_by_the_share() {
         let evidence = map(vec![ev("a", 40, 30, 40.0), ev("b", 40, 10, 30.0)]);
         let c = choose("a", &cfg(), &evidence, &HashSet::new(), None, 0.05);
@@ -1213,6 +1257,57 @@ mod tests {
 
         assert!(evidence.fleet.is_empty());
         assert!(evidence.workspace.is_empty());
+    }
+
+    #[test]
+    fn nt27_provider_degraded_replay_excludes_outage_attempts_and_restores_history() {
+        let mut rows = Vec::new();
+        for index in 0..10 {
+            rows.push(serde_json::json!({
+                "adapter": "glm-4.7",
+                "workspace": "/srv/project",
+                "outcome": if index < 5 { "verified_success" } else { "work_failure" },
+                "estimated_cost_usd": 1.0,
+                "costed": true,
+                "provisional": false,
+            }));
+        }
+        for _ in 0..8 {
+            rows.push(serde_json::json!({
+                "adapter": "glm-4.7",
+                "workspace": "/srv/project",
+                "outcome": "work_failure",
+                "estimated_cost_usd": 1.0,
+                "costed": true,
+                "provider_degraded": true,
+                "provisional": false,
+            }));
+        }
+
+        let during_outage = Evidence::from_rows(&rows);
+        let glm = during_outage
+            .fleet
+            .get("glm-4.7")
+            .expect("pre-outage evidence remains");
+        assert_eq!(glm.attempts, 10);
+        assert_eq!(glm.verified, 5);
+        assert_eq!(glm.success_rate(), Some(0.5));
+        assert!(!is_degraded_window_row(&rows[0]));
+        assert!(is_degraded_window_row(&rows[10]));
+
+        rows.push(serde_json::json!({
+            "adapter": "glm-4.7",
+            "workspace": "/srv/project",
+            "outcome": "verified_success",
+            "estimated_cost_usd": 1.0,
+            "costed": true,
+            "provisional": false,
+        }));
+        let restored = Evidence::from_rows(&rows);
+        let glm = restored.fleet.get("glm-4.7").expect("restored evidence");
+        assert_eq!(glm.attempts, 11);
+        assert_eq!(glm.verified, 6);
+        assert_eq!(glm.success_rate(), Some(6.0 / 11.0));
     }
 
     #[test]

@@ -175,6 +175,10 @@ pub struct GateResultEntry {
 pub struct AttemptResolvedFields {
     pub attempt_id: String,
     pub provisional: bool,
+    /// The adapter's provider was degraded when this attempt resolved
+    /// (N-T27). Serialized only when `true`; outage attempts remain visible
+    /// for health accounting but are excluded from learning windows.
+    pub provider_degraded: bool,
     pub bead_id: BeadId,
     pub workspace: String,
     pub bead_revision_start: Option<String>,
@@ -4346,6 +4350,7 @@ impl EventKind {
                 let AttemptResolvedFields {
                     attempt_id,
                     provisional,
+                    provider_degraded,
                     bead_id,
                     workspace,
                     bead_revision_start,
@@ -4414,6 +4419,12 @@ impl EventKind {
 
                 if let Some(kind) = override_kind {
                     data["override"] = serde_json::json!(kind);
+                }
+
+                // Provider-outage attempts stay in the ledger, while adapter
+                // evidence ignores the marked degraded window (N-T27).
+                if *provider_degraded {
+                    data["provider_degraded"] = serde_json::json!(true);
                 }
 
                 // Add optional fields if present
@@ -7823,6 +7834,7 @@ mod tests {
         AttemptResolvedFields {
             attempt_id: uuid::Uuid::now_v7().to_string(),
             provisional: true,
+            provider_degraded: false,
             bead_id: BeadId::from("needle-96dec90b"),
             workspace: "/home/coding/NEEDLE".to_string(),
             bead_revision_start: Some("f902c854".to_string()),

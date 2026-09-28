@@ -873,6 +873,10 @@ pub struct AttemptContext {
     pub model: Option<String>,
     /// Provider name (e.g. `"anthropic"`).
     pub provider: Option<String>,
+    /// The provider was degraded when this attempt was dispatched or while
+    /// it was being resolved. Provider-outage rows are retained for health
+    /// accounting but excluded from learning evidence (N-T27).
+    pub provider_degraded: bool,
     /// Prompt template that built the dispatch prompt (e.g. `"pluck"`).
     pub prompt_template: String,
     /// Version tag of that template (e.g. `"pluck-default"`).
@@ -1052,6 +1056,21 @@ impl OutcomeHandler {
             .active_claim_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Preserve the provider-health state observed before a successful
+    /// attempt clears the adapter's degradation. Resolution emits the ledger
+    /// row after that clear, so the marker must be captured while the state is
+    /// still live (N-T27).
+    fn mark_attempt_provider_degraded(&self) {
+        if let Some(context) = self
+            .attempt_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            context.provider_degraded = true;
+        }
     }
 
     /// Bind the exact handle retained by the worker to the next outcome. The
@@ -1941,6 +1960,14 @@ impl OutcomeHandler {
             Utc::now(),
         );
 
+        // Capture the live provider state before a verified success can clear
+        // it. Stream-derived health is checked again when the row is emitted.
+        if crate::provider_health::is_degraded(&adapter_name, attempt_provider.as_deref())
+            .unwrap_or(false)
+        {
+            self.mark_attempt_provider_degraded();
+        }
+
         if matches!(outcome, Outcome::Success) && needs_human_reason.is_none() {
             self.note_adapter_success(&adapter_name, attempt_provider.as_deref(), bead);
         }
@@ -2803,7 +2830,13 @@ impl OutcomeHandler {
         } else {
             Some(attempt.adapter.as_str())
         };
+        let mut provider_degraded = attempt.provider_degraded;
         if let Some(adapter) = health_adapter.filter(|adapter| !adapter.is_empty()) {
+            if crate::provider_health::is_degraded(adapter, attempt.provider.as_deref())
+                .unwrap_or(false)
+            {
+                provider_degraded = true;
+            }
             if provider_metrics.saw_claude_record() {
                 match crate::provider_health::record_provider_attempt(
                     adapter,
@@ -2815,6 +2848,7 @@ impl OutcomeHandler {
                         error_share,
                         attempts,
                     }) => {
+                        provider_degraded = true;
                         let _ = self.telemetry.emit_try_lock(
                             EventKind::ProviderDegraded {
                                 adapter: adapter.to_string(),
@@ -2836,6 +2870,9 @@ impl OutcomeHandler {
                         error_share,
                         attempts,
                     }) => {
+                        // This attempt ran while the provider was degraded;
+                        // retain that fact even though it restored the state.
+                        provider_degraded = true;
                         let _ = self.telemetry.emit_try_lock(
                             EventKind::ProviderRestored {
                                 adapter: adapter.to_string(),
@@ -2881,6 +2918,7 @@ impl OutcomeHandler {
             // identity once the claim's assignee is captured, even when a
             // legacy backend cannot expose a numeric revision.
             provisional: provenance.assignee.is_none(),
+            provider_degraded,
             bead_id: bead.id.clone(),
             workspace: bead.workspace.display().to_string(),
             bead_revision_start: attempt.bead_revision_start,
