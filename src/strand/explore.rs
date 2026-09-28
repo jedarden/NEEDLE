@@ -74,33 +74,6 @@ use futures::stream::{self, StreamExt};
 #[async_trait::async_trait]
 trait StoreFactory: Send + Sync {
     async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error>;
-
-    /// Open a workspace store and prove that its full inventory is readable.
-    ///
-    /// Explore must not count a workspace merely because its descriptor can be
-    /// constructed: an incompatible or corrupt store can still fail on the
-    /// first inventory query. The probe is deliberately read-only. In
-    /// particular, it never invokes a backend repair or initialization command
-    /// for a schema that this process cannot identify.
-    async fn create_validated_store(
-        &self,
-        workspace: &Path,
-    ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-        let store = self.create_store(workspace).await?;
-        store.validate_for_dispatch().await.map_err(|error| {
-            anyhow::anyhow!(
-                "backend capability handshake failed for {}: {error:#}",
-                workspace.display()
-            )
-        })?;
-        store.list_all().await.map_err(|error| {
-            anyhow::anyhow!(
-                "failed to read bead-rs inventory for {}: {error:#}",
-                workspace.display()
-            )
-        })?;
-        Ok(store)
-    }
 }
 
 /// Default factory that creates explicitly configured bead store instances.
@@ -833,6 +806,18 @@ impl ExploreStrand {
             Some(lane) => bead.labels.iter().any(|label| label == &lane.label),
             None => true,
         }
+    }
+
+    /// Split-parent reconciliation is a maintenance operation that requires a
+    /// full inventory and may claim/mutate the parent. Do not pay that cost for
+    /// ordinary remote queues; only a ready candidate carrying the provenance
+    /// shape can need reconciliation.
+    fn may_be_completed_split_parent(bead: &crate::types::Bead) -> bool {
+        bead.labels.iter().any(|label| label == "umbrella")
+            && bead.labels.iter().any(|label| {
+                label == crate::mitosis::AUTO_SPLIT_PARENT_LABEL
+                    || label.starts_with("failure-count:")
+            })
     }
 
     pub fn with_heartbeat_ttl(mut self, heartbeat_ttl: Duration) -> Self {
@@ -1569,15 +1554,19 @@ impl ExploreStrand {
         self.store_factory.create_store(workspace).await
     }
 
-    /// Probe one workspace for frontier ranking and retain the validated store
-    /// for the candidate pass. Keeping the store avoids reopening and
-    /// re-validating every workspace a second time in the same evaluation.
+    /// Probe one workspace for frontier ranking and retain the store for the
+    /// candidate pass. Explore deliberately uses the ready query as its
+    /// read-health check: a full inventory read and backend identity probe for
+    /// every workspace are both redundant with this query and with the
+    /// claim-time dispatch validation. Under fleet load those extra subprocess
+    /// calls serialized on the same stores and consumed the whole evaluation
+    /// budget before the ready frontier could be reached.
     async fn probe_workspace_frontier(
         &self,
         workspace: &Path,
         filters: &Filters,
     ) -> anyhow::Result<Option<WorkspaceFrontier>> {
-        let remote_store = self.store_factory.create_validated_store(workspace).await?;
+        let remote_store = self.store_factory.create_store(workspace).await?;
 
         match self
             .workspace_capacity(workspace, remote_store.as_ref())
@@ -1603,30 +1592,32 @@ impl ExploreStrand {
             }
         }
 
-        match crate::mitosis::reconcile_completed_split_parents(
-            remote_store.as_ref(),
-            &self.telemetry,
-        )
-        .await
-        {
-            Ok(parents) if !parents.is_empty() => {
-                tracing::info!(
-                    workspace = %workspace.display(),
-                    reconciled = parents.len(),
-                    "closed completed auto-split parents before Explore ranking"
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(
-                    workspace = %workspace.display(),
-                    error = %error,
-                    "completed split-parent reconciliation failed; preserving ordinary Explore selection"
-                );
+        let mut candidates = remote_store.ready(filters).await?;
+        if candidates.iter().any(Self::may_be_completed_split_parent) {
+            match crate::mitosis::reconcile_completed_split_parents(
+                remote_store.as_ref(),
+                &self.telemetry,
+            )
+            .await
+            {
+                Ok(parents) if !parents.is_empty() => {
+                    tracing::info!(
+                        workspace = %workspace.display(),
+                        reconciled = parents.len(),
+                        "closed completed auto-split parents before Explore ranking"
+                    );
+                    candidates = remote_store.ready(filters).await?;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %workspace.display(),
+                        error = %error,
+                        "completed split-parent reconciliation failed; preserving ordinary Explore selection"
+                    );
+                }
             }
         }
-
-        let mut candidates = remote_store.ready(filters).await?;
         self.filter_circuit_candidates(workspace, &mut candidates)
             .await;
         let before_admission = candidates.len();
@@ -2137,53 +2128,6 @@ impl ExploreStrand {
                 // Advance to next workspace (candidates empty after mend).
                 continue;
             }
-
-            // This is the final admission check for a roaming candidate. The
-            // remote store is the workspace's own store, so the status query
-            // counts claims held by workers on every host, not just this one.
-            // Empty frontiers skip this second query: the probe already checked
-            // capacity and there is no candidate for the recheck to admit.
-            let mut capacity_timing =
-                ExploreWorkspaceTiming::new(&self.telemetry, workspace, "capacity_recheck");
-            let capacity = self
-                .workspace_capacity(workspace, remote_store.as_ref())
-                .await;
-            capacity_timing.set_outcome(match &capacity {
-                Ok(Some(snapshot)) if snapshot.at_capacity() => "at_capacity",
-                Ok(_) => "available",
-                Err(_) => "error",
-            });
-            match capacity {
-                Ok(Some(snapshot)) if snapshot.at_capacity() => {
-                    let _ = self.telemetry.emit(
-                        crate::telemetry::EventKind::WorkspaceAtCapacity {
-                            workspace: workspace.display().to_string(),
-                            max_workers: snapshot.max_workers,
-                            active_workers: snapshot.active_workers,
-                        },
-                        Utc::now(),
-                    );
-                    exclusion_reasons.insert("workspace_at_capacity".to_string());
-                    tracing::info!(
-                        workspace = %workspace.display(),
-                        active_workers = snapshot.active_workers,
-                        max_workers = snapshot.max_workers,
-                        "workspace is at its worker capacity; skipping Explore"
-                    );
-                    continue;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    exclusion_reasons.insert("workspace_capacity_error".to_string());
-                    tracing::warn!(
-                        workspace = %workspace.display(),
-                        error = %error,
-                        "workspace capacity could not be evaluated; skipping Explore"
-                    );
-                    continue;
-                }
-            }
-            drop(capacity_timing);
 
             // Tag each candidate with the workspace it came from so the
             // worker can create the correct bead store; the global rank
@@ -2710,14 +2654,6 @@ mod tests {
         assert_eq!(frontier.data["outcome"], "ready");
         assert!(frontier.data["duration_ms"].is_u64());
         assert_eq!(frontier.duration_ms, frontier.data["duration_ms"].as_u64());
-
-        let capacity = events
-            .iter()
-            .find(|event| event.data["phase"] == "capacity_recheck")
-            .expect("capacity recheck timing event should be emitted");
-        assert_eq!(capacity.data["workspace"], workspace.display().to_string());
-        assert_eq!(capacity.data["outcome"], "available");
-        assert!(capacity.data["duration_ms"].is_u64());
     }
 
     async fn assert_empty_home_roamer_claims_from_a_large_frontier_within_three_cycles() {
@@ -5301,6 +5237,9 @@ mod tests {
             true
         }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            if let Some(error) = &self.inventory_error {
+                anyhow::bail!("{error}");
+            }
             Ok(vec![Bead {
                 id: BeadId::from("ws2-valid-bead".to_string()),
                 title: "Valid Unassigned Bead".to_string(),
