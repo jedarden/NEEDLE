@@ -42,6 +42,8 @@ mod cleanup_liveness;
 mod compilation_error_detection;
 #[path = "integration_tests/config_key_path_integration.rs"]
 mod config_key_path_integration;
+#[path = "integration_tests/deadline_checkpoint.rs"]
+mod deadline_checkpoint;
 #[path = "integration_tests/descriptor_conformance_tests.rs"]
 mod descriptor_conformance_tests;
 #[path = "integration_tests/edge_case_panic_tests.rs"]

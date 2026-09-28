@@ -304,7 +304,9 @@ max_tests = 4067
 # fallback gates pass a gitless extraction and reject a compile error.
 # +2 Node fallback-verifier policy (needle-bb1052d4): the p2 outcome-level
 # no-configured-gate / configured-gate pair.
-push = 676
+# +1 N-T25 deadline checkpoint integration contract (needle-212f3568):
+# adapter-specific prompt deadlines and terminal resolved-row accounting.
+push = 677
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -472,7 +474,8 @@ name = "integration_tests"
 path = "tests/integration_tests.rs"
 tier = "push"
 # +1 ADR-003 cleanup liveness regression (needle-156e8a08).
-max_tests = 547
+# +1 N-T25 deadline checkpoint prompt and ledger contract (needle-212f3568).
+max_tests = 548
 owner = "component:core-integration"
 
 [[harness]]
