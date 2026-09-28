@@ -928,6 +928,7 @@ fn archive_and_status_process_contracts_executable(
     path
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
     let spool = TempDir::new().unwrap();
@@ -1019,6 +1020,7 @@ fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_archive_missing_trace_facts() {
     let spool = TempDir::new().unwrap();
@@ -1042,6 +1044,7 @@ fn archive_and_status_process_contracts_archive_missing_trace_facts() {
     assert!(!receipt.sidecar.with_extension("json.partial").exists());
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
     let spool = TempDir::new().unwrap();
@@ -1147,6 +1150,7 @@ fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_version_stdout() {
     let root = TempDir::new().unwrap();
@@ -1161,6 +1165,7 @@ fn archive_and_status_process_contracts_version_stdout() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_version_nonzero_exit() {
     let root = TempDir::new().unwrap();
@@ -1173,6 +1178,7 @@ fn archive_and_status_process_contracts_version_nonzero_exit() {
     assert!(error.contains("exited with code"));
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_version_empty_output() {
     let root = TempDir::new().unwrap();
@@ -1184,6 +1190,7 @@ fn archive_and_status_process_contracts_version_empty_output() {
     assert!(spawn_version_output(&executable).unwrap().trim().is_empty());
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_version_multiline_output() {
     let root = TempDir::new().unwrap();
@@ -1198,6 +1205,7 @@ fn archive_and_status_process_contracts_version_multiline_output() {
     assert!(output.contains("Copyright"));
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_version_preserves_raw_output() {
     let root = TempDir::new().unwrap();
@@ -1211,6 +1219,7 @@ fn archive_and_status_process_contracts_version_preserves_raw_output() {
         .contains("  tool-with-spacing   1.2.3  "));
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_version_returns_string() {
     let root = TempDir::new().unwrap();
@@ -1223,6 +1232,7 @@ fn archive_and_status_process_contracts_version_returns_string() {
     assert_eq!(output.trim(), "test output");
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_version_basic_spawn() {
     let root = TempDir::new().unwrap();
@@ -1234,6 +1244,7 @@ fn archive_and_status_process_contracts_version_basic_spawn() {
     assert!(spawn_version_output(&executable).is_ok());
 }
 
+#[serial_test::serial]
 #[tokio::test]
 async fn archive_and_status_process_contracts_workspace_template() {
     let repository = GitRepo::new();
@@ -1252,6 +1263,7 @@ async fn archive_and_status_process_contracts_workspace_template() {
     assert_eq!(template, "needle-ci");
 }
 
+#[serial_test::serial]
 #[test]
 fn archive_and_status_process_contracts_canary_backend_projection() {
     let projection = r#"[{"status":"closed","labels":["native"]}]"#;
