@@ -50,10 +50,10 @@ grep -q $'^codex-luna-clustertop\t/home/coding/clustertop\tcodex-gpt-5.6-luna-xh
 grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-tradegraph\t/home/coding/telegram-claude-bridge\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/bootstrap\tcodex-gpt-6-luna-xhigh\t135\ttrue$' "$MANIFEST"
-grep -q $'^codex-luna-needle-01\t/home/coding/utilities\tcodex-gpt-6-luna-xhigh\t315\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-needle-01\t/home/coding/NEEDLE\tcodex-gpt-6-luna-xhigh\t315\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-warp\t/home/coding/WARP\tcodex-gpt-5.6-luna-xhigh\t45\tfalse$' "$MANIFEST"
 # Every GPT-6 home retains a GPT-5.6 comparator on the same queue.
-for paired_home in /home/coding/utilities /home/coding/clustertop /home/coding/bootstrap /home/coding/brand-kit; do
+for paired_home in /home/coding/NEEDLE /home/coding/clustertop /home/coding/bootstrap /home/coding/brand-kit; do
     [[ "$(awk -F'\t' -v home="$paired_home" '$2 == home && $3 == "codex-gpt-6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
     [[ "$(awk -F'\t' -v home="$paired_home" '$2 == home && $3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
 done
@@ -125,7 +125,8 @@ grep -q 'workers: \[codex-needle-01, claude-needle-01\]' "$SRC_DIR/bootstrap-lan
 grep -q 'workspace_only_candidates:' "$SRC_DIR/bootstrap-lane.yaml"
 grep -q 'openai:' "$SRC_DIR/bootstrap-lane.yaml"
 
-"$SRC_DIR/backlog-slo.sh" --self-test
+backlog_slo_self_test=$("$SRC_DIR/backlog-slo.sh" --self-test)
+grep -qx 'backlog-slo self-test passed (queue owner mismatch excluded)' <<<"$backlog_slo_self_test"
 "$SRC_DIR/needle-zai-governor" --self-test
 "$SRC_DIR/needle-release-upgrade" --self-test
 echo "ex44 fleet policy tests passed"

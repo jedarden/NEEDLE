@@ -72,6 +72,61 @@ eligible_counts() {
     '
 }
 
+# Emit `declared<TAB>owner_host` from the workspace's queue policy. A missing
+# .needle.yaml or queue.owner_host preserves the legacy unowned-queue behavior;
+# an explicitly empty owner is declared and therefore cannot match a host.
+workspace_queue_owner_record() {
+    local workspace="$1"
+    local config="$workspace/.needle.yaml"
+
+    if [[ ! -r "$config" ]]; then
+        printf '0\t\n'
+        return 0
+    fi
+
+    awk '
+      function indentation(line, first) {
+        first = match(line, /[^[:space:]]/)
+        return first ? first - 1 : length(line)
+      }
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+      function owner_value(line, quote) {
+        sub(/^[[:space:]]*owner_host:[[:space:]]*/, "", line)
+        sub(/[[:space:]]+#.*$/, "", line)
+        line = trim(line)
+        quote = sprintf("%c", 39)
+        if ((substr(line, 1, 1) == "\"" && substr(line, length(line), 1) == "\"") ||
+            (substr(line, 1, 1) == quote && substr(line, length(line), 1) == quote)) {
+          line = substr(line, 2, length(line) - 2)
+        }
+        return line
+      }
+      /^[[:space:]]*queue:[[:space:]]*(#.*)?$/ {
+        in_queue = 1
+        queue_indent = indentation($0)
+        next
+      }
+      in_queue && /^[^[:space:]]/ {
+        in_queue = 0
+      }
+      in_queue && indentation($0) > queue_indent &&
+          $0 ~ /^[[:space:]]+owner_host:[[:space:]]*/ {
+        printf "1\t%s\n", owner_value($0)
+        found = 1
+        exit
+      }
+      END {
+        if (!found) {
+          printf "0\t\n"
+        }
+      }
+    ' "$config"
+}
+
 if [[ "$SELF_TEST" == 1 ]]; then
     actual=$(
         printf '%s\n' \
@@ -84,7 +139,23 @@ if [[ "$SELF_TEST" == 1 ]]; then
     )
     [[ "$(jq -r '.raw_ready' <<<"$actual")" -eq 5 ]]
     [[ "$(jq -r '.eligible_ready' <<<"$actual")" -eq 2 ]]
-    echo "backlog-slo self-test passed"
+
+    owner_test_dir=$(mktemp -d "${TMPDIR:-/tmp}/needle-backlog-owner.XXXXXX")
+    trap 'rm -rf "$owner_test_dir"' EXIT
+    mkdir -p "$owner_test_dir/mismatch/.beads" "$owner_test_dir/unowned/.beads"
+    printf 'queue:\n  owner_host: lab\n' >"$owner_test_dir/mismatch/.needle.yaml"
+
+    IFS=$'\t' read -r owner_declared owner_host \
+        <<<"$(workspace_queue_owner_record "$owner_test_dir/mismatch")"
+    [[ "$owner_declared" == 1 ]]
+    [[ "$owner_host" == lab ]]
+    [[ "$owner_host" != self-test-host ]]
+
+    IFS=$'\t' read -r owner_declared owner_host \
+        <<<"$(workspace_queue_owner_record "$owner_test_dir/unowned")"
+    [[ "$owner_declared" == 0 ]]
+
+    echo "backlog-slo self-test passed (queue owner mismatch excluded)"
     exit 0
 fi
 
@@ -93,11 +164,15 @@ fi
 command -v bead >/dev/null || { echo "backlog SLO: bead is not installed" >&2; exit 2; }
 command -v jq >/dev/null || { echo "backlog SLO: jq is not installed" >&2; exit 2; }
 
+host_name=$(hostname 2>/dev/null || uname -n)
+[[ -n "$host_name" ]] || { echo "backlog SLO: host name is empty" >&2; exit 2; }
+
 rows=$(mktemp "${TMPDIR:-/tmp}/needle-backlog-slo.XXXXXX")
 paths=$(mktemp "${TMPDIR:-/tmp}/needle-backlog-paths.XXXXXX")
 roam_paths=$(mktemp "${TMPDIR:-/tmp}/needle-backlog-roam.XXXXXX")
 pinned_routes=$(mktemp "${TMPDIR:-/tmp}/needle-backlog-routes.XXXXXX")
-trap 'rm -f "$rows" "$paths" "$roam_paths" "$pinned_routes"' EXIT
+owner_mismatches=$(mktemp "${TMPDIR:-/tmp}/needle-backlog-owner-mismatches.XXXXXX")
+trap 'rm -f "$rows" "$paths" "$roam_paths" "$pinned_routes" "$owner_mismatches"' EXIT
 
 {
     awk '
@@ -168,6 +243,23 @@ while IFS= read -r workspace; do
         echo "backlog SLO: no bead-rs store at $workspace" >&2
         exit 2
     fi
+    owner_declared=0
+    owner_host=
+    IFS=$'\t' read -r owner_declared owner_host \
+        <<<"$(workspace_queue_owner_record "$workspace")"
+    if [[ "$owner_declared" == 1 && "$owner_host" != "$host_name" ]]; then
+        pinned_workers=$(awk -F'\t' -v workspace="$workspace" \
+            '$1 !~ /^#/ && NF == 5 && $2 == workspace && $5 == "false" {n++}
+             END {print n+0}' "$MANIFEST")
+        jq -cn \
+            --arg workspace "$workspace" \
+            --arg owner_host "$owner_host" \
+            --arg this_host "$host_name" \
+            --argjson pinned_workers "$pinned_workers" \
+            '{workspace:$workspace, owner_host:$owner_host, this_host:$this_host,
+              pinned_workers:$pinned_workers}' >>"$owner_mismatches"
+        continue
+    fi
     if ! counts=$(cd "$workspace" && bead list --ready --json --limit 10000 2>/dev/null | eligible_counts); then
         echo "backlog SLO: ready query failed for $workspace" >&2
         exit 2
@@ -183,7 +275,9 @@ done <"$paths"
 
 report=$(jq -sc \
     --slurpfile routes "$pinned_routes" \
+    --slurpfile owner_mismatches "$owner_mismatches" \
     --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg host "$host_name" \
     --argjson workers "$worker_target" \
     --argjson manifest_workers "$manifest_workers" \
     --argjson observed_live_workers "$observed_live_workers" \
@@ -232,9 +326,11 @@ report=$(jq -sc \
           eligible_target_per_worker: $target_per,
           eligible_minimum_per_worker: $minimum_per,
           workspace_reserve: $reserve,
+          host: $host,
           workspaces: ($pools | length),
           raw_ready: $raw,
           eligible_ready: $eligible,
+          owner_mismatch_workspaces: $owner_mismatches,
           pinned_pools: $pinned_pools,
           roaming_pool: {
             workers: $roaming_workers,
@@ -264,6 +360,8 @@ if [[ "$OUTPUT" == json ]]; then
     jq -c . <<<"$report"
 else
     jq -r '"status=\(.status) eligible=\(.eligible_ready) target=\(.eligible_target) minimum=\(.eligible_minimum) raw=\(.raw_ready) workspaces=\(.workspaces)",
+           (.owner_mismatch_workspaces[]
+             | "OWNER_MISMATCH \(.workspace) owner_host=\(.owner_host) this_host=\(.this_host) pinned_workers=\(.pinned_workers)"),
            (.underprovisioned_routes[]
              | "\(.status | ascii_upcase) \(.workspace) workers=\(.workers) eligible=\(.eligible_ready) minimum=\(.eligible_minimum) target=\(.eligible_target)")' <<<"$report"
 fi
