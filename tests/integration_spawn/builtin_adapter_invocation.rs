@@ -618,7 +618,7 @@ fn logged_pid(lines: &[String], key: &str) -> u32 {
 // Invocation: each documented input method delivers the prompt as promised
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn opencode_builtin_receives_prompt_via_stdin() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -679,7 +679,7 @@ async fn opencode_builtin_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn claude_code_builtin_receives_prompt_via_stdin() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -739,7 +739,7 @@ async fn claude_code_builtin_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn claude_print_contract_receives_prompt_via_stdin() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -793,7 +793,7 @@ async fn claude_print_contract_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn codex_builtin_receives_prompt_as_argument() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -839,7 +839,7 @@ async fn codex_builtin_receives_prompt_as_argument() {
     );
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn aider_builtin_receives_prompt_via_message_flag() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -888,7 +888,7 @@ async fn aider_builtin_receives_prompt_via_message_flag() {
     assert_eq!(usage.cache_read, 2_100);
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn generic_builtin_delivers_prompt_via_stdin() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -927,7 +927,7 @@ async fn generic_builtin_delivers_prompt_via_stdin() {
 // Cross-adapter execution contract: shipped model, exact argv, and headless mode
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn every_documented_builtin_preserves_its_execution_contract() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1075,7 +1075,7 @@ async fn every_documented_builtin_preserves_its_execution_contract() {
 // Exit status and failures
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn builtin_adapter_nonzero_exit_is_reported_verbatim() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1103,7 +1103,7 @@ async fn builtin_adapter_nonzero_exit_is_reported_verbatim() {
     }
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn documented_adapters_enforce_the_configured_timeout() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1138,7 +1138,7 @@ async fn documented_adapters_enforce_the_configured_timeout() {
     }
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn documented_adapters_enforce_the_idle_timeout() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1175,7 +1175,7 @@ async fn documented_adapters_enforce_the_idle_timeout() {
     }
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn documented_adapter_timeout_kills_the_whole_process_group() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1231,7 +1231,7 @@ async fn documented_adapter_timeout_kills_the_whole_process_group() {
 // Environment passing and output capture
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn documented_adapters_pass_environment_and_claim_credentials() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1289,7 +1289,7 @@ async fn documented_adapters_pass_environment_and_claim_credentials() {
     }
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn unclaimed_analysis_strips_claim_credentials_from_documented_adapters() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1342,7 +1342,7 @@ async fn unclaimed_analysis_strips_claim_credentials_from_documented_adapters() 
     }
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn documented_adapters_classify_exit_codes_and_structured_results() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1417,7 +1417,7 @@ async fn documented_adapters_classify_exit_codes_and_structured_results() {
     }
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn missing_agent_cli_reports_command_not_found() {
     // No PATH mutation: the template's CLI is renamed to a binary that cannot
@@ -1472,7 +1472,7 @@ async fn missing_agent_cli_reports_command_not_found() {
     );
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn every_documented_builtin_reports_its_missing_executable() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
@@ -1585,7 +1585,7 @@ fn fleet_dispatcher(fake: &FakeCli) -> Dispatcher {
         .with_worker_id(MATRIX_WORKER.to_string())
 }
 
-#[serial_test::serial]
+#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn readme_models_route_to_and_dispatch_the_named_adapters() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
