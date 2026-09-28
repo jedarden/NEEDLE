@@ -1879,6 +1879,13 @@ pub enum EventKind {
         /// Timestamp when scan started (ISO 8601)
         scan_start_at: String,
     },
+    /// Duration of one workspace's portion of an Explore evaluation.
+    ExploreWorkspaceTiming {
+        workspace: String,
+        phase: String,
+        outcome: String,
+        duration_ms: u64,
+    },
     ExploreStarvationAlarm {
         minutes_without_claim: u64,
         threshold_minutes: u64,
@@ -2179,6 +2186,7 @@ impl EventKind {
             EventKind::SupervisorWorkerRelaunched { .. } => "supervisor.worker_relaunched",
             EventKind::SupervisorStarvationDetected { .. } => "supervisor.starvation_detected",
             EventKind::ExploreScanSummary { .. } => "explore.scan_summary",
+            EventKind::ExploreWorkspaceTiming { .. } => "explore.workspace_timing",
             EventKind::ExploreStarvationAlarm { .. } => "explore.starvation_alarm",
             EventKind::ExploreWorkspaceQuarantined { .. } => "explore.workspace_quarantined",
             EventKind::SinkError { .. } => "telemetry.sink_error",
@@ -2385,6 +2393,7 @@ impl EventKind {
             | EventKind::SupervisorWorkerRelaunched { .. }
             | EventKind::SupervisorStarvationDetected { .. } => None,
             EventKind::ExploreScanSummary { .. } => None,
+            EventKind::ExploreWorkspaceTiming { .. } => None,
             EventKind::ExploreStarvationAlarm { .. } => None,
             EventKind::ExploreWorkspaceQuarantined { .. } => None,
             EventKind::SpawnPathModifiedInPlace { .. } => None,
@@ -4006,6 +4015,17 @@ impl EventKind {
                 "duration_ms": duration_ms,
                 "scan_start_at": scan_start_at,
             }),
+            EventKind::ExploreWorkspaceTiming {
+                workspace,
+                phase,
+                outcome,
+                duration_ms,
+            } => serde_json::json!({
+                "workspace": workspace,
+                "phase": phase,
+                "outcome": outcome,
+                "duration_ms": duration_ms,
+            }),
             EventKind::ExploreStarvationAlarm {
                 minutes_without_claim,
                 threshold_minutes,
@@ -4607,6 +4627,7 @@ impl EventKind {
             }
             | EventKind::CargoTestCompleted { duration_ms, .. }
             | EventKind::ExploreScanSummary { duration_ms, .. }
+            | EventKind::ExploreWorkspaceTiming { duration_ms, .. }
             | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
             EventKind::AttemptResolved(f) => Some(f.duration_ms),
             EventKind::AttemptSpooled { duration_ms, .. } => Some(*duration_ms),
