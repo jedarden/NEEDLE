@@ -240,3 +240,10 @@ This ensures a fresh clone can verify checkpoint integrity. Never manually run
 `git add .beads/checkpoint/` — it will either miss the active roots (broken
 verification) or accumulate superseded objects (bloat). See
 `docs/checkpoint-tracking.md` for details.
+
+A standalone checkpoint-only invocation (nothing else staged or modified) is
+debounced to at most one commit per 15 minutes per repo — a skip is not an
+error, it means the changes stay uncommitted for the next invocation to pick
+up. This never delays a commit that already has other, real work staged; that
+one always lands immediately. Pass `--force` only when a checkpoint commit
+must be visible right now (e.g. immediately before a release).

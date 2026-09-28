@@ -41,6 +41,13 @@ The cleanup is integrated into `scripts/commit-checkpoint.sh`:
 
 This happens automatically as part of every checkpoint commit - no separate cleanup step needed.
 
+`commit-checkpoint.sh` itself debounces how often a *standalone* checkpoint
+commit runs (see "Batching (Debounce)" in `docs/checkpoint-tracking.md`), so
+this cleanup fires at most every `NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS`
+rather than once per flush -- superseded objects accumulate in the working
+tree between commits exactly as this section already describes, just over a
+longer window, and are still all dropped together in one commit.
+
 ## Recovery
 
 If a superseded object is needed for recovery:

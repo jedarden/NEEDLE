@@ -12,6 +12,11 @@ CLEANUP_HELPER="$REPO_ROOT/scripts/cleanup-superseded-checkpoint-objects.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/needle-checkpoint-shape.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# The debounce marker (needle-b27f84fe) lives under NEEDLE_HOME, not the
+# repo being committed. Isolate it into the disposable test root so this
+# test can never read or write the real ~/.needle/checkpoint-commit-state/.
+export NEEDLE_HOME="$TEST_ROOT/.needle-home"
+
 fail() {
     echo "FAIL: $*" >&2
     exit 1
@@ -68,7 +73,12 @@ write_checkpoint() {
 run_checkpoint_commit() {
     local repo="$1"
     local message="$2"
-    (cd "$repo" && ./scripts/commit-checkpoint.sh "$message")
+    # --force: this helper is used by the rename-shape cases below, which
+    # need every call to actually produce a commit regardless of the
+    # debounce window. Debounce/force/piggyback behavior itself is covered
+    # by the dedicated test_* functions further down, which call the script
+    # directly so they can observe an un-forced, debounced invocation.
+    (cd "$repo" && ./scripts/commit-checkpoint.sh --force "$message")
 }
 
 assert_rename_only_object_diff() {
@@ -143,6 +153,93 @@ test_unpaired_addition_fails_closed() {
     echo "PASS: unpaired additions with tracked superseded roots fail closed"
 }
 
+test_standalone_commit_is_debounced() {
+    local repo
+    repo=$(new_repo debounced)
+
+    write_checkpoint "$repo" current-a.jsonl previous-a.jsonl first
+    run_checkpoint_commit "$repo" "checkpoint first" >/dev/null
+    local before
+    before=$(git -C "$repo" rev-parse HEAD)
+
+    write_checkpoint "$repo" current-b.jsonl previous-b.jsonl second
+    local output="$TEST_ROOT/debounced-output.log"
+    (cd "$repo" && ./scripts/commit-checkpoint.sh "checkpoint second") >"$output" 2>&1 \
+        || fail "a debounced skip must exit 0, not fail the caller"
+    grep -Fq "CHECKPOINT_COMMIT_SKIPPED_DEBOUNCE" "$output" \
+        || fail "debounced call did not report a skip: $(cat "$output")"
+    [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] \
+        || fail "a debounced call must not create a commit"
+    git -C "$repo" status --porcelain | grep -q '\.beads/checkpoint/' \
+        || fail "debounced checkpoint changes must remain uncommitted in the working tree, not be lost"
+
+    echo "PASS: a second standalone checkpoint commit within the debounce window is skipped, not lost"
+}
+
+test_force_overrides_debounce() {
+    local repo
+    repo=$(new_repo forced)
+
+    write_checkpoint "$repo" current-a.jsonl previous-a.jsonl first
+    run_checkpoint_commit "$repo" "checkpoint first" >/dev/null
+    local before
+    before=$(git -C "$repo" rev-parse HEAD)
+
+    write_checkpoint "$repo" current-b.jsonl previous-b.jsonl second
+    (cd "$repo" && ./scripts/commit-checkpoint.sh --force "checkpoint second") >/dev/null
+
+    [ "$(git -C "$repo" rev-parse HEAD)" != "$before" ] \
+        || fail "--force must commit immediately even inside the debounce window"
+
+    echo "PASS: --force commits a standalone checkpoint immediately regardless of debounce"
+}
+
+test_other_staged_work_bypasses_debounce() {
+    local repo
+    repo=$(new_repo piggyback)
+
+    write_checkpoint "$repo" current-a.jsonl previous-a.jsonl first
+    run_checkpoint_commit "$repo" "checkpoint first" >/dev/null
+    local before
+    before=$(git -C "$repo" rev-parse HEAD)
+
+    write_checkpoint "$repo" current-b.jsonl previous-b.jsonl second
+    printf 'real change\n' > "$repo/README.md"
+    git -C "$repo" add README.md
+
+    (cd "$repo" && ./scripts/commit-checkpoint.sh "checkpoint second") >/dev/null
+
+    [ "$(git -C "$repo" rev-parse HEAD)" != "$before" ] \
+        || fail "a checkpoint commit with other real work already staged must never be debounced"
+    git -C "$repo" show --format= --name-only HEAD | grep -Fqx "README.md" \
+        || fail "the already-staged non-checkpoint file was not included in the piggybacked commit"
+
+    echo "PASS: other staged work rides the checkpoint along instead of being debounced"
+}
+
+test_debounce_is_per_repo() {
+    local repo_a repo_b
+    repo_a=$(new_repo scope-a)
+    repo_b=$(new_repo scope-b)
+
+    write_checkpoint "$repo_a" current-a.jsonl previous-a.jsonl first
+    run_checkpoint_commit "$repo_a" "checkpoint first" >/dev/null
+
+    write_checkpoint "$repo_b" current-a.jsonl previous-a.jsonl first
+    local before_b
+    before_b=$(git -C "$repo_b" rev-parse HEAD 2>/dev/null || echo none)
+    (cd "$repo_b" && ./scripts/commit-checkpoint.sh "checkpoint first") >/dev/null
+
+    [ "$(git -C "$repo_b" rev-parse HEAD)" != "$before_b" ] \
+        || fail "a fresh repo's first checkpoint commit must not be debounced by an unrelated repo's marker"
+
+    echo "PASS: the debounce marker is scoped per repository, not shared"
+}
+
 test_first_checkpoint_and_successive_flushes
 test_unpaired_addition_fails_closed
+test_standalone_commit_is_debounced
+test_force_overrides_debounce
+test_other_staged_work_bypasses_debounce
+test_debounce_is_per_repo
 echo "All checkpoint rename-shape tests passed"

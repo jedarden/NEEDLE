@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Commit checkpoint changes with dynamic active_root resolution
 #
-# Usage: ./scripts/commit-checkpoint.sh "commit message"
+# Usage: ./scripts/commit-checkpoint.sh [--force] "commit message"
 #
 # This script reads .beads/checkpoint/current.json and previous.json,
 # extracts their active_root paths, and stages exactly those objects
@@ -9,12 +9,32 @@
 #
 # The active_root changes on every flush, so we resolve it dynamically
 # at commit time rather than relying on static .gitignore patterns.
+#
+# Batching (needle-b27f84fe): a checkpoint-only commit (nothing else staged
+# or modified in the repo) is debounced -- skipped unless at least
+# NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS (default 900) have passed since
+# the last one for this repo, or --force is given. A skip leaves the
+# checkpoint changes uncommitted in the working tree; the next invocation
+# (debounced or not) picks up everything accumulated since the last real
+# commit, so nothing is lost, only coalesced. When other, non-checkpoint
+# changes are already staged or modified, the checkpoint always rides along
+# on that commit immediately -- debouncing only ever delays a commit that
+# would otherwise be standalone bookkeeping. This exists because the
+# undebounced version produced ~40 standalone commits/day on a busy
+# bead-rs workspace (320 in 21 days on jedarden/bead-rs alone, three within
+# 90 seconds of each other) -- see docs/checkpoint-tracking.md.
 
 set -euo pipefail
 
+FORCE=false
+if [ "${1:-}" = "--force" ]; then
+    FORCE=true
+    shift
+fi
+
 # Check arguments
 if [ $# -eq 0 ]; then
-    echo "Usage: $0 \"commit message\"" >&2
+    echo "Usage: $0 [--force] \"commit message\"" >&2
     echo "Example: $0 \"chore: checkpoint commit\"" >&2
     exit 1
 fi
@@ -38,6 +58,40 @@ fi
 if [ ! -d "$CHECKPOINT_DIR" ]; then
     echo "Error: Checkpoint directory not found: $CHECKPOINT_DIR" >&2
     exit 1
+fi
+
+# Debounce marker lives outside the repo entirely (under NEEDLE's own state
+# dir, keyed by a checksum of REPO_ROOT) so it can never be swept up by a
+# git add in the workspace being committed, and needs no per-repo .gitignore
+# entry across however many workspaces this script is run against.
+DEBOUNCE_STATE_DIR="${NEEDLE_HOME:-$HOME/.needle}/checkpoint-commit-state"
+DEBOUNCE_MARKER="$DEBOUNCE_STATE_DIR/$(printf '%s' "$REPO_ROOT" | cksum | tr -d ' \n')"
+
+# A checkpoint-only commit is anything where nothing outside
+# .beads/checkpoint/ is staged or modified. Real work already in flight
+# always takes the commit immediately -- only a standalone bookkeeping
+# commit is a debounce candidate.
+#
+# --untracked-files=all is required, not cosmetic: in the default mode a
+# wholly-untracked .beads/ (e.g. this repo's very first checkpoint commit)
+# collapses to a single "?? .beads/" summary line, which does not match the
+# .beads/checkpoint/ filter below and makes the first-ever checkpoint commit
+# look indistinguishable from "other real work in flight" -- silently
+# disabling debouncing for that repo from then on, since the marker only
+# gets written for a commit this check judged to be standalone.
+OTHER_CHANGES="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all 2>/dev/null | grep -Ev '^.. \.beads/checkpoint/' || true)"
+
+if [ -z "$OTHER_CHANGES" ] && [ "$FORCE" != true ] && [ -f "$DEBOUNCE_MARKER" ]; then
+    DEBOUNCE_SECONDS="${NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS:-900}"
+    LAST_COMMIT_EPOCH="$(cat "$DEBOUNCE_MARKER" 2>/dev/null || echo 0)"
+    NOW_EPOCH="$(date +%s)"
+    ELAPSED=$((NOW_EPOCH - LAST_COMMIT_EPOCH))
+    if [ "$ELAPSED" -lt "$DEBOUNCE_SECONDS" ]; then
+        echo "CHECKPOINT_COMMIT_SKIPPED_DEBOUNCE: last standalone checkpoint commit for this repo was ${ELAPSED}s ago (< ${DEBOUNCE_SECONDS}s)."
+        echo "Checkpoint changes remain uncommitted in the working tree and will be included in the next commit."
+        echo "Pass --force to commit immediately anyway."
+        exit 0
+    fi
 fi
 
 cd "$CHECKPOINT_DIR"
@@ -196,5 +250,15 @@ fi
 echo ""
 echo "Committing with message: $COMMIT_MSG"
 git commit -m "$COMMIT_MSG"
+
+# Record this as the last standalone checkpoint commit so a burst of
+# checkpoint-only invocations right after this one debounces instead of
+# each producing its own commit. Only recorded for the standalone case --
+# a commit that rode along with other staged work isn't checkpoint
+# bookkeeping and shouldn't reset the debounce window.
+if [ -z "$OTHER_CHANGES" ]; then
+    mkdir -p "$DEBOUNCE_STATE_DIR" 2>/dev/null || true
+    date +%s > "$DEBOUNCE_MARKER" 2>/dev/null || true
+fi
 
 echo "✓ Checkpoint commit completed successfully"

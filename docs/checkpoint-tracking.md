@@ -21,14 +21,45 @@ Use `scripts/commit-checkpoint.sh` to commit checkpoint changes:
 ```
 
 The script:
-1. Reads the checkpoint state already published by `bead sync flush-only`
-2. Extracts the active root paths from `current.json` and `previous.json`
-3. Stages the pointer files and both active root objects
-4. Stages every superseded tracked object as deleted, including objects the
+1. Unless `--force` is given, or the repo already has other, non-checkpoint
+   changes staged or modified, skips (exit 0) when the last standalone
+   checkpoint commit for this repo was too recent -- see "Batching" below
+2. Reads the checkpoint state already published by `bead sync flush-only`
+3. Extracts the active root paths from `current.json` and `previous.json`
+4. Stages the pointer files and both active root objects
+5. Stages every superseded tracked object as deleted, including objects the
    flush already removed from the worktree
-5. Verifies that Git pairs each new root with a superseded deletion as a
+6. Verifies that Git pairs each new root with a superseded deletion as a
    rename whenever superseded history exists
-6. Commits the changes atomically
+7. Commits the changes atomically
+
+## Batching (Debounce)
+
+A checkpoint-only commit is debounced: a second invocation with nothing else
+staged or modified is skipped unless `NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS`
+(default 900) has elapsed since the last one *for that repo*, or `--force` is
+passed. A skip is not a failure -- it exits 0, prints
+`CHECKPOINT_COMMIT_SKIPPED_DEBOUNCE`, and leaves the checkpoint changes
+uncommitted in the working tree, where the next invocation (debounced or not)
+picks them up along with anything accumulated since. Nothing is lost, only
+coalesced.
+
+If the repo already has other, non-checkpoint work staged or modified when
+the script runs, debouncing never applies -- the checkpoint rides along on
+that commit immediately, at no cost, since that commit is happening anyway.
+
+This exists because the undebounced script produced roughly one standalone
+commit per `bead sync flush-only` invocation: ~40/day on a busy bead-rs
+workspace, several within 90 seconds of each other, drowning out real `feat`/
+`fix` commits in `git log` (needle-b27f84fe). The debounce marker lives per
+repository under `${NEEDLE_HOME:-$HOME/.needle}/checkpoint-commit-state/`,
+outside the repo being committed, so it is never at risk of being swept into
+a commit and needs no `.gitignore` entry in any target workspace.
+
+Call `commit-checkpoint.sh --force "message"` when a checkpoint commit must
+land immediately regardless of cadence -- for example, right before cutting a
+release, or when a workspace is known to be wedged and the fix must be
+visible to the next `git clone` right away.
 
 ## Superseded Objects
 
@@ -95,3 +126,4 @@ However, this is a fallback - the committed checkpoint with active roots should 
 - bead-rs plan.md section 7 (checkpoint design)
 - ADR-006 (bead store architecture)
 - Commit `ffbef35` in bead-rs (similar fix)
+- needle-b27f84fe (commit-cadence batching, "Batching (Debounce)" above)
