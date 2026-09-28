@@ -9,6 +9,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -1961,7 +1962,9 @@ impl OutcomeHandler {
         );
 
         // Capture the live provider state before a verified success can clear
-        // it. Stream-derived health is checked again when the row is emitted.
+        // it. This covers adapter-failure health as well as stream-derived
+        // provider health; emit_attempt_resolved handles a degradation that
+        // trips for the current stream below.
         if crate::provider_health::is_degraded(&adapter_name, attempt_provider.as_deref())
             .unwrap_or(false)
         {
@@ -2158,6 +2161,12 @@ impl OutcomeHandler {
             gate_results,
         );
 
+        // The attempt trace metadata is finalized inside emit_attempt_resolved;
+        // hand it to the spool immediately so every finalized attempt gets an
+        // archive opportunity, including one whose backend resolution loses a
+        // claim race below.
+        self.spool_attempt_archive(bead, &ledger).await;
+
         // R3: what this attempt was and why it ended becomes the next
         // attempt's context. Best-effort and bounded; it never changes the
         // action decided above.
@@ -2186,11 +2195,6 @@ impl OutcomeHandler {
             });
         }
 
-        // Plan section 4.4 step 1: the durable copy of the attempt lives off
-        // the worker host. Bundle the attempt's trace into the spool the
-        // external drain uploads from (attempt_archive.enabled).
-        self.spool_attempt_archive(bead, &ledger).await;
-
         Ok(HandlerResult {
             outcome,
             bead_action,
@@ -2209,6 +2213,22 @@ impl OutcomeHandler {
         if !archive.enabled {
             return;
         }
+        let started = Instant::now();
+        let attempt_id = ledger.attempt_id.clone();
+        let report_failure = |error: String| {
+            tracing::warn!(
+                attempt_id = %attempt_id,
+                error = %error,
+                "attempt archive failed"
+            );
+            let _ = self.telemetry.emit_try_lock(
+                EventKind::AttemptArchiveFailed {
+                    attempt_id: attempt_id.clone(),
+                    error,
+                },
+                Utc::now(),
+            );
+        };
         let workspace = if bead.workspace.as_os_str().is_empty()
             || bead.workspace == std::path::Path::new(".")
         {
@@ -2240,40 +2260,48 @@ impl OutcomeHandler {
         let sanitizer = match crate::attempt_archive::configured_sanitizer(&self.config) {
             Ok(sanitizer) => sanitizer,
             Err(error) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %error,
-                    "failed to build attempt archive sanitizer; copying harness transcript without sanitization"
-                );
-                None
+                report_failure(error.to_string());
+                return;
             }
         };
+        let archive_metadata = crate::attempt_archive::AttemptArchiveMetadata {
+            provisional: ledger.provisional,
+            requested_action: Some(ledger.requested_action.clone()),
+        };
         let bead_id = bead.id.clone();
+        let attempt_id_for_work = ledger.attempt_id.clone();
         let work = tokio::task::spawn_blocking(move || {
-            crate::attempt_archive::spool_attempt_with_sanitizer(
+            crate::attempt_archive::spool_attempt_with_metadata(
                 &archive,
                 &input,
                 Some(&trace_dir),
+                &archive_metadata,
                 sanitizer,
             )
         });
         match tokio::time::timeout(std::time::Duration::from_secs(60), work).await {
-            Ok(Ok(Ok(Some(receipt)))) => tracing::info!(
-                bead_id = %bead_id,
-                bundle = %receipt.bundle.display(),
-                bundle_bytes = receipt.bundle_bytes,
-                "attempt archived to spool"
-            ),
-            Ok(Ok(Ok(None))) => {}
-            Ok(Ok(Err(e))) => tracing::warn!(
-                bead_id = %bead_id,
-                error = %e,
-                "attempt archive spool failed"
-            ),
-            Ok(Err(e)) => {
-                tracing::warn!(bead_id = %bead_id, error = %e, "attempt archive task failed")
+            Ok(Ok(Ok(Some(receipt)))) => {
+                let duration_ms = started.elapsed().as_millis() as u64;
+                tracing::info!(
+                    bead_id = %bead_id,
+                    attempt_id = %attempt_id_for_work,
+                    bundle = %receipt.bundle.display(),
+                    bundle_bytes = receipt.bundle_bytes,
+                    "attempt archived to spool"
+                );
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::AttemptSpooled {
+                        attempt_id: attempt_id_for_work,
+                        bundle_bytes: receipt.bundle_bytes,
+                        duration_ms,
+                    },
+                    Utc::now(),
+                );
             }
-            Err(_) => tracing::warn!(bead_id = %bead_id, "attempt archive spool timed out"),
+            Ok(Ok(Ok(None))) => {}
+            Ok(Ok(Err(error))) => report_failure(error.to_string()),
+            Ok(Err(error)) => report_failure(format!("archive task failed: {error}")),
+            Err(_) => report_failure("archive spool timed out after 60 seconds".to_string()),
         }
     }
 
@@ -2918,8 +2946,13 @@ impl OutcomeHandler {
             // identity once the claim's assignee is captured, even when a
             // legacy backend cannot expose a numeric revision.
             provisional: provenance.assignee.is_none(),
-            // Attempts resolved during a degraded window remain in the
-            // ledger for health and recovery but do not train learning.
+            // N-T21: a row resolved inside a gate-degraded window carries the
+            // marker, and learning evidence windows exclude it by default.
+            // The dispatch whose gate run restores the workspace emits its
+            // row after the state is cleared, so that row is unmarked — the
+            // window ends exactly where real evidence resumes.
+            // If health cannot be read at resolution time, fail closed and
+            // keep this row out of learning windows until the state is clear.
             gate_degraded: gate_health::is_degraded(&bead.workspace).unwrap_or(true),
             provider_degraded,
             bead_id: bead.id.clone(),

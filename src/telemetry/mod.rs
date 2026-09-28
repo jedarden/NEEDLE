@@ -176,12 +176,14 @@ pub struct AttemptResolvedFields {
     pub attempt_id: String,
     pub provisional: bool,
     /// The workspace was gate-degraded when this row resolved (N-T21).
-    /// Serialized only when true so degraded-window rows remain visible for
-    /// health and recovery while learning windows exclude them by default.
+    /// Serialized only when `true`: marked rows stay in the ledger as
+    /// health/recovery evidence, while learning evidence windows exclude
+    /// them by default — a red gate carries no information about adapters
+    /// or prompt variants.
     pub gate_degraded: bool,
     /// The adapter's provider was degraded when this attempt resolved
-    /// (N-T27). Serialized only when `true`; outage attempts remain visible
-    /// for health accounting but are excluded from learning windows.
+    /// (N-T27). Serialized only when `true`; provider-outage attempts remain
+    /// visible for health accounting but are excluded from learning windows.
     pub provider_degraded: bool,
     pub bead_id: BeadId,
     pub workspace: String,
@@ -1078,6 +1080,18 @@ pub enum EventKind {
         kind: String,
         actor: String,
         reference: String,
+    },
+    /// A finalized attempt bundle and sidecar were published to the local
+    /// archive spool.
+    AttemptSpooled {
+        attempt_id: String,
+        bundle_bytes: u64,
+        duration_ms: u64,
+    },
+    /// The optional archive handoff failed; the attempt outcome is unchanged.
+    AttemptArchiveFailed {
+        attempt_id: String,
+        error: String,
     },
     WorkerHandlingTimeout {
         bead_id: BeadId,
@@ -2026,6 +2040,8 @@ impl EventKind {
             EventKind::OutcomeHandled { .. } => "outcome.handled",
             EventKind::AttemptResolved(..) => "attempt.resolved",
             EventKind::AttemptOverridden { .. } => "attempt.overridden",
+            EventKind::AttemptSpooled { .. } => "attempt.spooled",
+            EventKind::AttemptArchiveFailed { .. } => "attempt.archive_failed",
             EventKind::ProviderModelSubstituted { .. } => "provider.model_substituted",
             EventKind::WorkerHandlingTimeout { .. } => "worker.handling.timeout",
             EventKind::HeartbeatEmitted { .. } => "heartbeat.emitted",
@@ -2374,6 +2390,8 @@ impl EventKind {
             EventKind::QuarantineExpired { bead_id } => Some(bead_id.clone()),
             EventKind::AttemptResolved(f) => Some(f.bead_id.clone()),
             EventKind::AttemptOverridden { .. } => None,
+            EventKind::AttemptSpooled { .. } => None,
+            EventKind::AttemptArchiveFailed { .. } => None,
             EventKind::ProviderModelSubstituted { .. } => None,
         }
     }
@@ -4426,14 +4444,17 @@ impl EventKind {
                     data["override"] = serde_json::json!(kind);
                 }
 
-                // Optional by design (N-T21): only rows resolved inside a
-                // degraded window carry this marker; older rows remain valid.
+                // Optional by design (N-T21): the degraded-window marker rides
+                // only the rows resolved inside that window, so its absence
+                // reads as an ordinary row and the contract needs no version
+                // bump (same shape as `override`).
                 if *gate_degraded {
                     data["gate_degraded"] = serde_json::json!(true);
                 }
 
-                // Provider-outage attempts stay in the ledger, while adapter
-                // evidence ignores the marked degraded window (N-T27).
+                // Optional by design (N-T27): outage attempts stay in the
+                // ledger, while adapter evidence ignores only the marked
+                // provider-degraded window.
                 if *provider_degraded {
                     data["provider_degraded"] = serde_json::json!(true);
                 }
@@ -4513,6 +4534,19 @@ impl EventKind {
                 "actor": actor,
                 "reference": reference,
             }),
+            EventKind::AttemptSpooled {
+                attempt_id,
+                bundle_bytes,
+                duration_ms,
+            } => serde_json::json!({
+                "attempt_id": attempt_id,
+                "bundle_bytes": bundle_bytes,
+                "duration_ms": duration_ms,
+            }),
+            EventKind::AttemptArchiveFailed { attempt_id, error } => serde_json::json!({
+                "attempt_id": attempt_id,
+                "error": error,
+            }),
         }
     }
 
@@ -4538,7 +4572,9 @@ impl EventKind {
             | EventKind::ExploreScanSummary { duration_ms, .. }
             | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
             EventKind::AttemptResolved(f) => Some(f.duration_ms),
+            EventKind::AttemptSpooled { duration_ms, .. } => Some(*duration_ms),
             EventKind::AttemptOverridden { .. } => None,
+            EventKind::AttemptArchiveFailed { .. } => None,
             EventKind::ProviderModelSubstituted { .. } => None,
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }

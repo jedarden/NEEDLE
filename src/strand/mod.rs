@@ -244,6 +244,10 @@ impl StrandRunner {
             config.strands.learning.max_learnings,
             state_base.clone(),
             config.limits.clone(),
+        )
+        .with_attempt_archive_retention(
+            config.attempt_archive.enabled,
+            config.attempt_archive.prune_local_after_spool,
         );
 
         let explore = ExploreStrand::new(

@@ -1,36 +1,16 @@
 //! Attempt archive spool producer: one bundle per resolved attempt, handed to
 //! a local spool directory for an external drain.
 //!
-//! The `attempt_archive` config section, the spool layout contract and the
-//! drain (`agent-transcript-archive/scripts/spool_drain.py`, run by the
-//! `needle-attempt-archive-drain` timer) all existed before this module — but
-//! nothing ever wrote a bundle, so the drain had uploaded zero bytes and the
-//! durable off-host copy of every attempt that plan section 4.4 step 1 calls
-//! for did not exist. This is the writer.
-//!
-//! Layout, as the drain validates it:
-//!
-//! ```text
-//! <spool>/<host>/<YYYY-MM-DD>/<bead>-<attempt>.tar.zst   the bundle
-//! <spool>/<host>/<YYYY-MM-DD>/<bead>-<attempt>.json      the sidecar (commit marker)
-//! ```
-//!
-//! The sidecar carries `bundle_path` (relative to the spool), `bundle_sha256`
-//! and `bundle_bytes`, plus the attempt facts. It is written last, through a
-//! `.partial` temp file and a rename, so the drain never sees a sidecar
-//! without its complete bundle. NEEDLE never uploads, never holds a sink
-//! credential and never deletes from the spool; the drain owns all of that.
-//!
-//! Bundles are produced with the system `tar` (and `zstd` when configured
-//! and present) rather than a compression crate: both are on every fleet
-//! host, and shelling out keeps the archive independent of the binary's
-//! feature set.
+//! The spool is deliberately the only sink-facing contract. A complete bundle
+//! is published first, and its JSON sidecar is published last; a drain must
+//! ignore bundles that do not have a sidecar.
 
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -38,10 +18,8 @@ use crate::config::{ArchiveCompression, AttemptArchiveConfig};
 use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::trace::{HarnessTranscriptStatus, TraceFormat};
 
-/// Schema version stamped on every sidecar.
 pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
 
-/// The facts an attempt is archived with.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AttemptArchiveInput {
     pub attempt_id: String,
@@ -49,16 +27,12 @@ pub struct AttemptArchiveInput {
     pub workspace: String,
     pub worker: String,
     pub adapter: String,
-    /// Compatibility alias for the adapter identifier requested.
     #[serde(default)]
     pub model: Option<String>,
-    /// Adapter model identifier requested for this attempt.
     #[serde(default)]
     pub requested_model: Option<String>,
-    /// Model identifier returned by provider metadata; unknown remains absent.
     #[serde(default)]
     pub effective_model: Option<String>,
-    /// Provider response metadata field that supplied `effective_model`.
     #[serde(default)]
     pub model_resolution_source: Option<String>,
     pub outcome: String,
@@ -67,37 +41,55 @@ pub struct AttemptArchiveInput {
     pub recorded_at: String,
 }
 
-/// The sidecar the drain reads.
+/// Resolved fields supplied by the finalized attempt ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttemptArchiveMetadata {
+    pub provisional: bool,
+    pub requested_action: Option<String>,
+}
+
+/// Version-1 sidecar consumed by the external spool drain.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Sidecar {
     pub schema_version: u32,
-    /// Bundle path relative to the spool root.
     pub bundle_path: String,
     pub bundle_sha256: String,
     pub bundle_bytes: u64,
     pub host: String,
-    pub needle_version: String,
-    #[serde(flatten)]
-    pub attempt: AttemptArchiveInput,
-    /// Files included in the bundle, relative to its root.
-    #[serde(default)]
-    pub files: Vec<String>,
+    pub workspace: String,
+    pub workspace_slug: String,
+    pub bead_id: String,
+    pub attempt_id: String,
+    pub provisional: bool,
+    pub session_id: Option<String>,
+    pub adapter: String,
+    pub model: Option<String>,
+    pub worker_id: String,
+    pub outcome: String,
+    pub requested_action: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub contents: Vec<String>,
 }
 
-/// Where a spooled attempt landed.
+/// Marker stored beside an attempt trace after the spool pair is complete.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpooledReceipt {
+    pub bundle_path: String,
+    pub sha256: String,
+    pub spooled_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpoolReceipt {
     pub bundle: PathBuf,
     pub sidecar: PathBuf,
+    pub bundle_sha256: String,
     pub bundle_bytes: u64,
 }
 
-/// Spool one resolved attempt. `trace_dir` is the attempt's trace directory
-/// (`<workspace>/.beads/traces/<bead>/`); a missing or empty one still
-/// produces a bundle carrying `attempt.json`, so the archive has a row for
-/// every attempt, not only the ones with a transcript.
-///
-/// Returns `Ok(None)` when the archive is disabled.
+/// Spool one resolved attempt. A disabled archive returns without touching the
+/// configured spool or the trace directory.
 pub fn spool_attempt(
     config: &AttemptArchiveConfig,
     input: &AttemptArchiveInput,
@@ -108,7 +100,13 @@ pub fn spool_attempt(
     } else {
         None
     };
-    spool_attempt_with_sanitizer(config, input, trace_dir, sanitizer)
+    spool_attempt_with_metadata(
+        config,
+        input,
+        trace_dir,
+        &AttemptArchiveMetadata::default(),
+        sanitizer,
+    )
 }
 
 /// Build the same sanitizer configuration used by dispatch trace capture.
@@ -119,7 +117,6 @@ pub fn configured_sanitizer(config: &crate::config::Config) -> Result<Option<Arc
     {
         return Ok(None);
     }
-
     let custom_patterns = config
         .strands
         .learning
@@ -135,73 +132,70 @@ pub fn configured_sanitizer(config: &crate::config::Config) -> Result<Option<Arc
     Ok(Some(Arc::new(Sanitizer::new(&custom_patterns)?)))
 }
 
-/// Spool one resolved attempt, optionally sanitizing harness files before they
-/// enter the bundle.
 pub fn spool_attempt_with_sanitizer(
     config: &AttemptArchiveConfig,
     input: &AttemptArchiveInput,
     trace_dir: Option<&Path>,
     sanitizer: Option<Arc<Sanitizer>>,
 ) -> Result<Option<SpoolReceipt>> {
-    spool_attempt_with_sanitizer_and_claude_dir(config, input, trace_dir, sanitizer, None)
+    spool_attempt_with_metadata(
+        config,
+        input,
+        trace_dir,
+        &AttemptArchiveMetadata::default(),
+        sanitizer,
+    )
 }
 
-fn spool_attempt_with_sanitizer_and_claude_dir(
+/// Spool an attempt with finalized ledger fields needed by the sidecar.
+pub fn spool_attempt_with_metadata(
     config: &AttemptArchiveConfig,
     input: &AttemptArchiveInput,
     trace_dir: Option<&Path>,
+    archive_metadata: &AttemptArchiveMetadata,
     sanitizer: Option<Arc<Sanitizer>>,
-    claude_dir: Option<&Path>,
 ) -> Result<Option<SpoolReceipt>> {
     if !config.enabled {
         return Ok(None);
     }
-    // ADR-030 decision 5 (N-T52): while a state-root override is in force the
-    // spool relocates beneath it, so a fixture suite spools nothing into an
-    // operator's configured directory. Without an override the configured
-    // `attempt_archive.spool_dir` decides, as before.
     let spool = crate::state_dir::spool_dir_under_override().unwrap_or_else(|| {
         PathBuf::from(crate::util::expand_tilde(
             &config.spool_dir.to_string_lossy(),
         ))
     });
     let host = gethostname::gethostname().to_string_lossy().to_string();
-    let day = input
-        .recorded_at
-        .get(..10)
-        .filter(|d| d.len() == 10)
-        .map(str::to_string)
-        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
-    let stem = format!(
-        "{}-{}",
-        safe_component(&input.bead_id),
-        safe_component(&input.attempt_id)
-    );
-    let day_dir = spool.join(safe_component(&host)).join(&day);
-    std::fs::create_dir_all(&day_dir)
-        .with_context(|| format!("failed to create spool directory {}", day_dir.display()))?;
+    let attempt = safe_component_or_unknown(&input.attempt_id);
+    let attempt_dir = spool
+        .join(safe_component_or_unknown(&host))
+        .join(workspace_slug(&input.workspace))
+        .join(safe_component_or_unknown(&input.bead_id));
+    fs::create_dir_all(&attempt_dir)
+        .with_context(|| format!("failed to create spool directory {}", attempt_dir.display()))?;
 
-    // Stage the bundle contents. The staging root is under the spool so the
-    // final rename is on one filesystem; its name never ends in .json, so
-    // the drain ignores it.
-    let staging = spool.join(".staging").join(&stem);
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging)
-        .with_context(|| format!("failed to create staging dir {}", staging.display()))?;
-    let result = stage_and_pack(
+    let staging = tempfile::Builder::new()
+        .prefix(&format!(".{attempt}-"))
+        .tempdir_in(&attempt_dir)
+        .with_context(|| {
+            format!(
+                "failed to create archive staging directory {}",
+                attempt_dir.display()
+            )
+        })?;
+    let receipt = stage_and_pack(
         config,
         input,
         trace_dir,
-        &staging,
-        &day_dir,
-        &stem,
+        archive_metadata,
+        staging.path(),
+        &attempt_dir,
         &spool,
         &host,
         sanitizer.as_deref(),
-        claude_dir,
-    );
-    let _ = std::fs::remove_dir_all(&staging);
-    result.map(Some)
+    )?;
+    if let Some(trace_dir) = trace_dir.filter(|path| path.is_dir()) {
+        write_spooled_receipt(trace_dir, &receipt)?;
+    }
+    Ok(Some(receipt))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -209,91 +203,61 @@ fn stage_and_pack(
     config: &AttemptArchiveConfig,
     input: &AttemptArchiveInput,
     trace_dir: Option<&Path>,
+    archive_metadata: &AttemptArchiveMetadata,
     staging: &Path,
-    day_dir: &Path,
-    stem: &str,
+    attempt_dir: &Path,
     spool: &Path,
     host: &str,
     sanitizer: Option<&Sanitizer>,
-    claude_dir: Option<&Path>,
 ) -> Result<SpoolReceipt> {
-    let mut files: Vec<String> = Vec::new();
-
-    std::fs::write(
-        staging.join("attempt.json"),
-        serde_json::to_string_pretty(input)?,
-    )
-    .context("failed to write attempt.json")?;
-    files.push("attempt.json".to_string());
-
+    let mut contents = Vec::new();
     if let Some(dir) = trace_dir.filter(|d| d.is_dir()) {
         if config.include.harness_transcript {
-            let status = copy_harness_transcript(
-                input,
-                dir,
-                &staging.join("harness"),
-                sanitizer,
-                claude_dir,
-            )?;
+            let status = copy_harness_transcript(input, dir, &staging.join("harness"), sanitizer)?;
             update_harness_status(dir, status)?;
             if staging.join("harness").is_dir() {
-                files.extend(files_below(staging, &staging.join("harness"))?);
+                contents.extend(files_below(staging, &staging.join("harness"))?);
             }
         }
-
-        let mut wanted: Vec<&str> = vec!["metadata.json", "attempts.jsonl"];
         if config.include.trace {
-            wanted.extend(["stdout.txt", "stderr.txt", "trace.jsonl"]);
+            for name in ["stdout.txt", "stderr.txt", "trace.jsonl", "metadata.json"] {
+                let source = dir.join(name);
+                if source.is_file() {
+                    let archive_name = Path::new("trace").join(name);
+                    let destination = staging.join(&archive_name);
+                    fs::create_dir_all(destination.parent().unwrap_or(staging))?;
+                    fs::copy(&source, &destination)
+                        .with_context(|| format!("failed to stage {}", source.display()))?;
+                    contents.push(archive_name.to_string_lossy().to_string());
+                }
+            }
         }
         if config.include.prompt {
-            wanted.push("prompt.md");
-        }
-        for name in wanted {
-            let source = dir.join(name);
+            let source = dir.join("prompt.md");
             if source.is_file() {
-                std::fs::copy(&source, staging.join(name))
+                fs::copy(&source, staging.join("prompt.md"))
                     .with_context(|| format!("failed to stage {}", source.display()))?;
-                files.push(name.to_string());
+                contents.push("prompt.md".to_string());
             }
         }
     }
+    contents.sort();
 
-    // tar the staging root (relative paths only).
-    let tar_path = day_dir.join(format!("{stem}.tar"));
-    let status = Command::new("tar")
-        .arg("-cf")
-        .arg(&tar_path)
-        .arg("-C")
-        .arg(staging)
-        .arg(".")
-        .status()
-        .context("failed to run tar")?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&tar_path);
-        bail!("tar exited with {status}");
-    }
-
-    let bundle = match config.compression {
-        ArchiveCompression::Zstd if which_exists("zstd") => {
-            let zst = day_dir.join(format!("{stem}.tar.zst"));
-            let status = Command::new("zstd")
-                .args(["-q", "-f", "--rm", "-o"])
-                .arg(&zst)
-                .arg(&tar_path)
-                .status()
-                .context("failed to run zstd")?;
-            if !status.success() {
-                let _ = std::fs::remove_file(&zst);
-                let _ = std::fs::remove_file(&tar_path);
-                bail!("zstd exited with {status}");
-            }
-            zst
-        }
-        _ => tar_path,
+    let facts = trace_facts(trace_dir);
+    let attempt = safe_component_or_unknown(&input.attempt_id);
+    let suffix = match config.compression {
+        ArchiveCompression::Zstd => ".tar.zst",
+        ArchiveCompression::None => ".tar",
     };
+    let bundle = attempt_dir.join(format!("{attempt}{suffix}"));
+    let bundle_partial = attempt_dir.join(format!("{attempt}{suffix}.partial"));
+    write_bundle(staging, &contents, &bundle_partial, config.compression)?;
+    fs::rename(&bundle_partial, &bundle)
+        .with_context(|| format!("failed to publish archive bundle {}", bundle.display()))?;
+    sync_directory(attempt_dir)?;
 
     let (bundle_sha256, bundle_bytes) = sha256_file(&bundle)?;
-    let sidecar_path = day_dir.join(format!("{stem}.json"));
+    let sidecar_path = attempt_dir.join(format!("{attempt}.json"));
     let sidecar = Sidecar {
         schema_version: SIDECAR_SCHEMA_VERSION,
         bundle_path: bundle
@@ -301,39 +265,213 @@ fn stage_and_pack(
             .unwrap_or(&bundle)
             .to_string_lossy()
             .to_string(),
-        bundle_sha256,
+        bundle_sha256: bundle_sha256.clone(),
         bundle_bytes,
         host: host.to_string(),
-        needle_version: env!("CARGO_PKG_VERSION").to_string(),
-        attempt: input.clone(),
-        files,
+        workspace: input.workspace.clone(),
+        workspace_slug: workspace_slug(&input.workspace),
+        bead_id: input.bead_id.clone(),
+        attempt_id: input.attempt_id.clone(),
+        provisional: archive_metadata.provisional,
+        session_id: facts.session_id,
+        adapter: input.adapter.clone(),
+        model: input
+            .model
+            .clone()
+            .or_else(|| input.requested_model.clone())
+            .or(facts.effective_model)
+            .or_else(|| input.effective_model.clone()),
+        worker_id: input.worker.clone(),
+        outcome: input.outcome.clone(),
+        requested_action: facts
+            .requested_action
+            .or_else(|| archive_metadata.requested_action.clone()),
+        started_at: facts.started_at.or_else(|| Some(input.recorded_at.clone())),
+        finished_at: facts
+            .finished_at
+            .or_else(|| Some(input.recorded_at.clone())),
+        contents,
     };
-    // The sidecar is the commit marker: written whole, then renamed.
-    let partial = day_dir.join(format!(".{stem}.json.{}.partial", std::process::id()));
-    std::fs::write(&partial, serde_json::to_string(&sidecar)?)
-        .with_context(|| format!("failed to write {}", partial.display()))?;
-    std::fs::rename(&partial, &sidecar_path)
-        .with_context(|| format!("failed to commit {}", sidecar_path.display()))?;
+    write_atomic_json(&sidecar_path, &sidecar)?;
 
     Ok(SpoolReceipt {
         bundle,
         sidecar: sidecar_path,
+        bundle_sha256,
         bundle_bytes,
     })
 }
 
-/// Copy the Claude session transcript and any subagent sidecars into the
-/// bundle staging directory. A missing session is an expected retention race,
-/// not a spool error; the caller records it in metadata instead.
+#[derive(Default)]
+struct TraceFacts {
+    session_id: Option<String>,
+    effective_model: Option<String>,
+    requested_action: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+}
+
+fn trace_facts(trace_dir: Option<&Path>) -> TraceFacts {
+    let Some(path) = trace_dir.map(|dir| dir.join("metadata.json")) else {
+        return TraceFacts::default();
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return TraceFacts::default();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return TraceFacts::default();
+    };
+    let string = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    TraceFacts {
+        session_id: string("session_id"),
+        effective_model: string("effective_model"),
+        requested_action: string("requested_action"),
+        started_at: string("started_at"),
+        finished_at: string("finished_at"),
+    }
+}
+
+fn write_bundle(
+    staging: &Path,
+    contents: &[String],
+    partial: &Path,
+    compression: ArchiveCompression,
+) -> Result<()> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(partial)
+        .with_context(|| format!("failed to create partial bundle {}", partial.display()))?;
+    match compression {
+        ArchiveCompression::None => {
+            let mut builder = tar::Builder::new(file);
+            append_staged_contents(&mut builder, staging, contents)?;
+            let file = builder
+                .into_inner()
+                .context("failed to finish tar bundle")?;
+            file.sync_all().context("failed to fsync tar bundle")?;
+        }
+        ArchiveCompression::Zstd => {
+            let encoder = zstd::Encoder::new(file, 0).context("failed to create zstd encoder")?;
+            let mut builder = tar::Builder::new(encoder);
+            append_staged_contents(&mut builder, staging, contents)?;
+            let encoder = builder
+                .into_inner()
+                .context("failed to finish tar before zstd")?;
+            let file = encoder.finish().context("failed to finish zstd bundle")?;
+            file.sync_all().context("failed to fsync zstd bundle")?;
+        }
+    }
+    Ok(())
+}
+
+fn append_staged_contents<W: Write>(
+    builder: &mut tar::Builder<W>,
+    staging: &Path,
+    contents: &[String],
+) -> Result<()> {
+    for relative in contents {
+        let source = staging.join(relative);
+        builder
+            .append_path_with_name(&source, relative)
+            .with_context(|| format!("failed to add {} to archive", relative))?;
+    }
+    Ok(())
+}
+
+fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    write_atomic_bytes(path, &bytes)
+}
+
+fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let partial = PathBuf::from(format!("{}.partial", path.display()));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&partial)
+        .with_context(|| format!("failed to create {}", partial.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("failed to write {}", partial.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to fsync {}", partial.display()))?;
+    drop(file);
+    fs::rename(&partial, path).with_context(|| format!("failed to publish {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn write_spooled_receipt(trace_dir: &Path, receipt: &SpoolReceipt) -> Result<()> {
+    let marker = trace_dir.join("spooled.json");
+    let value = SpooledReceipt {
+        bundle_path: receipt.bundle.display().to_string(),
+        sha256: receipt.bundle_sha256.clone(),
+        spooled_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    };
+    write_atomic_json(&marker, &value)
+}
+
+/// Return the final component of a workspace path as a safe spool directory.
+pub fn workspace_slug(workspace: &str) -> String {
+    let trimmed = workspace.trim_end_matches(['/', '\\']);
+    let name = trimmed
+        .rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
+        .unwrap_or("unknown");
+    safe_component_or_unknown(name)
+}
+
+fn safe_component_or_unknown(value: &str) -> String {
+    let component = safe_component(value);
+    if component.is_empty() {
+        "unknown".to_string()
+    } else {
+        component
+    }
+}
+
+fn safe_component(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("failed to open directory {} for fsync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to fsync directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn copy_harness_transcript(
     input: &AttemptArchiveInput,
     trace_dir: &Path,
     destination: &Path,
     sanitizer: Option<&Sanitizer>,
-    claude_dir: Option<&Path>,
 ) -> Result<HarnessTranscriptStatus> {
     let metadata_path = trace_dir.join("metadata.json");
-    let metadata = match std::fs::read_to_string(&metadata_path) {
+    let metadata = match fs::read_to_string(&metadata_path) {
         Ok(metadata) => serde_json::from_str::<serde_json::Value>(&metadata)
             .with_context(|| format!("failed to parse {}", metadata_path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -365,7 +503,6 @@ fn copy_harness_transcript(
         );
         return Ok(HarnessTranscriptStatus::UnsupportedAdapter);
     }
-
     let session_id = metadata
         .get("session_id")
         .and_then(serde_json::Value::as_str)
@@ -380,7 +517,7 @@ fn copy_harness_transcript(
     };
 
     let discovery =
-        crate::transcript::TranscriptDiscovery::new(Path::new(&input.workspace), claude_dir, 0);
+        crate::transcript::TranscriptDiscovery::new(Path::new(&input.workspace), None, 0);
     let Some(session_path) = discovery.session_path(session_id) else {
         tracing::debug!(
             attempt_id = %input.attempt_id,
@@ -398,17 +535,18 @@ fn copy_harness_transcript(
         return Ok(HarnessTranscriptStatus::Absent);
     }
 
-    std::fs::create_dir_all(destination)
+    fs::create_dir_all(destination)
         .with_context(|| format!("failed to create {}", destination.display()))?;
-    let session_destination = destination.join(format!("{session_id}.jsonl"));
-    copy_sanitized_file(&session_path, &session_destination, sanitizer)?;
-
+    copy_sanitized_file(
+        &session_path,
+        &destination.join(format!("{session_id}.jsonl")),
+        sanitizer,
+    )?;
     if let Some(subagent_dir) = discovery.session_subagent_dir(session_id) {
         if subagent_dir.is_dir() {
             copy_sanitized_tree(&subagent_dir, &destination.join(session_id), sanitizer)?;
         }
     }
-
     Ok(HarnessTranscriptStatus::Present)
 }
 
@@ -417,7 +555,7 @@ fn copy_sanitized_file(
     destination: &Path,
     sanitizer: Option<&Sanitizer>,
 ) -> Result<()> {
-    let bytes = std::fs::read(source)
+    let bytes = fs::read(source)
         .with_context(|| format!("failed to read harness transcript {}", source.display()))?;
     let bytes = match String::from_utf8(bytes) {
         Ok(text) => sanitizer
@@ -426,8 +564,12 @@ fn copy_sanitized_file(
             .into_bytes(),
         Err(error) => error.into_bytes(),
     };
-    std::fs::write(destination, bytes)
-        .with_context(|| format!("failed to write {}", destination.display()))
+    fs::write(destination, bytes).with_context(|| {
+        format!(
+            "failed to write harness transcript {}",
+            destination.display()
+        )
+    })
 }
 
 fn copy_sanitized_tree(
@@ -435,10 +577,10 @@ fn copy_sanitized_tree(
     destination: &Path,
     sanitizer: Option<&Sanitizer>,
 ) -> Result<()> {
-    std::fs::create_dir_all(destination)
+    fs::create_dir_all(destination)
         .with_context(|| format!("failed to create {}", destination.display()))?;
     for entry in
-        std::fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
     {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -464,12 +606,12 @@ fn update_harness_status(trace_dir: &Path, status: HarnessTranscriptStatus) -> R
         return Ok(());
     }
     let mut metadata = serde_json::from_str::<serde_json::Value>(
-        &std::fs::read_to_string(&metadata_path)
+        &fs::read_to_string(&metadata_path)
             .with_context(|| format!("failed to read {}", metadata_path.display()))?,
     )
     .with_context(|| format!("failed to parse {}", metadata_path.display()))?;
     metadata["harness_transcript"] = serde_json::to_value(status)?;
-    std::fs::write(&metadata_path, serde_json::to_string_pretty(&metadata)?).with_context(|| {
+    fs::write(&metadata_path, serde_json::to_string_pretty(&metadata)?).with_context(|| {
         format!(
             "failed to write harness transcript status to {}",
             metadata_path.display()
@@ -479,7 +621,7 @@ fn update_harness_status(trace_dir: &Path, status: HarnessTranscriptStatus) -> R
 
 fn files_below(root: &Path, directory: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(directory)
+    for entry in fs::read_dir(directory)
         .with_context(|| format!("failed to read {}", directory.display()))?
     {
         let entry = entry?;
@@ -499,27 +641,9 @@ fn files_below(root: &Path, directory: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
-fn which_exists(binary: &str) -> bool {
-    which::which(binary).is_ok()
-}
-
-fn safe_component(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// SHA-256 hex digest and byte size of a file.
 pub fn sha256_file(path: &Path) -> Result<(String, u64)> {
-    use std::io::Read;
     let mut file =
-        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1024 * 1024];
     let mut size = 0u64;
@@ -559,5 +683,12 @@ mod tests {
     fn disabled_archive_spools_nothing() {
         let config = AttemptArchiveConfig::default();
         assert!(spool_attempt(&config, &input(), None).unwrap().is_none());
+    }
+
+    #[test]
+    fn workspace_slug_uses_the_final_path_component() {
+        assert_eq!(workspace_slug("/home/coding/NEEDLE"), "NEEDLE");
+        assert_eq!(workspace_slug("/home/coding/project@v1"), "project_v1");
+        assert_eq!(workspace_slug("/"), "unknown");
     }
 }

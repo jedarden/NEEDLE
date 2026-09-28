@@ -289,7 +289,9 @@ version = 1
 # +6 N-T21 gate-degraded adaptation freeze contracts: no exposure or evidence
 # changes during degradation, evidence and exposure resume after restoration,
 # pause/resume state, retry-tier freeze and policy-promotion refusal.
-max_tests = 4067
+# +3 attempt archive spool layout and archive-gated retention contracts
+# (needle-af8e7b7d).
+max_tests = 4070
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

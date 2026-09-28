@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use needle::attempt_archive::{
     sha256_file, spool_attempt, spool_attempt_with_sanitizer, AttemptArchiveInput, Sidecar,
-    SIDECAR_SCHEMA_VERSION,
+    SpooledReceipt, SIDECAR_SCHEMA_VERSION,
 };
 use needle::bead_store::{
     builtin_bead_backends, open_configured, BeadBackend, BeadStore, CliBeadStore, Filters,
@@ -934,6 +934,9 @@ fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
     let trace = TempDir::new().unwrap();
     fs::write(trace.path().join("metadata.json"), "{\"exit_code\":0}").unwrap();
     fs::write(trace.path().join("stdout.txt"), "hello").unwrap();
+    fs::write(trace.path().join("stderr.txt"), "oops").unwrap();
+    fs::write(trace.path().join("trace.jsonl"), "{\"event\":\"done\"}\n").unwrap();
+    fs::write(trace.path().join("prompt.md"), "exact prompt\n").unwrap();
     fs::write(trace.path().join("attempts.jsonl"), "{}\n").unwrap();
     let config = AttemptArchiveConfig {
         enabled: true,
@@ -950,11 +953,10 @@ fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
     assert!(receipt.bundle_bytes > 0);
     let relative = receipt.sidecar.strip_prefix(spool.path()).unwrap();
     let parts: Vec<_> = relative.components().collect();
-    assert_eq!(parts.len(), 3, "{relative:?}");
-    assert_eq!(parts[1].as_os_str(), "2026-09-12");
-    assert!(relative
-        .to_string_lossy()
-        .ends_with("needle-abc-0192-attempt-1.json"));
+    assert_eq!(parts.len(), 4, "{relative:?}");
+    assert_eq!(parts[1].as_os_str(), "ws");
+    assert_eq!(parts[2].as_os_str(), "needle-abc");
+    assert!(relative.to_string_lossy().ends_with("0192-attempt-1.json"));
 
     let sidecar: Sidecar =
         serde_json::from_str(&fs::read_to_string(&receipt.sidecar).unwrap()).unwrap();
@@ -964,14 +966,30 @@ fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
     let (digest, size) = sha256_file(&bundle).unwrap();
     assert_eq!(digest, sidecar.bundle_sha256);
     assert_eq!(size, sidecar.bundle_bytes);
-    assert_eq!(sidecar.attempt, input);
-    assert!(sidecar.files.contains(&"attempt.json".to_string()));
-    assert!(sidecar.files.contains(&"stdout.txt".to_string()));
-    assert!(sidecar.files.contains(&"attempts.jsonl".to_string()));
-    assert!(!spool
-        .path()
-        .join(".staging/needle-abc-0192-attempt-1")
-        .exists());
+    assert_eq!(sidecar.workspace, input.workspace);
+    assert_eq!(sidecar.workspace_slug, "ws");
+    assert_eq!(sidecar.bead_id, input.bead_id);
+    assert_eq!(sidecar.attempt_id, input.attempt_id);
+    assert!(sidecar
+        .contents
+        .contains(&"trace/metadata.json".to_string()));
+    assert_eq!(
+        sidecar.contents,
+        vec![
+            "prompt.md".to_string(),
+            "trace/metadata.json".to_string(),
+            "trace/stderr.txt".to_string(),
+            "trace/stdout.txt".to_string(),
+            "trace/trace.jsonl".to_string(),
+        ]
+    );
+    assert!(sidecar.contents.contains(&"trace/stdout.txt".to_string()));
+    assert!(!sidecar.contents.contains(&"attempts.jsonl".to_string()));
+    let spooled: SpooledReceipt =
+        serde_json::from_str(&fs::read_to_string(trace.path().join("spooled.json")).unwrap())
+            .unwrap();
+    assert_eq!(spooled.sha256, digest);
+    assert_eq!(spooled.bundle_path, receipt.bundle.display().to_string());
 
     let listing = if bundle
         .extension()
@@ -990,8 +1008,15 @@ fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
             .unwrap()
     };
     let listing = String::from_utf8_lossy(&listing.stdout);
-    assert!(listing.contains("attempt.json"), "{listing}");
-    assert!(listing.contains("stdout.txt"), "{listing}");
+    let listed: Vec<_> = listing.lines().collect();
+    assert_eq!(
+        listed,
+        sidecar
+            .contents
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -1013,7 +1038,8 @@ fn archive_and_status_process_contracts_archive_missing_trace_facts() {
     assert!(receipt.bundle.to_string_lossy().ends_with(".tar"));
     let sidecar: Sidecar =
         serde_json::from_str(&fs::read_to_string(&receipt.sidecar).unwrap()).unwrap();
-    assert_eq!(sidecar.files, vec!["attempt.json".to_string()]);
+    assert!(sidecar.contents.is_empty());
+    assert!(!receipt.sidecar.with_extension("json.partial").exists());
 }
 
 #[test]
@@ -1072,7 +1098,7 @@ fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
         let output = Command::new("tar")
             .arg("-xOf")
             .arg(&receipt.bundle)
-            .arg(format!("./{path}"))
+            .arg(path)
             .output()
             .unwrap();
         assert!(output.status.success(), "tar could not read {path}");
@@ -1111,6 +1137,7 @@ fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
     )
     .unwrap();
     assert_eq!(missing_metadata["harness_transcript"], "absent");
+    assert!(missing_trace.path().join("spooled.json").is_file());
 
     let disabled = AttemptArchiveConfig::default();
     assert!(

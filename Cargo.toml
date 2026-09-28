@@ -137,6 +137,10 @@ uuid = { version = "1", features = ["v7"] }
 # Temporary directories (checkpoint test utilities)
 tempfile = "3"
 
+# Attempt archive bundles
+tar = "0.4"
+zstd = "0.13"
+
 # OpenTelemetry / OTLP (gated behind `otlp` feature)
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }

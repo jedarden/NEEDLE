@@ -827,6 +827,14 @@ pub struct TraceCleanupSummary {
     pub traces_deleted: u32,
 }
 
+/// Archive-related retention gates. The default preserves the historical
+/// retention behavior byte-for-byte when attempt archiving is disabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TraceCleanupOptions {
+    pub archive_enabled: bool,
+    pub prune_local_after_spool: bool,
+}
+
 /// Clean up old traces based on retention policy.
 ///
 /// - Failed beads (non-zero exit): delete after the configured failure retention
@@ -841,6 +849,21 @@ pub fn cleanup_traces(
     traces_dir: &Path,
     retention_days_failed: u32,
     retention_days_success: u32,
+) -> Result<TraceCleanupSummary> {
+    cleanup_traces_with_options(
+        traces_dir,
+        retention_days_failed,
+        retention_days_success,
+        TraceCleanupOptions::default(),
+    )
+}
+
+/// Clean up traces with the optional attempt-archive retention gate.
+pub fn cleanup_traces_with_options(
+    traces_dir: &Path,
+    retention_days_failed: u32,
+    retention_days_success: u32,
+    options: TraceCleanupOptions,
 ) -> Result<TraceCleanupSummary> {
     let mut summary = TraceCleanupSummary::default();
 
@@ -875,6 +898,7 @@ pub fn cleanup_traces(
             now,
             retention_days_failed,
             retention_days_success,
+            options,
             &mut summary,
         );
 
@@ -889,6 +913,7 @@ pub fn cleanup_traces(
                         now,
                         retention_days_failed,
                         retention_days_success,
+                        options,
                         &mut summary,
                     );
                 }
@@ -921,6 +946,7 @@ fn apply_retention_to_dir(
     now: u64,
     retention_days_failed: u32,
     retention_days_success: u32,
+    options: TraceCleanupOptions,
     summary: &mut TraceCleanupSummary,
 ) {
     // Check metadata.json to determine outcome and age.
@@ -957,14 +983,26 @@ fn apply_retention_to_dir(
     .iter()
     .any(|file| path.join(file).exists());
 
-    let should_delete = is_failed && age_days > retention_days_failed as u64;
+    let should_delete_before_archive_gate = is_failed && age_days > retention_days_failed as u64;
     // A trace marked pruned may still contain data when a prior cleanup was
     // interrupted after updating metadata. Finish removing those files too.
-    let should_prune = !is_failed && has_data_files && age_days > retention_days_success as u64;
+    let archive_gate_open = !options.archive_enabled
+        || !options.prune_local_after_spool
+        || path.join("spooled.json").is_file();
+    let should_delete = should_delete_before_archive_gate && archive_gate_open;
+    let should_prune = !is_failed
+        && has_data_files
+        && age_days > retention_days_success as u64
+        && archive_gate_open;
 
     // Fix up metadata for traces that were partially pruned (files gone
     // but metadata not updated). This prevents infinite loops.
-    if !is_failed && !is_pruned && !has_data_files && age_days > retention_days_success as u64 {
+    if archive_gate_open
+        && !is_failed
+        && !is_pruned
+        && !has_data_files
+        && age_days > retention_days_success as u64
+    {
         if let Err(e) = fix_pruned_metadata(path) {
             tracing::debug!(
                 path = %path.display(),
@@ -2654,6 +2692,57 @@ mod tests {
         let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
         assert_eq!(summary.traces_deleted, 1);
         assert!(!bead_dir.exists(), "no empty bead-dir shell remains");
+    }
+
+    #[test]
+    fn archive_retention_requires_spooled_marker_for_attempts() {
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        let bead_dir = traces_dir.join("needle-archive-retention");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        let unspooled = stage_attempt(&bead_dir, "attempt-unspooled", 0, 8);
+        let spooled = stage_attempt(&bead_dir, "attempt-spooled", 0, 8);
+        std::fs::write(spooled.join("spooled.json"), "{}\n").unwrap();
+
+        let summary = cleanup_traces_with_options(
+            &traces_dir,
+            30,
+            7,
+            TraceCleanupOptions {
+                archive_enabled: true,
+                prune_local_after_spool: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.traces_pruned, 1);
+        assert!(unspooled.join(STDOUT_FILE).exists());
+        assert!(!spooled.join(STDOUT_FILE).exists());
+        assert!(spooled.join("spooled.json").exists());
+    }
+
+    #[test]
+    fn archive_retention_without_local_prune_keeps_historical_behavior() {
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        let bead_dir = traces_dir.join("needle-archive-disabled-prune");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+        let attempt = stage_attempt(&bead_dir, "attempt-no-marker", 0, 8);
+
+        let summary = cleanup_traces_with_options(
+            &traces_dir,
+            30,
+            7,
+            TraceCleanupOptions {
+                archive_enabled: true,
+                prune_local_after_spool: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.traces_pruned, 1);
+        assert!(!attempt.join(STDOUT_FILE).exists());
     }
 
     #[test]

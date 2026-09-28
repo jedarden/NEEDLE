@@ -22,7 +22,7 @@ use crate::learning::LearningsFile;
 use crate::peer::PeerMonitor;
 use crate::registry::{Registry, WorkerEntry};
 use crate::telemetry::{EventKind, Telemetry};
-use crate::trace::cleanup_traces;
+use crate::trace::{cleanup_traces_with_options, TraceCleanupOptions};
 use crate::types::{Bead, BeadId, BeadStatus, StrandError, StrandResult};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -753,6 +753,8 @@ pub struct MendStrand {
     traces_dir: PathBuf,
     trace_retention_failed_days: u32,
     trace_retention_success_days: u32,
+    attempt_archive_enabled: bool,
+    prune_local_after_spool: bool,
     workspace: PathBuf,
     max_learnings: usize,
     /// Base state directory (contains `rate_limits/` subdirectory).
@@ -812,11 +814,24 @@ impl MendStrand {
             traces_dir,
             trace_retention_failed_days,
             trace_retention_success_days,
+            attempt_archive_enabled: false,
+            prune_local_after_spool: false,
             workspace,
             max_learnings,
             state_dir,
             limits_config,
         }
+    }
+
+    /// Configure the retention gate for locally spooled attempt traces.
+    pub fn with_attempt_archive_retention(
+        mut self,
+        enabled: bool,
+        prune_local_after_spool: bool,
+    ) -> Self {
+        self.attempt_archive_enabled = enabled;
+        self.prune_local_after_spool = prune_local_after_spool;
+        self
     }
 
     // ── Step 1: Stale claim cleanup via peer monitoring ──────────────────────
@@ -1713,10 +1728,14 @@ impl MendStrand {
             return Ok(());
         }
 
-        match cleanup_traces(
+        match cleanup_traces_with_options(
             &self.traces_dir,
             self.trace_retention_failed_days,
             self.trace_retention_success_days,
+            TraceCleanupOptions {
+                archive_enabled: self.attempt_archive_enabled,
+                prune_local_after_spool: self.prune_local_after_spool,
+            },
         ) {
             Ok(cleanup_summary) => {
                 summary.traces_pruned = cleanup_summary.traces_pruned;
