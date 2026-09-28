@@ -1,0 +1,23 @@
+name: claude-code-glm-5.3-flash-1m
+description: "1M-context canary of the managed GLM-5.3-Flash profile (needle-0810eb14). Requests the provider-supported 1M identifier glm-5.3-flash[1m] (quoted in the template: unquoted, bash treats the brackets as a character-class glob) plus --autocompact 1m. NOT the fleet default: workers opt in per dispatch with --agent claude-code-glm-5.3-flash-1m; promoting it to the default requires a rollout bead with canary evidence. This canary also carries the two flags under evaluation: --exclude-dynamic-system-prompt-sections (stable prompt prefix for prompt-cache reuse -- dynamic sections like cwd/git-state defeat caching) and --no-session-persistence (one-bead/one-session workers that never resume a prior session). Everything else matches the baseline profile exactly."
+agent_cli: claude
+version_command: "claude --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && unset CLAUDECODE; CARGO_BUILD_JOBS='2' RUST_TEST_THREADS='2' CARGO_INCREMENTAL='0' NODE_TLS_REJECT_UNAUTHORIZED='0' ANTHROPIC_BASE_URL=${NEEDLE_ZAI_BASE_URL:-https://zai-proxy-mcp-apexalgo-iad-ts.ardenone.com:8444} ANTHROPIC_AUTH_TOKEN=${NEEDLE_ZAI_AUTH_TOKEN:-proxy-handles-auth} ANTHROPIC_MODEL='glm-5.3-flash[1m]' ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.3-flash[1m]' ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5.3-flash[1m]' ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-5.3-flash[1m]' CLAUDE_CODE_SUBAGENT_MODEL='glm-5.3-flash[1m]' DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 NODE_TLS_REJECT_UNAUTHORIZED=0 /home/coding/.local/bin/claude --print --verbose --output-format stream-json --include-partial-messages --model 'glm-5.3-flash[1m]' --effort max --autocompact 1m --max-turns 100 --exclude-dynamic-system-prompt-sections --no-session-persistence --dangerously-skip-permissions < {prompt_file}"
+environment: {}
+idle_timeout_secs: 900
+hard_timeout_secs: 3600
+provider: zai-proxy
+model: glm-5.3-flash[1m]
+token_extraction:
+  method: json_field
+  input_path: "result.usage.input_tokens"
+  output_path: "result.usage.output_tokens"
+output_transform: needle-transform-claude
+profile:
+  version: "1"
+  effort: max
+  context_mode: 1m
+  max_turns: 100
+  min_cli_version: "2.1.283"

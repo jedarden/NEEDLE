@@ -1,0 +1,23 @@
+name: claude-code-glm-5.3-flash-low
+description: "Low-effort canary of the managed GLM-5.3-Flash profile (needle-0810eb14). Identical to the baseline except --effort low: a separately named variant for cheap mechanical work, never a hidden mutation of the default. Caveat: Z.AI's GLM-5.3 guidance rejects thinking-disabled requests with a 400, and it is unverified whether the CLI maps --effort low to a disabled/empty thinking block on this model -- smoke the canary before relying on it (see docs/adapter-profiles-glm53-flash.md)."
+agent_cli: claude
+version_command: "claude --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && unset CLAUDECODE; CARGO_BUILD_JOBS='2' RUST_TEST_THREADS='2' CARGO_INCREMENTAL='0' NODE_TLS_REJECT_UNAUTHORIZED='0' ANTHROPIC_BASE_URL=${NEEDLE_ZAI_BASE_URL:-https://zai-proxy-mcp-apexalgo-iad-ts.ardenone.com:8444} ANTHROPIC_AUTH_TOKEN=${NEEDLE_ZAI_AUTH_TOKEN:-proxy-handles-auth} ANTHROPIC_MODEL='glm-5.3-flash' ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.3-flash' ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5.3-flash' ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-5.3-flash' CLAUDE_CODE_SUBAGENT_MODEL='glm-5.3-flash' DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 NODE_TLS_REJECT_UNAUTHORIZED=0 /home/coding/.local/bin/claude --print --verbose --output-format stream-json --include-partial-messages --model glm-5.3-flash --effort low --max-turns 100 --dangerously-skip-permissions < {prompt_file}"
+environment: {}
+idle_timeout_secs: 900
+hard_timeout_secs: 3600
+provider: zai-proxy
+model: glm-5.3-flash
+token_extraction:
+  method: json_field
+  input_path: "result.usage.input_tokens"
+  output_path: "result.usage.output_tokens"
+output_transform: needle-transform-claude
+profile:
+  version: "1"
+  effort: low
+  context_mode: standard
+  max_turns: 100
+  min_cli_version: "2.1.283"

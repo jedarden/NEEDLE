@@ -2978,6 +2978,14 @@ impl OutcomeHandler {
             template_version: attempt.template_version,
             // ContextManifest hashing is N-T10; the hash is absent until then.
             context_manifest_hash: provenance.context_manifest_hash,
+            // Adapter-profile facts recorded at dispatch (needle-0810eb14).
+            // Unmanaged adapters leave these `None`, and `timeout_policy` is
+            // the only one present for every adapter.
+            profile_version: provenance.profile_version,
+            context_mode: provenance.context_mode,
+            effort: provenance.effort,
+            max_turns: provenance.max_turns,
+            timeout_policy: provenance.timeout_policy,
             gate_results,
             outcome: resolved_outcome.to_string(),
             requested_action,

@@ -5,6 +5,7 @@
 /// The pure learning kernel shipped as part of the NEEDLE release.
 pub use needle_learning;
 
+pub mod adapter_profile;
 pub mod adapter_usage;
 pub mod agent_event;
 pub mod attempt;

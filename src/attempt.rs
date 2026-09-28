@@ -40,6 +40,39 @@ pub struct AttemptProvenance {
     pub provider_degraded: bool,
     /// Digest of the context manifest exposed to the adapter.
     pub context_manifest_hash: Option<String>,
+    /// Declared `profile.version` of the adapter's managed profile block.
+    /// `None` for unmanaged adapters.
+    pub profile_version: Option<String>,
+    /// Declared context mode (`standard` or `1m`) of the adapter's profile.
+    pub context_mode: Option<String>,
+    /// Declared reasoning effort of the adapter's profile.
+    pub effort: Option<String>,
+    /// Agent turn ceiling passed by the adapter's invocation.
+    pub max_turns: Option<u64>,
+    /// Timeout policy description in force for the attempt (for example
+    /// `idle 900s / hard 3600s`).
+    pub timeout_policy: Option<String>,
+}
+
+impl AttemptProvenance {
+    /// Record the adapter's declared profile and timeout policy in one call.
+    ///
+    /// Unmanaged adapters (`profile` `None`) record nothing but the timeout
+    /// policy, which every adapter has; the profile fields stay `None` rather
+    /// than being backfilled from anywhere else.
+    pub fn record_adapter_profile(
+        &mut self,
+        profile: Option<&crate::adapter_profile::AgentProfileMeta>,
+        timeout_description: &str,
+    ) {
+        self.timeout_policy = Some(timeout_description.to_string());
+        if let Some(profile) = profile {
+            self.profile_version = Some(profile.version.clone());
+            self.context_mode = Some(profile.context_mode.clone());
+            self.effort = Some(profile.effort.clone());
+            self.max_turns = Some(profile.max_turns);
+        }
+    }
 }
 
 /// The provider-reported model identity from a supported response field.

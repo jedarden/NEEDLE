@@ -407,7 +407,10 @@ contract = 215
 # activity reset idle deadlines, closed output pipes retain timeout enforcement,
 # and worker cancellation kills and reaps the process group.
 # +1 attempt-archive harness transcript copy/status contract (needle-310a29eb).
-e2e = 870
+# +13 managed GLM-5.3-Flash profile contracts (needle-0810eb14) in
+# adapter_smoke: static validation, installer rollback, min-CLI probing, and
+# fake-Claude dispatch/timeout/signal coverage.
+e2e = 883
 soak = 0
 fuzz = 0
 
@@ -473,7 +476,10 @@ owner = "component:process-integration"
 name = "adapter_smoke"
 path = "tests/adapter_smoke.rs"
 tier = "e2e"
-max_tests = 4
+# +13 managed GLM-5.3-Flash profile tests (needle-0810eb14): 3 static
+# load/render/reject contracts, 1 test-agent min-version check, 1 installer
+# idempotency contract, and 8 fake-CLI/proxy dispatch scenarios.
+max_tests = 17
 owner = "component:process-integration"
 
 [[harness]]

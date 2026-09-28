@@ -212,6 +212,19 @@ pub struct AttemptResolvedFields {
     pub prompt_template: String,
     pub template_version: String,
     pub context_manifest_hash: Option<String>,
+    /// Declared `profile.version` of the adapter's managed profile block
+    /// (needle-0810eb14). `None` for unmanaged adapters; serialized only
+    /// when present, so absence reads as unmanaged without a version bump.
+    pub profile_version: Option<String>,
+    /// Declared context mode (`standard`/`1m`) of the adapter's profile.
+    pub context_mode: Option<String>,
+    /// Declared reasoning effort of the adapter's profile.
+    pub effort: Option<String>,
+    /// Agent turn ceiling passed by the adapter's invocation.
+    pub max_turns: Option<u64>,
+    /// Timeout policy description in force for the attempt (for example
+    /// `idle 900s / hard 3600s`).
+    pub timeout_policy: Option<String>,
     pub gate_results: Vec<GateResultEntry>,
     /// Wire string of one [`AttemptOutcome`] variant — the schema fixture's
     /// `outcome` enum. Stored as `String` so emitters can pass their mapped
@@ -4393,6 +4406,11 @@ impl EventKind {
                     prompt_template,
                     template_version,
                     context_manifest_hash,
+                    profile_version,
+                    context_mode,
+                    effort,
+                    max_turns,
+                    timeout_policy,
                     gate_results,
                     outcome,
                     requested_action,
@@ -4498,6 +4516,25 @@ impl EventKind {
                 }
                 if let Some(hash) = context_manifest_hash {
                     data["context_manifest_hash"] = serde_json::json!(hash);
+                }
+                // Adapter-profile facts (needle-0810eb14): serialized only
+                // when the adapter declared them. Unmanaged adapters omit the
+                // block entirely — same optional-by-design shape as
+                // `override` — so the contract needs no version bump.
+                if let Some(version) = profile_version {
+                    data["profile_version"] = serde_json::json!(version);
+                }
+                if let Some(mode) = context_mode {
+                    data["context_mode"] = serde_json::json!(mode);
+                }
+                if let Some(level) = effort {
+                    data["effort"] = serde_json::json!(level);
+                }
+                if let Some(turns) = max_turns {
+                    data["max_turns"] = serde_json::json!(turns);
+                }
+                if let Some(policy) = timeout_policy {
+                    data["timeout_policy"] = serde_json::json!(policy);
                 }
                 if let Some(state) = confirmed_state {
                     data["confirmed_state"] = serde_json::json!(state);
@@ -7929,6 +7966,11 @@ mod tests {
             prompt_template: "pluck".to_string(),
             template_version: "pluck-default".to_string(),
             context_manifest_hash: None, // absent until N-T10
+            profile_version: Some("1".to_string()),
+            context_mode: Some("standard".to_string()),
+            effort: Some("max".to_string()),
+            max_turns: Some(100),
+            timeout_policy: Some("idle 900s / hard 3600s".to_string()),
             gate_results: vec![
                 GateResultEntry {
                     name: "fmt".to_string(),

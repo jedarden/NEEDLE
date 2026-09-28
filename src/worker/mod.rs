@@ -4177,6 +4177,32 @@ impl Worker {
     }
 
     /// DISPATCHING: check rate limits, resolve adapter, and prepare for execution.
+    /// Record the selected adapter's declared profile and timeout policy on
+    /// the attempt provenance so the terminal ledger row carries them.
+    ///
+    /// A profile read failure downgrades to a warning, not an abort: the
+    /// dispatch itself was already validated against the same directory when
+    /// the adapters were loaded.
+    fn record_adapter_profile(&mut self, adapter: &crate::dispatch::AgentAdapter) {
+        let profile = match crate::adapter_profile::find_profile(
+            &self.config.agent.adapters_dir,
+            &adapter.name,
+        ) {
+            Ok(profile) => profile,
+            Err(e) => {
+                tracing::warn!(
+                    adapter = %adapter.name,
+                    error = %e,
+                    "failed to read adapter profile; provenance omits profile fields"
+                );
+                None
+            }
+        };
+        let timeout_description = adapter.timeout_description(self.config.agent.timeout);
+        self.attempt_provenance
+            .record_adapter_profile(profile.as_ref(), &timeout_description);
+    }
+
     async fn do_dispatch(&mut self) -> Result<()> {
         if self.current_bead.is_none() {
             bail!("DISPATCHING state without current_bead — invariant violated");
@@ -4198,6 +4224,7 @@ impl Worker {
         self.attempt_provenance.adapter = Some(adapter.name.clone());
         self.attempt_provenance.harness = Some(adapter.name.clone());
         self.attempt_provenance.requested_model = adapter.model.clone();
+        self.record_adapter_profile(&adapter);
 
         // Enter the agent.dispatch span for the dispatching phase.
         let _bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
@@ -4442,6 +4469,9 @@ impl Worker {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("execution started without an attempt identity"))?;
 
+        // Record the adapter's declared profile before the workspace borrow
+        // below pins `self` for the manifest hash.
+        self.record_adapter_profile(&adapter);
         // Use the bead's workspace if set (remote bead from Explore),
         // otherwise fall back to the config's default workspace.
         let dispatch_ws = if is_workspace_unset(&bead.workspace) {

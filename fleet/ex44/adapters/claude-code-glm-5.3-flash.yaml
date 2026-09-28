@@ -1,0 +1,23 @@
+name: claude-code-glm-5.3-flash
+description: "Claude Code via ZAI proxy on GLM-5.3-Flash, routine-dispatch default for the ex44 fleet since 2026-09-03. Source of truth is fleet/ex44/adapters/ in jedarden/NEEDLE (needle-0810eb14); install with scripts/install-needle-adapters.sh, which keeps a timestamped .bak of the previous file for rollback. Model routing facts: Z.AI retired glm-4.7 on the Coding Plan and routes it silently rather than erroring -- a live request for glm-4.7 returns glm-5.3-flash (verified against the proxy 2026-09-03). Flash is the cheapest model on the plan (credit multipliers input 2.3 / cached 0.56 / output 8, 1/3 of GLM-5.3's 6.9 / 1.7 / 24, halved outside Mon-Fri 14:00-18:00 SGT peak). Managed profile v1: --effort max explicit, exit status unmasked (no trailing pipe-to-cat -- bash -c without pipefail would otherwise report the masker's 0), endpoint/auth externalized via ${NEEDLE_ZAI_BASE_URL}/${NEEDLE_ZAI_AUTH_TOKEN} with safe defaults. This is harness tuning; it does not change which model the proxy serves. Canary variants -1m/-low/-high ship alongside; the default adapter is unchanged until a rollout bead says otherwise."
+agent_cli: claude
+version_command: "claude --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && unset CLAUDECODE; CARGO_BUILD_JOBS='2' RUST_TEST_THREADS='2' CARGO_INCREMENTAL='0' NODE_TLS_REJECT_UNAUTHORIZED='0' ANTHROPIC_BASE_URL=${NEEDLE_ZAI_BASE_URL:-https://zai-proxy-mcp-apexalgo-iad-ts.ardenone.com:8444} ANTHROPIC_AUTH_TOKEN=${NEEDLE_ZAI_AUTH_TOKEN:-proxy-handles-auth} ANTHROPIC_MODEL='glm-5.3-flash' ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.3-flash' ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5.3-flash' ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-5.3-flash' CLAUDE_CODE_SUBAGENT_MODEL='glm-5.3-flash' DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 NODE_TLS_REJECT_UNAUTHORIZED=0 /home/coding/.local/bin/claude --print --verbose --output-format stream-json --include-partial-messages --model glm-5.3-flash --effort max --max-turns 100 --dangerously-skip-permissions < {prompt_file}"
+environment: {}
+idle_timeout_secs: 900
+hard_timeout_secs: 3600
+provider: zai-proxy
+model: glm-5.3-flash
+token_extraction:
+  method: json_field
+  input_path: "result.usage.input_tokens"
+  output_path: "result.usage.output_tokens"
+output_transform: needle-transform-claude
+profile:
+  version: "1"
+  effort: max
+  context_mode: standard
+  max_turns: 100
+  min_cli_version: "2.1.283"

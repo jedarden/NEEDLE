@@ -1186,7 +1186,7 @@ pub fn builtin_adapters() -> Vec<AgentAdapter> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Substitute known variables in an invoke template.
-fn render_template(
+pub fn render_template(
     template: &str,
     workspace: &Path,
     prompt_file: &Path,
@@ -1241,6 +1241,11 @@ pub fn load_adapters(
                         path.display()
                     )
                 })?;
+
+                // A declared `profile:` block must agree with the template it
+                // describes; adapters without one load unchanged.
+                crate::adapter_profile::validate_yaml(&text, &adapter)
+                    .with_context(|| format!("profile block invalid in {}", path.display()))?;
 
                 adapters.insert(adapter.name.clone(), adapter);
             }
@@ -3387,6 +3392,12 @@ pub struct AgentTestResult {
     pub timeout_description: String,
     pub status: AgentTestStatus,
     pub errors: Vec<String>,
+    /// Declared profile summary (`profile.version`/effort/context/turns),
+    /// present only for managed adapters that ship a `profile:` block.
+    pub profile_summary: Option<String>,
+    /// Whether the installed CLI satisfies the profile's `min_cli_version`.
+    /// `None` when the adapter is unmanaged or declares no floor.
+    pub min_cli_version_ok: Option<bool>,
 }
 
 /// Probe execution result.
@@ -3517,11 +3528,45 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
         errors.push(missing.clone());
     }
 
-    // 8. Determine overall status.
+    // 8. Validate the declared profile block, including its minimum CLI
+    //    version floor: a CLI older than the exercised flags require would
+    //    reject or silently drop them.
+    let profile = crate::adapter_profile::find_profile(&config.agent.adapters_dir, &adapter.name)?;
+    let profile_summary = profile.as_ref().map(|p| p.summary());
+    let mut min_cli_version_ok = None;
+    if let Some(minimum) = profile.as_ref().and_then(|p| p.min_cli_version.as_deref()) {
+        match version.as_deref() {
+            Some(installed) => {
+                match crate::adapter_profile::version_satisfies(installed, minimum) {
+                    Ok(true) => min_cli_version_ok = Some(true),
+                    Ok(false) => {
+                        min_cli_version_ok = Some(false);
+                        errors.push(format!(
+                            "installed CLI version '{installed}' is older than the profile's \
+                         min_cli_version {minimum}"
+                        ));
+                    }
+                    Err(e) => errors.push(format!(
+                        "cannot compare installed version against min_cli_version {minimum}: {e}"
+                    )),
+                }
+            }
+            None => errors.push(format!(
+                "profile declares min_cli_version {minimum} but the installed CLI \
+                 version is unknown"
+            )),
+        }
+    }
+
+    // 9. Determine overall status.
     let status = if cli_path.is_none() {
         AgentTestStatus::Error
     } else if !template_missing.is_empty() {
         // Missing template executables is an ERROR, not just a warning
+        AgentTestStatus::Error
+    } else if min_cli_version_ok == Some(false) {
+        // A CLI below the profile's declared floor cannot run this profile's
+        // invocation correctly — same severity as a missing executable.
         AgentTestStatus::Error
     } else if !errors.is_empty() {
         AgentTestStatus::Warning
@@ -3529,7 +3574,7 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
         AgentTestStatus::Ready
     };
 
-    // 8. Determine timeout policy.
+    // 10. Determine timeout policy.
     let timeout_policy = adapter.timeout_policy();
     let timeout_description = adapter.timeout_description(config.agent.timeout);
 
@@ -3545,6 +3590,8 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
         timeout_description,
         status,
         errors,
+        profile_summary,
+        min_cli_version_ok,
     })
 }
 
@@ -4022,6 +4069,15 @@ pub fn print_test_result(result: &AgentTestResult) {
         Some(true) => println!("Transform: binary found"),
         Some(false) => println!("Transform: binary NOT FOUND"),
         None => println!("Transform: none configured"),
+    }
+    match &result.profile_summary {
+        Some(summary) => println!("Profile: {summary}"),
+        None => println!("Profile: none declared"),
+    }
+    match result.min_cli_version_ok {
+        Some(true) => println!("Min CLI: satisfied"),
+        Some(false) => println!("Min CLI: BELOW DECLARED MINIMUM"),
+        None => {}
     }
     println!("Status:  {}", result.status);
     for err in &result.errors {
