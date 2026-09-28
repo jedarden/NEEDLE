@@ -15,10 +15,9 @@ grep -q 'deliberate pinning exception' "$SRC_DIR/README.md"
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 38 ]]
 [[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 38 ]]
-[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 35 ]]
+[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 36 ]]
 grep -q $'^codex-luna-tradegraph\t/home/coding/telegram-claude-bridge\t.*\ttrue$' "$MANIFEST"
-grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
-[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 14 ]]
+[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 11 ]]
 # The TradeGraph queue is owned by lab (needle-4164f30e): a codinghome worker
 # homed there can never Pluck (workspace_queue_owner_mismatch) and, with Explore
 # off, can never work at all. No roster row may name it.
@@ -28,7 +27,7 @@ grep -q $'^glm53-tgplat\t/home/coding/TWILL\tclaude-code-glm-5.3\t105\ttrue$' "$
 grep -q $'^codex-luna-tgplat-01\t/home/coding/TWILL\tcodex-gpt-5.6-luna-xhigh\t345\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-tgplat-02\t/home/coding/brand-kit\tcodex-gpt-5.6-luna-xhigh\t360\ttrue$' "$MANIFEST"
 grep -q $'^codex-roam-01\t/home/coding/bootstrap\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
-grep -q $'^codex-roam-02\t/home/coding/git-activity-exporter\tcodex-gpt-5.6-luna-xhigh\t15\ttrue$' "$MANIFEST"
+grep -q $'^codex-roam-02\t/home/coding/brand-kit\tcodex-gpt-6-luna-xhigh\t15\ttrue$' "$MANIFEST"
 grep -q $'^glm-roam-22\t/home/coding/coned-rate-optimizer\tclaude-code-glm-5.3-flash\t60\ttrue$' "$MANIFEST"
 # needle-182be85c Step 2: the OpenAI bucket must exceed the Codex roster (registered accounting).
 grep -A2 '^    openai:' "$SRC_DIR/bootstrap-lane.yaml" | grep -qx '      max_concurrent: 16'
@@ -41,19 +40,23 @@ grep -q $'^codex-luna-skills\t/home/coding/jeds-curated-skills\tcodex-gpt-5.6-lu
 # Restart=always -- the worker never reaches construction. Guard the whole roster.
 timeout_start_sec=$(sed -n 's/^TimeoutStartSec=//p' "$SRC_DIR/needle-worker@.service")
 [[ "$(awk -F'\t' -v t="$timeout_start_sec" '$4 >= t {print}' <<<"$rows" | wc -l)" -eq 0 ]]
-grep -q $'^codex-luna-argo\t/home/coding/argo-workflows-exporter\tcodex-gpt-5.6-luna-xhigh\t375\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-argo\t/home/coding/clustertop\tcodex-gpt-6-luna-xhigh\t375\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-utilities\t/home/coding/utilities\tcodex-gpt-5.6-luna-xhigh\t390\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-clustertop\t/home/coding/clustertop\tcodex-gpt-5.6-luna-xhigh\t405\ttrue$' "$MANIFEST"
 # At most two workers per repointed home (shared checkout: duplicate claims are the failure mode).
 [[ "$(awk -F'\t' '$2 == "/home/coding/TWILL" {n++} END {print n+0}' <<<"$rows")" -eq 2 ]]
-# codex-luna-adc is the only worker left on the roam-only home (Explore-recovery canary).
-[[ "$(awk -F'\t' '$2 == "/home/coding/.needle/roam-only" {print $1}' <<<"$rows")" == codex-luna-adc ]]
-[[ "$(awk -F'\t' '$3 == "codex-gpt-6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
+[[ "$(awk -F'\t' '$2 == "/home/coding/.needle/roam-only" {n++} END {print n+0}' <<<"$rows")" -eq 0 ]]
+[[ "$(awk -F'\t' '$3 == "codex-gpt-6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 4 ]]
 grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-tradegraph\t/home/coding/telegram-claude-bridge\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
-grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t135\ttrue$' "$MANIFEST"
-grep -q $'^codex-luna-needle-01\t/home/coding/NEEDLE\tcodex-gpt-6-luna-xhigh\t315\tfalse$' "$MANIFEST"
+grep -q $'^codex-luna-adc\t/home/coding/bootstrap\tcodex-gpt-6-luna-xhigh\t135\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-needle-01\t/home/coding/utilities\tcodex-gpt-6-luna-xhigh\t315\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-warp\t/home/coding/WARP\tcodex-gpt-5.6-luna-xhigh\t45\tfalse$' "$MANIFEST"
+# Every GPT-6 home retains a GPT-5.6 comparator on the same queue.
+for paired_home in /home/coding/utilities /home/coding/clustertop /home/coding/bootstrap /home/coding/brand-kit; do
+    [[ "$(awk -F'\t' -v home="$paired_home" '$2 == home && $3 == "codex-gpt-6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
+    [[ "$(awk -F'\t' -v home="$paired_home" '$2 == home && $3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
+done
 ! grep -Eq $'^(glm-tradegraph|glm53-adc|glm-needle-01)\t' "$MANIFEST"
 grep -q 'NEEDLE_AGENT__EVIDENCE_ROUTING__ENABLED=false' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
@@ -118,7 +121,7 @@ grep -q 'needle-release-upgrade.timer' "$SRC_DIR/apply-ex44-fleet.sh"
 # The activation fragment keeps the lane, the workspace-only codex candidate
 # and the OpenAI cap together: enabling the candidate without the cap is what
 # would let one adapter pull the fleet onto an unbilled-by-us provider.
-grep -q 'workers: \[codex-needle-01, codex-luna-needle-01, claude-needle-01\]' "$SRC_DIR/bootstrap-lane.yaml"
+grep -q 'workers: \[codex-needle-01, claude-needle-01\]' "$SRC_DIR/bootstrap-lane.yaml"
 grep -q 'workspace_only_candidates:' "$SRC_DIR/bootstrap-lane.yaml"
 grep -q 'openai:' "$SRC_DIR/bootstrap-lane.yaml"
 

@@ -32,10 +32,11 @@ strands:
     # would have REPLACED codex with GLM -- NEEDLE's workspace evidence is
     # glm-flash 0 verified of 23, so workspace scope falls through to fleet
     # scope, where codex is withheld by workspace_only_candidates and
-    # glm-flash (51%) wins. Adding lane-bound workers keeps all three.
+    # glm-flash (51%) wins. Keeping both lane-bound workers preserves the
+    # Codex/Claude comparison after the GPT-6 worker moves off NEEDLE.
     lanes:
       - label: learning-loop
-        workers: [codex-needle-01, codex-luna-needle-01, claude-needle-01]
+        workers: [codex-needle-01, claude-needle-01]
         # `normal`, not `idle`: lane beads still take priority, but when none
         # are READY the worker falls back to ordinary NEEDLE selection.
         # `idle` deadlocked the lane on 2026-09-16: 39 open learning-loop
@@ -43,7 +44,7 @@ strands:
         # blockers that carry no learning-loop label (split-child, gate,
         # cross-repo-gate), and a lane worker is never handed an unlabelled
         # bead (nt59_relaxed_tiers_never_hand_a_lane_worker_an_unlabelled_bead).
-        # So all three NEEDLE workers refused the very beads gating the
+        # So both reserved NEEDLE workers refused the very beads gating the
         # learnings and idled instead.
         when_empty: normal
 
@@ -68,12 +69,11 @@ agent:
 
 limits:
   providers:
-    # Six codex workers now use this provider: the original codex-needle-01
-    # and codex-roam-01/02 plus codex-luna-tradegraph, codex-luna-adc, and
-    # codex-luna-needle-01. Provider limits match the adapter a dispatch
-    # actually uses, so every Codex worker shares this OpenAI ceiling. The limiter
-    # counts REGISTERED Codex workers plus the caller, so this must stay above the
-    # Codex roster (12 after needle-182be85c Step 2A, 15 after 2B).
+    # Fifteen codex workers use this provider: eleven GPT-5.6 Luna and four
+    # paired GPT-6 Luna workers after needle-5413ef37. Provider limits match
+    # the adapter a dispatch actually uses, so every Codex worker shares this
+    # OpenAI ceiling. The limiter counts REGISTERED Codex workers plus the
+    # caller, so this must stay above the 15-worker Codex roster.
     openai:
       max_concurrent: 16
       requests_per_minute: 60

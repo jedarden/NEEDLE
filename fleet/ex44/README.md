@@ -2,16 +2,16 @@
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
 reproducible. It registers 38 workers across the Z.ai, OpenAI, and Anthropic
-provider pools; 35 can roam, while three workers remain scoped to their home
-repositories: two to NEEDLE (`codex-luna-needle-01`, `claude-needle-01`) and
-`codex-luna-warp` to WARP. Every roaming worker tries its listed home
+provider pools; 36 can roam, while two workers remain scoped to their home
+repositories: `claude-needle-01` to NEEDLE and `codex-luna-warp` to WARP.
+Every roaming worker tries its listed home
 workspace first, then may use the maintained-workspace frontier when that
 route has no eligible work. Eight workers use GLM-5.3, fourteen use
-GLM-5.3-Flash, fourteen use Codex GPT-5.6 Luna, one uses Codex GPT-6 Luna, and
+GLM-5.3-Flash, eleven use Codex GPT-5.6 Luna, four use Codex GPT-6 Luna, and
 one uses Claude. Live-session concurrency is enforced separately from the
 number of registered workers.
 Codex instance environments disable the fleet-wide GLM evidence router so
-those nine workers remain Codex capacity rather than entering its 10% GLM
+those fifteen workers remain Codex capacity rather than entering its 10% GLM
 exploration sample.
 
 ## What this implements
@@ -105,9 +105,9 @@ timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 `needle-zai-governor` protects the proxy without fighting the manifest. It
 scales the eight expansion workers (`glm-icg` and `glm-roam-18` through `24`)
 between one and eight, for 15--22 active GLM workers including the fixed base.
-The nine Codex workers and the Claude worker are outside this Z.ai-specific
-controller. The total registered-service range is 25--32; excluding the four
-home-pinned workers, the general roaming range remains 21--28 workers. The
+The fifteen Codex workers and the Claude worker are outside this Z.ai-specific
+controller. The total registered-service range is 31--38; excluding the two
+home-pinned workers, the general roaming range remains 29--36 workers. The
 home-first ICG worker is first in the pool and is therefore preserved by the
 one-worker floor, but it can roam when ICG has no eligible work. A productive
 window with no
@@ -142,10 +142,10 @@ that dependency, so needle-182be85c gave those workers, the two former
 TradeGraph GLM slots and `glm-roam-22` real homes. Homes were chosen because
 they are unstaffed, roam-accessible, hold at least seven eligible beads, have no
 in-progress bead or live process, have been quiet for an hour, and are under
-1 GB. `codex-luna-adc` stays on the roam-only home as a canary: if it ever starts
-claiming work, Explore has recovered. Identifiers are unchanged (they name the
-slot's history, not its home), so unit names, logs and claim history stay
-continuous.
+1 GB. The later GPT-6 redistribution in needle-5413ef37 retired the roam-only
+canary and reused four historical service identifiers for the paired cohort.
+Identifiers remain unchanged (they name the slot's history, not its current
+home), so unit names, logs and claim history stay continuous.
 
 Z.ai saturation guard: the productive GLM fleet (~19 workers) sits at the
 throughput knee of about 16 concurrent sessions (roughly 80% of plateau throughput
@@ -154,30 +154,38 @@ sessions at or above 15.5 and GLM launch-admission holds under 3% of time.
 
 ## Luna model comparison
 
-`codex-needle-01` runs GPT-5.6 Luna and `codex-luna-needle-01` runs GPT-6
-Luna against NEEDLE's bead queue. The latter remains a NEEDLE-home worker;
-the existing three-worker workspace cap and host fleet size stay fixed. Both
-profiles use xhigh reasoning, the Codex JSONL usage parser, and the same
-timeout. Each resolved attempt records its actual model. After a comparison
-window starting with the GPT-6 worker's first dispatch, compare NEEDLE-only,
-non-provisional attempts with:
+The first canary put one GPT-6 Luna worker beside GPT-5.6 Luna on NEEDLE. It
+produced no quality signal: all nine GPT-6 attempts and both matched GPT-5.6
+attempts reached the common one-hour boundary or handler failure. The queue and
+hard cap dominated the model comparison.
+
+Needle-5413ef37 replaces that canary with four paired home queues. Utilities,
+clustertop, bootstrap, and brand-kit each retain one GPT-5.6 Luna worker and
+receive one GPT-6 Luna worker. Both profiles keep xhigh reasoning, the Codex
+JSONL usage parser, the same timeout, and Explore fallback. Total Codex and
+fleet concurrency remain fixed. Compare non-provisional attempts only after
+both models have resolved work on each home:
 
 ```bash
 /home/coding/.needle/bin/needle logs --since 7d \
   --filter event_type=attempt.resolved --format json |
-  jq -s --arg ws /home/coding/NEEDLE '
-    [.[] | select(.data.workspace == $ws)
+  jq -s '
+    ["/home/coding/utilities", "/home/coding/clustertop",
+     "/home/coding/bootstrap", "/home/coding/brand-kit"] as $homes
+    | [.[] | select(.data.workspace as $ws | $homes | index($ws))
       | select(.data.model == "gpt-5.6-luna" or .data.model == "gpt-6-luna")
       | select(.data.provisional == false)]
-    | group_by(.data.model)
-    | map({model: .[0].data.model, attempts: length,
+    | group_by([.data.workspace, .data.model])
+    | map({workspace: .[0].data.workspace, model: .[0].data.model,
+           attempts: length,
            verified_closes: (map(select(.data.outcome == "verified_success")) | length),
            failures: (map(select(.data.outcome == "work_failure")) | length),
            avg_minutes: ((map(.data.duration_ms // 0) | add) / length / 60000)})'
 ```
 
-Run this after the full window has elapsed; a shorter window can include
-pre-canary GPT-5.6 attempts. Keep worker assignments and prompts fixed while
-collecting it. The bead mix can differ between workers, and Codex attempt
-costs are currently unreported, so this compares outcome and time rather
-than cost.
+Use the redistribution activation timestamp as the lower bound so historical
+GPT-5.6 attempts do not inflate its cohort. Keep worker assignments and prompts
+fixed while collecting the comparison. Queue assignment is atomic but not
+randomized, so report each home separately before aggregating. Codex attempt
+costs are currently unreported; compare verified success per worker-hour and
+latency rather than nominal cost.

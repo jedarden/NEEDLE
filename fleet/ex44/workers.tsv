@@ -4,9 +4,9 @@
 # needle-4164f30e), so no row may name /home/coding/tradegraph-platform here.
 # The identifiers glm53-tgplat, codex-luna-tgplat-01/-02, glm-roam-22,
 # codex-roam-01/-02 and codex-luna-tradegraph are historical names: they were
-# repointed (needle-182be85c) to unstaffed, quiet, bead-rs homes with a deep
-# enough ready queue that Pluck finds work without Explore. codex-luna-adc is
-# deliberately left on the roam-only home as a canary for Explore recovery.
+# repointed (needle-182be85c) to unstaffed, quiet, bead-rs homes. The later
+# GPT-6 comparison (needle-5413ef37) also preserves service identifiers while
+# pairing one GPT-6 and one GPT-5.6 worker on four shorter-work home queues.
 #
 # Columns (tab-separated):
 #   identifier  workspace  agent  start_delay_seconds  explore_enabled
@@ -22,7 +22,7 @@ glm-spaxel	/home/coding/spaxel	claude-code-glm-5.3-flash	75	true
 codex-luna-tradegraph	/home/coding/telegram-claude-bridge	codex-gpt-5.6-luna-xhigh	90	true
 glm53-tgplat	/home/coding/TWILL	claude-code-glm-5.3	105	true
 glm53-cgraph2	/home/coding/commitgraph	claude-code-glm-5.3	120	true
-codex-luna-adc	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	135	true
+codex-luna-adc	/home/coding/bootstrap	codex-gpt-6-luna-xhigh	135	true
 glm53-ibkr	/home/coding/ibkr-mcp	claude-code-glm-5.3	150	true
 glm53-irmcp	/home/coding/investment-research-mcp	claude-code-glm-5.3	165	true
 glm-archivist	/home/coding/agent-archivist	claude-code-glm-5.3	180	true
@@ -39,13 +39,13 @@ glm-roam-22	/home/coding/coned-rate-optimizer	claude-code-glm-5.3-flash	60	true
 glm-roam-23	/home/coding/reddit-media-player	claude-code-glm-5.3-flash	90	true
 glm-roam-24	/home/coding/claude-print	claude-code-glm-5.3-flash	120	true
 codex-roam-01	/home/coding/bootstrap	codex-gpt-5.6-luna-xhigh	0	true
-codex-roam-02	/home/coding/git-activity-exporter	codex-gpt-5.6-luna-xhigh	15	true
-codex-luna-needle-01	/home/coding/NEEDLE	codex-gpt-6-luna-xhigh	315	false
+codex-roam-02	/home/coding/brand-kit	codex-gpt-6-luna-xhigh	15	true
+codex-luna-needle-01	/home/coding/utilities	codex-gpt-6-luna-xhigh	315	true
 claude-needle-01	/home/coding/NEEDLE	claude-print	330	false
 codex-luna-warp	/home/coding/WARP	codex-gpt-5.6-luna-xhigh	45	false
 codex-luna-tgplat-01	/home/coding/TWILL	codex-gpt-5.6-luna-xhigh	345	true
 codex-luna-tgplat-02	/home/coding/brand-kit	codex-gpt-5.6-luna-xhigh	360	true
-codex-luna-argo	/home/coding/argo-workflows-exporter	codex-gpt-5.6-luna-xhigh	375	true
+codex-luna-argo	/home/coding/clustertop	codex-gpt-6-luna-xhigh	375	true
 codex-luna-utilities	/home/coding/utilities	codex-gpt-5.6-luna-xhigh	390	true
 codex-luna-clustertop	/home/coding/clustertop	codex-gpt-5.6-luna-xhigh	405	true
 codex-luna-twproxy	/home/coding/twitterapi-proxy	codex-gpt-5.6-luna-xhigh	60	true
