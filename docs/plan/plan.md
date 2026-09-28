@@ -6240,7 +6240,29 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 
 # Phase 15: Activity-Aware Agent Execution Timeouts
 
-**Status:** planned.
+**Status:** implemented (2026-08-11 through 2026-09-28, beads needle-bf-1h55j /
+needle-2f658c5a / needle-222a61e0). 15.1–15.3: adapter schema carries
+`idle_timeout_secs` / `hard_timeout_secs` with mixed-field rejection
+(`AgentAdapter::validate_timeouts`), `run_process` observes exit, stdout/stderr
+byte activity, idle expiry, hard expiry, and cancellation concurrently
+(commit `a585ecf6`), and `TimeoutReason::{Idle,Hard,Legacy}` reaches
+`ExecutionResult`, outcome handling, and telemetry behind the compatibility
+exit code `124`. 15.4: the deterministic coverage lives in
+`tests/integration_spawn/idle_timeout_tests.rs` and
+`tests/integration_spawn/hard_timeout_tests.rs` — periodic-stdout survival
+past the idle bound, stderr-only and no-newline partial-line resets, the
+silent fixture killed with reason `idle` / exit `124` and its process group
+reaped, the chatty fixture killed at the hard bound, the legacy
+`timeout_secs` staying absolute under streaming, and mixed-field validation
+unit tests in `src/dispatch/mod.rs`. 15.5: the explicit
+`claude-code-glm-5.3-flash` profile runs `idle_timeout_secs: 900` /
+`hard_timeout_secs: 3600` in the live adapter directory (the retired
+GLM-4.7 alias was not restored); version bumped to 0.6.26 (`699e99a5`) and
+the rollout comparison below records the measurable window. Deployed
+`needle-stable` 0.6.25 (`f6615b9`) already carries the activity-aware
+machinery, so the live Flash profile is activity-aware today; the 09-27
+concurrent-observation refactor and the 15.4 test proof ride the 0.6.26
+release, whose staged canary awaits a green `needle-ci`.
 
 **Goal:** stop terminating healthy agents merely because a bead takes longer than an adapter's fixed wall-clock timeout, while still terminating agents that have stopped making observable progress and bounding agents that emit output forever. This phase is driven by the 2026-08-06 fleet observation that GLM-4.7 workers timed out at the adapter's exact 600-second deadline while still emitting stream events and performing tool calls; the same absolute-timeout behavior also affected the Opus worker, so this is dispatcher policy rather than a model-specific workaround.
 
