@@ -285,7 +285,8 @@ version = 1
 # +2 N-T23 Claude provider-error replay and hysteresis contracts.
 # +4 N-T19 prompt-canary promotion, stop, rollback, and attempt-assignment fixtures.
 # +9 per-attempt trace layout and retention contracts (needle-2c273c10).
-max_tests = 4059
+# +2 N-T27 provider-degraded routing and replay contracts.
+max_tests = 4061
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
