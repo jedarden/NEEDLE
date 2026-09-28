@@ -375,6 +375,7 @@ fn test_render_with_unicode_values() {
     let mut values = HashMap::new();
     values.insert("title", "Fix: 🐛 bug with émojis".to_string());
     values.insert("body", "Cöntënt with spëcial charactërs 日本語".to_string());
+    values.insert("priority", "2".to_string());
 
     let result = store
         .render_operation("create", &values)
@@ -382,4 +383,5 @@ fn test_render_with_unicode_values() {
 
     assert!(result.iter().any(|arg| arg.contains("🐛")));
     assert!(result.iter().any(|arg| arg.contains("émojis")));
+    assert!(result.iter().any(|arg| arg == "2"));
 }
