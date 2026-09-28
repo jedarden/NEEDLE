@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CHECKER="$REPO_ROOT/scripts/check-documentation.sh"
+AUTHORITY_CHECKER="$REPO_ROOT/scripts/check-release-authority.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/needle-documentation-XXXXXX")"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
@@ -39,6 +40,25 @@ expect_failure() {
     ok "$name"
   fi
 }
+
+authority_fixture="$TMP_ROOT/authority-fixture"
+mkdir -p "$authority_fixture"
+cp "$REPO_ROOT/README.md" "$authority_fixture/README.md"
+cp "$REPO_ROOT/install.sh" "$authority_fixture/install.sh"
+cp "$REPO_ROOT/llms.txt" "$authority_fixture/llms.txt"
+expect_success "Forgejo source and GitHub artifact contract is accepted" \
+  env NEEDLE_RELEASE_AUTHORITY_ROOT="$authority_fixture" "$AUTHORITY_CHECKER"
+
+sed -i 's/GitHub is a read-only mirror/GitHub is the authoritative source/' \
+  "$authority_fixture/README.md"
+expect_failure "authority reversal is rejected" \
+  env NEEDLE_RELEASE_AUTHORITY_ROOT="$authority_fixture" "$AUTHORITY_CHECKER"
+
+cp "$REPO_ROOT/README.md" "$authority_fixture/README.md"
+sed -i 's#GITHUB_API="https://api.github.com/repos/#GITHUB_API="https://git.ardenone.com/api/repos/#' \
+  "$authority_fixture/install.sh"
+expect_failure "Forgejo release API substitution is rejected" \
+  env NEEDLE_RELEASE_AUTHORITY_ROOT="$authority_fixture" "$AUTHORITY_CHECKER"
 
 fixture_root="$TMP_ROOT/fixture"
 mkdir -p "$fixture_root/docs"

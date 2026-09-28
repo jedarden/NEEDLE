@@ -586,7 +586,7 @@ EOF
     assert_rc 1
     assert_not_installed
     assert_output_contains "architecture error message" "No prebuilt binary for needle-aarch64-unknown-linux-gnu"
-    assert_output_contains "build from source message" "cargo install --git https://github.com/jedarden/NEEDLE"
+    assert_output_contains "canonical build from source message" "cargo install --git https://git.ardenone.com/jedarden/NEEDLE"
     assert_output_lacks "no download attempted" "Downloading"
     teardown
 }
@@ -796,7 +796,7 @@ test_bead_release_unreachable_is_nonfatal() {
     assert_installed
     record "$( ! bead_installed; echo $? )" "bead absent when its release is unreachable"
     assert_output_contains "legible warning" "bead not installed"
-    assert_output_contains "later install path" "cargo install --git https://github.com/jedarden/bead-rs --bin bead"
+    assert_output_contains "later install path uses canonical source" "cargo install --git https://git.ardenone.com/jedarden/bead-rs --bin bead"
     teardown
 }
 

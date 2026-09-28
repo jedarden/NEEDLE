@@ -1,7 +1,9 @@
 #!/bin/bash
 #
 # NEEDLE Installer
-# https://github.com/jedarden/NEEDLE
+# Source of truth: https://git.ardenone.com/jedarden/NEEDLE
+# Public release/artifact mirror: https://github.com/jedarden/NEEDLE
+# The installer intentionally downloads published artifacts from the mirror.
 #
 # Usage:
 #   curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
@@ -12,7 +14,7 @@
 set -euo pipefail
 
 # Configuration
-REPO="jedarden/NEEDLE"
+REPO="jedarden/NEEDLE" # GitHub's read-only release-artifact mirror
 INSTALL_PATH="${NEEDLE_INSTALL_PATH:-$HOME/.local/bin/needle}"
 GITHUB_API="https://api.github.com/repos/$REPO/releases/latest" # gitleaks:allow - public API endpoint
 SKIP_CHECKSUM="${NEEDLE_SKIP_CHECKSUM:-false}"
@@ -243,7 +245,8 @@ asset_listed() {
     grep -qxF "$2" <<<"$names"
 }
 
-# Get the latest release version from GitHub and check asset availability
+# Get the latest release version from GitHub's public artifact mirror and check
+# asset availability. Releases are tagged in Forgejo before this publication.
 get_latest_version() {
     local version
     local api_output
@@ -275,7 +278,8 @@ check_asset_available() {
         cat >&2 <<EOF
 No prebuilt binary for ${asset_name} in ${version}.
 Prebuilt targets: x86_64-unknown-linux-gnu.
-Build from source: cargo install --git https://github.com/jedarden/NEEDLE
+Build from the canonical source: cargo install --git https://git.ardenone.com/jedarden/NEEDLE
+Read-only source mirror: cargo install --git https://github.com/jedarden/NEEDLE
 EOF
         return 1
     fi
@@ -462,7 +466,7 @@ install_bead() {
     local api_output bead_version
     if ! api_output=$(fetch_release_json "$BEAD_API"); then
         warn "Could not reach the GitHub API for ${BEAD_REPO}; bead not installed."
-        warn "Install it later: cargo install --git https://github.com/${BEAD_REPO} --bin bead"
+        warn "Install it later from the canonical source: cargo install --git https://git.ardenone.com/jedarden/bead-rs --bin bead"
         return 0
     fi
     bead_version=$(extract_tag "$api_output")
@@ -484,7 +488,7 @@ install_bead() {
 
     if ! asset_listed "$api_output" "$asset"; then
         warn "No prebuilt bead for ${arch}-${os} in ${bead_version}; bead not installed."
-        warn "Build it from source: cargo install --git https://github.com/${BEAD_REPO} --bin bead"
+        warn "Build it from the canonical source: cargo install --git https://git.ardenone.com/jedarden/bead-rs --bin bead"
         return 0
     fi
 

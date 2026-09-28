@@ -4,8 +4,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-toolchain-orange.svg)](rust-toolchain.toml)
-[![iad-ci](https://img.shields.io/github/checks-status/jedarden/NEEDLE/main?label=iad-ci)](docs/post-push-ci.md)
-[![Version](https://img.shields.io/github/v/release/jedarden/NEEDLE)](https://github.com/jedarden/NEEDLE/releases/latest)
+[![iad-ci mirror status](https://img.shields.io/github/checks-status/jedarden/NEEDLE/main?label=iad-ci)](docs/post-push-ci.md)
+[![Version from GitHub artifact mirror](https://img.shields.io/github/v/release/jedarden/NEEDLE)](https://github.com/jedarden/NEEDLE/releases/latest)
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
@@ -22,7 +22,8 @@ Prerequisites: `git`, `tmux`, and an agent CLI on your `PATH` — the flow below
 everything else builds from source (see below).
 
 ```bash
-# 1. Install needle, its transform helpers, and the bead-rs backend
+# 1. Install needle, its transform helpers, and the bead-rs backend.
+#    Release assets are published on the GitHub mirror; source remains Forgejo.
 curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
 
 # 2. Initialize your repo with the bead-rs backend
@@ -509,7 +510,20 @@ NEEDLE is hosted **Forgejo-first**: [`git.ardenone.com`](https://git.ardenone.co
 | **CI** | Argo Workflows on the `iad-ci` cluster (`needle-ci` pipeline) | GitHub Actions are disabled. The pipeline triggers on push and posts its verdict as a commit status on the mirror — the `iad-ci` badge at the top of this README reads that status. See [post-push CI](docs/post-push-ci.md) |
 | **Releases** | [GitHub Releases](https://github.com/jedarden/NEEDLE/releases/latest) on the mirror | The `release` lane of `needle-ci` pushes the `v*` tag to Forgejo, then publishes the built binaries to GitHub Releases — the public download surface the one-line installer fetches from |
 
-In short: **clone and push to Forgejo; read and download from either.**
+In short: **clone and push to Forgejo.** Read mirrored source and CI status on
+GitHub when convenient, but use GitHub only as the public release-artifact
+surface for downloads; never push there directly.
+
+The supported flow is therefore:
+
+1. **Source and history:** clone from Forgejo, and keep `origin` pointed at
+   Forgejo. GitHub is a read-only copy of the source tree.
+2. **CI status:** push to Forgejo; the Forgejo webhook starts the Argo
+   `needle-ci` workflow, whose result is mirrored as a GitHub commit status.
+3. **Release artifacts:** the release lane pushes the version tag to Forgejo,
+   then publishes the checksummed binaries, helpers, and `install.sh` to the
+   GitHub Release. The README badge, installer, and upgrade path intentionally
+   use that public artifact mirror.
 
 ### The workflow for a new repository
 

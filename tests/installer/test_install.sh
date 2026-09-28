@@ -633,7 +633,7 @@ CURLEOF
     assert_contains "$output" "Prebuilt targets: x86_64-unknown-linux-gnu" "error message lists available targets"
 
     # Should mention building from source
-    assert_contains "$output" "Build from source: cargo install --git https://github.com/jedarden/NEEDLE" "error message mentions cargo install"
+    assert_contains "$output" "Build from the canonical source: cargo install --git https://git.ardenone.com/jedarden/NEEDLE" "error message mentions canonical cargo install"
 
     teardown
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reject executable references to the retired beads_rust `br` CLI in docs.
+# Reject executable references to the retired beads-rust CLI in docs and
+# validate the repository's Forgejo-source/GitHub-artifact documentation.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +50,11 @@ command must remain as historical evidence, add this visible notice and marker:
 <!-- retired-br: historical-only -->
 EOF
   exit 1
+fi
+
+if [[ -f "$DOC_ROOT/README.md" && -f "$DOC_ROOT/install.sh" ]]; then
+  NEEDLE_RELEASE_AUTHORITY_ROOT="$DOC_ROOT" \
+    "$SCRIPT_DIR/check-release-authority.sh"
 fi
 
 echo 'documentation check: no unmarked retired br commands'
