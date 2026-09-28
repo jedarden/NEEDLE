@@ -11086,7 +11086,7 @@ mod tests {
             }),
             wip_patch: None,
         };
-        crate::attempt_history::append_local(&workspace.path(), &bead.id, &failed).unwrap();
+        crate::attempt_history::append_local(workspace.path(), &bead.id, &failed).unwrap();
 
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![bead.clone()]));
         let mut worker = make_worker(store.clone());
@@ -11122,7 +11122,7 @@ mod tests {
             .unwrap();
         assert!(matches!(result.outcome, Outcome::Success));
 
-        let records = crate::attempt_history::load_local(&workspace.path(), &bead.id).unwrap();
+        let records = crate::attempt_history::load_local(workspace.path(), &bead.id).unwrap();
         assert_eq!(
             records.len(),
             2,
@@ -11130,7 +11130,7 @@ mod tests {
         );
         assert_eq!(records.last().unwrap().outcome, "verified_success");
         let lessons =
-            crate::attempt_history::load_candidate_lessons(&workspace.path(), &bead.id).unwrap();
+            crate::attempt_history::load_candidate_lessons(workspace.path(), &bead.id).unwrap();
         assert_eq!(
             lessons.len(),
             1,

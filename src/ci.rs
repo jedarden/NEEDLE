@@ -1717,16 +1717,17 @@ mod tests {
                 .unwrap(),
             ReconcileOutcome::DuplicateIgnored
         );
-        let beads = store.beads.lock().unwrap();
-        let repairs = beads
-            .iter()
-            .filter(|bead| bead.labels.contains(&REPAIR_LABEL.to_string()))
-            .collect::<Vec<_>>();
-        assert_eq!(repairs.len(), 1);
-        assert_eq!(repairs[0].priority, 0);
-        assert!(repairs[0].labels.contains(&"fix-build".to_string()));
-        assert!(repairs[0].labels.contains(&"origin:ci".to_string()));
-        drop(beads);
+        {
+            let beads = store.beads.lock().unwrap();
+            let repairs = beads
+                .iter()
+                .filter(|bead| bead.labels.contains(&REPAIR_LABEL.to_string()))
+                .collect::<Vec<_>>();
+            assert_eq!(repairs.len(), 1);
+            assert_eq!(repairs[0].priority, 0);
+            assert!(repairs[0].labels.contains(&"fix-build".to_string()));
+            assert!(repairs[0].labels.contains(&"origin:ci".to_string()));
+        }
         let evidence = std::fs::read_to_string(dir.path().join(LEDGER_FILE)).unwrap();
         assert!(evidence.contains("https://run/1"));
         assert!(evidence.contains("test failed"));
