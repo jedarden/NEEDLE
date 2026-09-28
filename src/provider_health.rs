@@ -850,6 +850,16 @@ pub fn degraded_state(
     Ok(state.filter(|s| s.degraded))
 }
 
+/// Whether the adapter's provider/health group is currently degraded.
+///
+/// This is intentionally read-only: selection and attempt provenance must be
+/// able to observe the live state without migrating or otherwise changing it.
+/// Both stream-derived provider-error state and the adapter failure detector
+/// are covered by [`degraded_state`].
+pub fn is_degraded(adapter: &str, provider: Option<&str>) -> Result<bool> {
+    degraded_state(adapter, provider).map(|state| state.is_some())
+}
+
 /// Remove an adapter's state entirely — its health group's keyed file and
 /// any legacy adapter-keyed file (operator reset / tests).
 pub fn clear_state(adapter: &str, provider: Option<&str>) -> Result<()> {

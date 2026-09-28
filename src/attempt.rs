@@ -34,6 +34,10 @@ pub struct AttemptProvenance {
     /// Metadata field that supplied `effective_model` (for example
     /// `claude_message.model` or `claude_system_init.model`).
     pub model_resolution_source: Option<String>,
+    /// The selected adapter's provider was degraded when this attempt was
+    /// dispatched. The terminal ledger copies this marker so evidence
+    /// consumers can exclude the outage window without discarding history.
+    pub provider_degraded: bool,
     /// Digest of the context manifest exposed to the adapter.
     pub context_manifest_hash: Option<String>,
 }
