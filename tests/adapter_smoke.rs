@@ -28,6 +28,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use needle::config::{AgentConfig, Config};
@@ -48,6 +49,7 @@ const README: &str = include_str!("../README.md");
 
 /// Serializes PATH mutation among the tests in this binary.
 static PATH_LOCK: Mutex<()> = Mutex::new(());
+static NEXT_DISPATCH_BEAD_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Restore `PATH` on drop, however the test ends.
 struct PathGuard {
@@ -800,6 +802,11 @@ async fn dispatch_managed(
     )
     .with_worker_id("glm-profile-test".to_string());
     let adapter_ref = dispatcher.adapter(name).expect("adapter wired");
+    // The production prompt spool names files by bead id and process id. The
+    // async tests run concurrently, so a fixed bead id would let one test
+    // remove another test's prompt before its shell reads it.
+    let dispatch_id = NEXT_DISPATCH_BEAD_ID.fetch_add(1, Ordering::Relaxed);
+    let dispatch_bead_id = BeadId::from(format!("needle-0810eb14-{dispatch_id}"));
     let prompt = BuiltPrompt {
         content: "glm profile smoke prompt".to_string(),
         hash: "glm-hash".to_string(),
@@ -808,12 +815,7 @@ async fn dispatch_managed(
         template_version: "1".to_string(),
     };
     dispatcher
-        .dispatch_unclaimed_analysis(
-            &BeadId::from("needle-0810eb14"),
-            &prompt,
-            adapter_ref,
-            workspace,
-        )
+        .dispatch_unclaimed_analysis(&dispatch_bead_id, &prompt, adapter_ref, workspace)
         .await
         .expect("dispatch must complete")
 }
