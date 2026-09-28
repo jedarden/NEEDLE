@@ -155,6 +155,9 @@ pub struct TraceMetadata {
     #[serde(default)]
     pub session_id: Option<String>,
     /// Result of the optional copy of the harness-owned Claude transcript.
+    ///
+    /// This is populated during attempt-archive finalization. Older metadata
+    /// predates the archive feature and therefore leaves it absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_transcript: Option<HarnessTranscriptStatus>,
     /// Wall-clock time at which trace capture began.
@@ -944,9 +947,15 @@ fn apply_retention_to_dir(
     // already removed in a previous run but the metadata update failed
     // or was interrupted. This check is crucial for preventing infinite
     // loops where the same trace is counted repeatedly.
-    let has_data_files = ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE]
-        .iter()
-        .any(|file| path.join(file).exists());
+    let has_data_files = [
+        "trace.jsonl",
+        STDOUT_FILE,
+        STDERR_FILE,
+        TEST_OUTPUT_FILE,
+        PROMPT_FILE,
+    ]
+    .iter()
+    .any(|file| path.join(file).exists());
 
     let should_delete = is_failed && age_days > retention_days_failed as u64;
     // A trace marked pruned may still contain data when a prior cleanup was
@@ -2435,6 +2444,7 @@ mod tests {
         std::fs::write(attempt_dir.join(STDOUT_FILE), "stdout").unwrap();
         std::fs::write(attempt_dir.join(STDERR_FILE), "stderr").unwrap();
         std::fs::write(attempt_dir.join("trace.jsonl"), "{\"event\":\"test\"}").unwrap();
+        std::fs::write(attempt_dir.join(PROMPT_FILE), "prompt").unwrap();
         std::fs::write(
             attempt_dir.join("metadata.json"),
             serde_json::to_string(&retention_metadata(
@@ -2596,6 +2606,7 @@ mod tests {
         assert!(!old_attempt.join(STDOUT_FILE).exists());
         assert!(!old_attempt.join(STDERR_FILE).exists());
         assert!(!old_attempt.join("trace.jsonl").exists());
+        assert!(!old_attempt.join(PROMPT_FILE).exists());
         assert!(old_attempt.join("metadata.json").exists());
         let pruned: TraceMetadata = serde_json::from_str(
             &std::fs::read_to_string(old_attempt.join("metadata.json")).unwrap(),
@@ -2607,6 +2618,7 @@ mod tests {
         assert!(new_attempt.join(STDOUT_FILE).exists());
         assert!(new_attempt.join(STDERR_FILE).exists());
         assert!(new_attempt.join("trace.jsonl").exists());
+        assert!(new_attempt.join(PROMPT_FILE).exists());
         assert!(new_attempt.join("metadata.json").exists());
         let fresh: TraceMetadata = serde_json::from_str(
             &std::fs::read_to_string(new_attempt.join("metadata.json")).unwrap(),
