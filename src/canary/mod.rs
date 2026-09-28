@@ -1064,9 +1064,12 @@ impl CanaryRunner {
 
         // `needle run --count 1` means one worker, not one bead, so it remains
         // alive after processing the fixture. Poll until trace metadata exists
-        // and the state machine has left HANDLING, then stop the now-idle
-        // worker. Scoring the detached/long-lived launcher was the source of
-        // the old canary's false results.
+        // and the state machine has completed LOGGING and returned to SELECTING,
+        // then stop the now-idle worker. Merely observing entry into LOGGING is
+        // too early: release/defer mutations are still completing at that point,
+        // which makes the same binary score nondeterministically. Scoring the
+        // detached/long-lived launcher was the source of the old canary's false
+        // results.
         let log_dir = isolated_home.path().join(".needle/logs");
         let exit_code = loop {
             match child.try_wait() {
@@ -1085,8 +1088,11 @@ impl CanaryRunner {
                         }
                     };
                     let handling_complete = trace_complete
-                        && read_state_transitions(&log_dir)
-                            .is_ok_and(|states| states.iter().any(|state| state == "LOGGING"));
+                        && read_state_transitions(&log_dir).is_ok_and(|states| {
+                            states.windows(2).any(|transition| {
+                                transition[0] == "LOGGING" && transition[1] == "SELECTING"
+                            })
+                        });
                     if handling_complete {
                         if let Err(error) = child.kill() {
                             return CanaryTestResult::Error {
@@ -1531,12 +1537,17 @@ mod tests {
             concat!(
                 "{\"timestamp\":\"2026-09-07T00:00:02Z\",\"event_type\":\"worker.state_transition\",\"data\":{\"from\":\"selecting\",\"to\":\"claiming\"}}\n",
                 "{\"timestamp\":\"2026-09-07T00:00:01Z\",\"event_type\":\"worker.state_transition\",\"data\":{\"from\":\"booting\",\"to\":\"selecting\"}}\n",
+                "{\"timestamp\":\"2026-09-07T00:00:03Z\",\"event_type\":\"worker.state_transition\",\"data\":{\"from\":\"claiming\",\"to\":\"logging\"}}\n",
+                "{\"timestamp\":\"2026-09-07T00:00:04Z\",\"event_type\":\"worker.state_transition\",\"data\":{\"from\":\"logging\",\"to\":\"selecting\"}}\n",
             ),
         )
         .unwrap();
 
         let states = read_state_transitions(&log_dir).unwrap();
-        assert_eq!(states, ["BOOTING", "SELECTING", "CLAIMING"]);
+        assert_eq!(
+            states,
+            ["BOOTING", "SELECTING", "CLAIMING", "LOGGING", "SELECTING"]
+        );
         assert!(is_ordered_subsequence(
             &["BOOTING".into(), "CLAIMING".into()],
             &states
@@ -1545,6 +1556,9 @@ mod tests {
             &["CLAIMING".into(), "BOOTING".into()],
             &states
         ));
+        assert!(states
+            .windows(2)
+            .any(|transition| transition == ["LOGGING", "SELECTING"]));
     }
 
     #[test]
