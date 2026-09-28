@@ -188,7 +188,8 @@ impl Fixture {
             instant_agent,
             normal_path,
             gate_path,
-            worker_timeout: Duration::from_secs(120),
+            // Five 30-second fixture dispatches plus headroom for loaded CI.
+            worker_timeout: Duration::from_secs(180),
         };
         fixture.write_adapter()?;
         fixture.write_global_config(false)?;
@@ -234,10 +235,12 @@ impl Fixture {
         } else {
             ("false", "3")
         };
+        // Keep claims hermetic: the production circuit breaker queries live
+        // Forgejo/Argo status, which this isolated workspace does not provide.
         fs::write(
             config_dir.join("config.yaml"),
             format!(
-                "agent:\n  default: ladder-agent\n  timeout: 30\n  adapters_dir: {}/.config/needle/adapters\nworker:\n  max_workers: 1\n  idle_action: exit\n  allow_exit_without_supervisor: true\n  enforce_shipped_work: false\n  cpu_load_warn: 1.0\n  memory_free_warn_mb: 1\n  idle_backoff_min: 0\n  idle_backoff_max: 0\n  short_retry_backoff: 0\nworkspace:\n  home: {}/.needle\nstrands:\n  pluck:\n    split_after_failures: 0\n  explore:\n    enabled: false\n    workspace_root: {}\n    workspaces: []\n  weave:\n    enabled: false\n  unravel:\n    enabled: false\n  pulse:\n    enabled: false\n  reflect:\n    enabled: false\n  resolve:\n    enabled: false\n  splice:\n    enabled: false\n  mitosis:\n    enabled: true\n    first_failure_only: {}\n    force_failure_threshold: {}\n  analyze:\n    enabled: true\noutcome:\n  quarantine_after_failures: 5\nvalidation:\n  default_gates:\n    enabled: false\ntelemetry:\n  file_sink:\n    enabled: false\n",
+                "agent:\n  default: ladder-agent\n  timeout: 30\n  adapters_dir: {}/.config/needle/adapters\nworker:\n  max_workers: 1\n  idle_action: exit\n  allow_exit_without_supervisor: true\n  enforce_shipped_work: false\n  cpu_load_warn: 1.0\n  memory_free_warn_mb: 1\n  idle_backoff_min: 0\n  idle_backoff_max: 0\n  short_retry_backoff: 0\nworkspace:\n  home: {}/.needle\nstrands:\n  pluck:\n    split_after_failures: 0\n    circuit_breaker:\n      enabled: false\n  explore:\n    enabled: false\n    workspace_root: {}\n    workspaces: []\n  weave:\n    enabled: false\n  unravel:\n    enabled: false\n  pulse:\n    enabled: false\n  reflect:\n    enabled: false\n  resolve:\n    enabled: false\n  splice:\n    enabled: false\n  mitosis:\n    enabled: true\n    first_failure_only: {}\n    force_failure_threshold: {}\n  analyze:\n    enabled: true\noutcome:\n  quarantine_after_failures: 5\nvalidation:\n  default_gates:\n    enabled: false\ntelemetry:\n  file_sink:\n    enabled: false\n",
                 self.home.display(),
                 self.home.display(),
                 self.workspace.display(),
