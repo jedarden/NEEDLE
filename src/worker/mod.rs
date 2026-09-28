@@ -13050,6 +13050,15 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(SuspectStore::new(vec![bead]));
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
+        // do_claim captures the claim identity through the resolved
+        // target-store context that production do_select establishes before
+        // every claim (needle-828a425c) and fails closed without it. This
+        // fixture drives do_claim directly, so capture the same context here:
+        // the exact store instance this worker's claimer claims through.
+        worker.target_store = Some(crate::claim::ResolvedStoreContext::new(
+            worker.store.clone(),
+            worker.config.workspace.default.clone(),
+        ));
 
         // Simulate: strand selected a candidate, now in Claiming state.
         worker.current_bead = Some(make_test_bead("needle-suspect"));
@@ -13074,6 +13083,15 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(RaceLostStore::new(vec![bead]));
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
+        // do_claim captures the claim identity through the resolved
+        // target-store context that production do_select establishes before
+        // every claim (needle-828a425c) and fails closed without it. This
+        // fixture drives do_claim directly, so capture the same context here:
+        // the exact store instance this worker's claimer claims through.
+        worker.target_store = Some(crate::claim::ResolvedStoreContext::new(
+            worker.store.clone(),
+            worker.config.workspace.default.clone(),
+        ));
 
         // Simulate: strand selected a candidate, now in Claiming state.
         worker.current_bead = Some(make_test_bead("needle-race"));
@@ -13096,6 +13114,15 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(NotClaimableStore::new(vec![bead]));
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
+        // do_claim captures the claim identity through the resolved
+        // target-store context that production do_select establishes before
+        // every claim (needle-828a425c) and fails closed without it. This
+        // fixture drives do_claim directly, so capture the same context here:
+        // the exact store instance this worker's claimer claims through.
+        worker.target_store = Some(crate::claim::ResolvedStoreContext::new(
+            worker.store.clone(),
+            worker.config.workspace.default.clone(),
+        ));
 
         worker.current_bead = Some(make_test_bead("needle-closed"));
         worker.state = WorkerState::Claiming;
@@ -13260,6 +13287,15 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(RaceLostStore::new(vec![bead]));
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
+        // do_claim captures the claim identity through the resolved
+        // target-store context that production do_select establishes before
+        // every claim (needle-828a425c) and fails closed without it. This
+        // fixture drives do_claim directly, so capture the same context here:
+        // the exact store instance this worker's claimer claims through.
+        worker.target_store = Some(crate::claim::ResolvedStoreContext::new(
+            worker.store.clone(),
+            worker.config.workspace.default.clone(),
+        ));
         worker.current_bead = Some(make_test_bead("needle-race-consecutive"));
         worker.state = WorkerState::Claiming;
         worker.consecutive_race_lost = 3;
@@ -13303,6 +13339,15 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(NotClaimableStore::new(vec![bead]));
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
+        // do_claim captures the claim identity through the resolved
+        // target-store context that production do_select establishes before
+        // every claim (needle-828a425c) and fails closed without it. This
+        // fixture drives do_claim directly, so capture the same context here:
+        // the exact store instance this worker's claimer claims through.
+        worker.target_store = Some(crate::claim::ResolvedStoreContext::new(
+            worker.store.clone(),
+            worker.config.workspace.default.clone(),
+        ));
         worker.current_bead = Some(make_test_bead("needle-not-claimable"));
         worker.state = WorkerState::Claiming;
         worker.consecutive_race_lost = 4;
