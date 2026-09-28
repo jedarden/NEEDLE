@@ -1,0 +1,16 @@
+[Unit]
+Description=Drain the NEEDLE attempt-archive spool to the configured object sink
+
+[Service]
+Type=oneshot
+UMask=0077
+NoNewPrivileges=yes
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
+# This is the only credential-bearing setting. Keep the file mode 600 and
+# obtain its contents out of band; do not put credentials in NEEDLE config or
+# a worker EnvironmentFile.
+Environment=RCLONE_CONFIG=%h/.config/rclone/rclone.conf
+Environment=ATTEMPT_ARCHIVE_SPOOL=%h/.needle/spool
+Environment=ATTEMPT_ARCHIVE_REMOTE=armor
+Environment=ATTEMPT_ARCHIVE_BUCKET=iad-ci
+ExecStart=/usr/bin/env bash %h/.local/share/needle/attempt-archive/drain.sh --spool-dir ${ATTEMPT_ARCHIVE_SPOOL} --rclone-config ${RCLONE_CONFIG} --remote ${ATTEMPT_ARCHIVE_REMOTE} --bucket ${ATTEMPT_ARCHIVE_BUCKET}

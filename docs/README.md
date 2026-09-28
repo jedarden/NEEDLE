@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 148 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 191 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
@@ -92,6 +92,7 @@ Running, maintaining, and operating NEEDLE fleets.
 
 | Document | Description |
 |----------|-------------|
+| **[Attempt Archive Drain](attempt-archive.md)** | Optional local spool drain to an S3-compatible sink |
 | **[Worker Lifecycle and Safe Cleanup](operations/worker-lifecycle.md)** | Run, observe, attach, stop, resume, and safely clean up workers; explains scoped/global actions and live-process recovery |
 | **[Binary Freshness Verification](binary-freshness-verification.md)** | Verifying automatic worker rotation on binary updates |
 | **[Binary Freshness Status](binary-freshness-verification-status.md)** | Status tracking for binary freshness feature |
@@ -325,7 +326,7 @@ See [Investigations & Post-Mortems](#investigations--post-mortems) for:
 
 ## File Count Summary
 
-- **Total markdown files:** 148
+- **Total markdown files:** 149
 - **ADRs:** 21
 - **Research documents:** 19
 - **Operational notes:** 28

@@ -163,6 +163,10 @@ A worker starts, claims the next bead, dispatches to your chosen agent CLI, and 
 
 See [`docs/examples/quickstart/`](docs/examples/quickstart/) for a minimal workspace configuration and [`docs/examples/otel-collector/`](docs/examples/otel-collector/) for OpenTelemetry integration.
 
+### Optional features
+
+- **Attempt archive** — optional per-attempt transcript, trace, and exact-prompt bundles written to a local spool; disabled by default and never requires ARMOR or another upload sink. See [`docs/attempt-archive.md`](docs/attempt-archive.md).
+
 ---
 
 ## 🧶 What is a bead?

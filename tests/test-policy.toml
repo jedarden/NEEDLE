@@ -1038,3 +1038,8 @@ owner = "component:definition-of-done"
 [[artifact]]
 pattern = "tests/real_br_integration_tests/*"
 owner = "component:bead-rs-contract"
+
+# External S3-compatible attempt-archive drain integration test (needle-b5c5572b).
+[[artifact]]
+pattern = "tests/attempt-archive-drain/*"
+owner = "component:attempt-archive-drain"
