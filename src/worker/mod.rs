@@ -2869,12 +2869,6 @@ impl Worker {
     }
 
     async fn hold_for_admission(&mut self) -> Result<()> {
-        // Operator/test override honored identically at every admission check:
-        // some callers must launch regardless of host load.
-        if std::env::var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK").as_deref() == Ok("1") {
-            return Ok(());
-        }
-
         let thresholds = crate::rate_limit::AdmissionThresholds::new(
             self.config.worker.cpu_load_warn,
             self.config.worker.memory_free_warn_mb,
@@ -2883,6 +2877,22 @@ impl Worker {
         let mut hold = AdmissionHold::new(AdmissionHoldConfig::from_env());
 
         loop {
+            // CI observation is control-plane work: it performs bounded reads
+            // and may file a repair bead, but cannot claim or dispatch. Poll it
+            // on every admission attempt so a saturated host cannot stretch
+            // the configured wall-clock interval. Its interval gate prevents
+            // the retry loop from touching the network too frequently.
+            let _ = self
+                .strands
+                .observe_ci_before_admission(self.home_store.as_ref())
+                .await;
+
+            // Operator/test override honored identically at every admission
+            // check: some callers must launch regardless of host load.
+            if std::env::var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK").as_deref() == Ok("1") {
+                return Ok(());
+            }
+
             let decision = check_launch_admission(thresholds, read_resource_snapshot(&probe));
             match decision {
                 AdmissionDecision::Admitted => {

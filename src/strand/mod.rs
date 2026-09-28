@@ -434,6 +434,54 @@ impl StrandRunner {
         }
     }
 
+    /// Run the CI observer independently of execution admission.
+    ///
+    /// CI polling is deliberately a control-plane operation: it performs a
+    /// bounded status read and may create a repair bead, but it never claims
+    /// or dispatches work. Keeping it ahead of the worker's CPU/memory hold
+    /// preserves the configured wall-clock poll interval on a saturated host.
+    /// The ordinary waterfall evaluates it again after admission; its own
+    /// interval gate makes that second evaluation a no-op.
+    pub async fn observe_ci_before_admission(&self, store: &dyn BeadStore) -> StrandResult {
+        let Some(strand) = self
+            .strands
+            .iter()
+            .find(|strand| strand.name() == "ci_watch")
+        else {
+            return StrandResult::NoWork;
+        };
+
+        let strand_span = tracing::info_span!(
+            "strand.ci_watch",
+            needle.strand.name = "ci_watch",
+            needle.strand.phase = "pre_admission",
+        );
+        let start = Instant::now();
+        let result = strand
+            .evaluate(store, &HashSet::new())
+            .instrument(strand_span)
+            .await;
+        let result_name = match &result {
+            StrandResult::WorkCreated => strand_results::WORK_CREATED,
+            StrandResult::NoWork => strand_results::NO_WORK,
+            StrandResult::Error(_) => strand_results::ERROR,
+            StrandResult::BeadFound(_) | StrandResult::Split(_, _) => strand_results::BEAD_FOUND,
+            StrandResult::Skipped { .. } => "skipped",
+            StrandResult::FoundButExcluded => "found_but_excluded",
+        };
+        if let Err(error) = self.telemetry.emit(
+            crate::telemetry::EventKind::StrandEvaluated {
+                strand_name: "ci_watch".to_string(),
+                result: result_name.to_string(),
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        ) {
+            tracing::warn!(%error, "failed to emit pre-admission ci-watch evaluation");
+        }
+        result
+    }
+
     /// Run the waterfall, returning a `SelectOutcome` that carries the winning
     /// candidate (if any) plus restart diagnostics.
     ///
@@ -1031,12 +1079,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strand_names_returns_all_names() {
+    async fn strand_names_and_pre_admission_observer_are_scoped() {
+        let ci_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let pluck_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let runner = StrandRunner::new(vec![
-            Box::new(StubStrand::no_work("alpha")),
-            Box::new(StubStrand::no_work("beta")),
+            Box::new(CountingStrand::work_created("ci_watch", ci_count.clone())),
+            Box::new(CountingStrand::no_work("pluck", pluck_count.clone())),
         ]);
-        assert_eq!(runner.strand_names(), vec!["alpha", "beta"]);
+
+        assert_eq!(runner.strand_names(), vec!["ci_watch", "pluck"]);
+
+        let result = runner.observe_ci_before_admission(&EmptyStore).await;
+
+        assert!(matches!(result, StrandResult::WorkCreated));
+        assert_eq!(ci_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(pluck_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// A strand that always returns WorkCreated (never consumed).

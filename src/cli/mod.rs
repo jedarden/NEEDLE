@@ -1947,9 +1947,30 @@ fn run_worker(
     let mut admission_hold =
         crate::rate_limit::AdmissionHold::new(crate::rate_limit::AdmissionHoldConfig::from_env());
     let qualified_worker_id = format!("{}-{}", config.agent.default, worker_name);
-    let registry = Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
+    let state_root = crate::state_dir::root_for(&config.workspace.home);
+    let registry = Registry::default_location(&state_root);
+    let ci_watch = config.strands.ci_watch.enabled.then(|| {
+        crate::strand::CiWatchStrand::new(
+            config.strands.ci_watch.clone(),
+            config.workspace.default.clone(),
+            state_root.join("state").join("ci_watch"),
+            telemetry.clone(),
+        )
+    });
 
     loop {
+        // CI status is a low-cost control-plane observation, not execution.
+        // Keep polling while launch admission holds so a busy host cannot
+        // delay creation of the P0 repair bead beyond the configured interval.
+        if let Some(observer) = &ci_watch {
+            let no_exclusions = HashSet::new();
+            let _ = rt.block_on(crate::strand::Strand::evaluate(
+                observer,
+                store.as_ref(),
+                &no_exclusions,
+            ));
+        }
+
         let decision = crate::rate_limit::check_launch_admission(
             admission_thresholds,
             crate::rate_limit::read_resource_snapshot(&admission_probe),
