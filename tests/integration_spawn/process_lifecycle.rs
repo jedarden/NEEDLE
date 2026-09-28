@@ -517,18 +517,17 @@ async fn worker_applies_a_config_change_only_after_the_adapter_child_exits() {
         terminal,
         WorkerState::Stopped | WorkerState::Exhausted
     ));
+    let events = read_telemetry_events(&log_dir);
+    let completed = event(&events, "agent.completed");
+    let trace_root = workspace
+        .path()
+        .join(".beads/traces/needle-reload-boundary");
+    let trace_dir = needle::trace::attempt_scoped_dir(&trace_root, completed.attempt_id.as_deref());
     assert_eq!(
-        std::fs::read_to_string(
-            workspace
-                .path()
-                .join(".beads/traces/needle-reload-boundary/stdout.txt")
-        )
-        .unwrap(),
+        std::fs::read_to_string(trace_dir.join("stdout.txt")).unwrap(),
         "old-config"
     );
 
-    let events = read_telemetry_events(&log_dir);
-    let completed = event(&events, "agent.completed");
     let detected = event(&events, "config.reload.detected");
     let applied = event(&events, "config.reload.applied");
     assert_eq!(completed.data["agent"], "old-agent");
