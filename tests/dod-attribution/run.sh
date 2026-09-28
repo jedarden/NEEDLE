@@ -24,6 +24,10 @@ for fn in needle_path_is_staged needle_diagnostic_paths needle_failure_is_ours; 
 done
 # shellcheck source=/dev/null
 source "$extracted"
+# Bypass accounting is part of the same pre-commit contract: the warning must
+# count real bypass events, not legacy rows that predate the commit SHA field.
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/bypass-detection.sh"
 
 log="$(mktemp "${TMPDIR:-/tmp}/dod-attr-log-XXXXXX")"
 pass=0
@@ -72,6 +76,35 @@ CHANGED_ONLY=false
 printf 'src/monitoring/mod.rs:62:41: error[E0382]: x\n' > "$log"
 check "attribution off blocks on any failure" 0
 
-rm -f "$log" "$extracted"
+# ── bypass counting ──────────────────────────────────────────────────────────
+# The log also contains legacy rows without commit_sha. They are historical
+# telemetry, not bypasses, and must not inflate either count in the warning.
+bypass_log="$(mktemp "${TMPDIR:-/tmp}/dod-bypass-log-XXXXXX")"
+today="$(date -u +%Y-%m-%d)"
+cat > "$bypass_log" <<EOF
+{"timestamp":"${today}T00:00:00Z","lane":"fast","pwd":"/legacy"}
+{"timestamp":"${today}T00:01:00Z","commit_sha":"today-sha","lanes_skipped":["fast"]}
+{"timestamp":"2020-01-01T00:00:00Z","commit_sha":"old-sha","lanes_skipped":["fast"]}
+EOF
+
+counts="$(NEEDLE_BYPASS_LOG="$bypass_log" needle_bypass_counts)"
+if [[ "$counts" == "2 1" ]]; then
+  pass=$((pass + 1))
+  echo "  ok   bypass counts exclude legacy rows and separate total from today"
+else
+  fail=$((fail + 1))
+  echo "  FAIL bypass counts drifted (expected '2 1', got '$counts')"
+fi
+
+warning="$(NEEDLE_BYPASS_LOG="$bypass_log" needle_warn_bypass --no-verify fast 2>&1)"
+if grep -Fq 'Recorded so far: 2 total, 1 today.' <<<"$warning"; then
+  pass=$((pass + 1))
+  echo "  ok   bypass warning reports the counted events"
+else
+  fail=$((fail + 1))
+  echo "  FAIL bypass warning omitted the counted events"
+fi
+
+rm -f "$log" "$extracted" "$bypass_log"
 echo "passed=$pass failed=$fail"
 [[ "$fail" -eq 0 ]]

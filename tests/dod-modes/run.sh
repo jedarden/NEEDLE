@@ -19,11 +19,11 @@ extracted="$(mktemp "${TMPDIR:-/tmp}/dod-modes-XXXXXX.sh")"
 test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/dod-modes-tmp-root-XXXXXX")"
 trap 'rm -f "$extracted"; rm -rf "$test_tmp_root"' EXIT
 
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_validate_nextest_release run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_validate_nextest_release run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane needle_path_is_staged needle_diagnostic_paths needle_failure_is_ours; do
   awk -v f="^${fn}\\\\(\\\\)" '$0 ~ f, /^}/' "$DOD" >> "$extracted"
 done
 # Every function must have been found, or the test would silently pass.
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_validate_nextest_release run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_validate_nextest_release run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane needle_path_is_staged needle_diagnostic_paths needle_failure_is_ours; do
   grep -q "^${fn}()" "$extracted" || { echo "FAIL: could not extract $fn from $DOD" >&2; exit 1; }
 done
 # shellcheck source=/dev/null
@@ -72,7 +72,6 @@ CHECKS=()
 FAILURES=()
 PREEXISTING=()
 CHANGED_ONLY=false
-needle_failure_is_ours() { return 0; }
 timing_log="$test_tmp_root/timing.log"
 DOD_TIMING_PHASE=build DOD_TIMING_TARGET=lib \
   run_check "timed pass" true >"$timing_log" 2>&1
@@ -115,6 +114,30 @@ if grep -q 'first-stdout' "$aggregate_log" \
   ok "failed-check stdout and stderr remain in the report"
 else
   bad "failed-check output was not retained"
+fi
+
+# A changed-only failure in another worker's file is reported but does not
+# block; a diagnostic in a staged file remains a real lane failure. Exercise
+# run_check itself so the array partition, not just the path predicate, is a
+# tested contract.
+CHANGED_ONLY=true
+STAGED_PATHS=(src/staged.rs)
+CHECKS=()
+FAILURES=()
+PREEXISTING=()
+run_check "pre-existing aggregate failure" bash -c \
+  'printf "src/other-worker.rs:4:2: error[E0001]: pre-existing\\n"; exit 11'
+run_check "staged aggregate failure" bash -c \
+  'printf "src/staged.rs:8:3: error[E0002]: attributable\\n"; exit 13'
+
+if [[ ${#CHECKS[@]} -eq 2 \
+  && ${#PREEXISTING[@]} -eq 1 \
+  && "${PREEXISTING[0]}" == "pre-existing aggregate failure" \
+  && ${#FAILURES[@]} -eq 1 \
+  && "${FAILURES[0]}" == "staged aggregate failure: exit code 13" ]]; then
+  ok "run_check separates pre-existing failures from staged-file failures"
+else
+  bad "run_check attribution partition drifted (checks=${#CHECKS[@]}, pre-existing=${#PREEXISTING[@]}, failures=${#FAILURES[@]})"
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
