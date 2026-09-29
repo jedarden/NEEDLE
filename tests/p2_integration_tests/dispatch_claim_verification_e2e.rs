@@ -148,19 +148,6 @@ impl Fixture {
             .expect("spawn isolated needle subprocess")
     }
 
-    /// Like [`run`](Self::run), but the worker stops after ONE dispatch.
-    ///
-    /// A failed attempt leaves only a soft retry cooldown (needle-ebe67029), so
-    /// a lone bead is retried up to the quarantine ceiling inside a single
-    /// run-until-idle invocation. A test about what ONE failed attempt leaves
-    /// behind has to bound the worker to one dispatch itself.
-    fn run_single_dispatch(&self, mode: FixtureMode) -> Output {
-        self.command(mode)
-            .args(["--count", "1"])
-            .output()
-            .expect("spawn isolated needle subprocess")
-    }
-
     /// Build (and prepare the fixture for) one worker invocation. The
     /// preparation is idempotent, so several commands built from the same
     /// fixture race over the very same stores.
@@ -1027,7 +1014,20 @@ fn subprocess_attempt_identity_flows_from_claim_to_adapter_and_resolution() {
 fn subprocess_failed_attempt_releases_and_retry_mints_a_fresh_identity() {
     let fixture = Fixture::new(FixtureLayout::Local);
 
-    let first = fixture.run_single_dispatch(FixtureMode::AgentFail);
+    // needle-ebe67029's retry cooldown is soft: a failed attempt no longer
+    // hands the bead a hard hold, so a lone failing bead is redispatchable
+    // within the SAME worker run rather than only after a separate worker
+    // invocation. One `run` call therefore climbs the bead through every
+    // attempt up to the quarantine ceiling
+    // (`outcome.quarantine_after_failures`, default 5 — this fixture leaves it
+    // unset) before the worker finds no more work and exits. A prior version
+    // of this test tried to bound the climb with `--count 1`, which is the
+    // number of WORKERS `needle run` launches, not a dispatch limit, so it
+    // had no effect and the test still failed with 5 attempts where 1 was
+    // expected (found live on needle-ci, 2026-09-29).
+    const QUARANTINE_CEILING: usize = 5;
+
+    let first = fixture.run(FixtureMode::AgentFail);
     assert!(
         first.status.success(),
         "a failed agent attempt is a handled outcome, not a worker crash:\nstdout={}\nstderr={}\nevents={:?}",
@@ -1036,22 +1036,34 @@ fn subprocess_failed_attempt_releases_and_retry_mints_a_fresh_identity() {
         fixture.telemetry()
     );
     let first_ids = fixture.marker_attempt_ids(&fixture.home_workspace);
-    assert_eq!(first_ids.len(), 1);
-    // Missing/failed propagation must not strand a claim: the bead is
-    // released and immediately re-claimable.
+    assert_eq!(
+        first_ids.len(),
+        QUARANTINE_CEILING,
+        "one worker run must climb the lone failing bead to the quarantine ceiling: {first_ids:?}"
+    );
+    let unique_first_ids: std::collections::HashSet<&String> = first_ids.iter().collect();
+    assert_eq!(
+        unique_first_ids.len(),
+        first_ids.len(),
+        "every attempt in the climb must mint its own fresh identity: {first_ids:?}"
+    );
+    // Reaching the ceiling releases the bead for retry — quarantined, but
+    // still open and unassigned, not stranded in_progress.
     fixture.assert_open_and_unassigned(&fixture.home_workspace, &fixture.home_bead_id);
     fixture.clear_retry_cooldown();
     let first_rows = fixture.resolved_rows();
     assert_eq!(
         first_rows.len(),
-        1,
-        "the failed attempt still resolves exactly once"
+        first_ids.len(),
+        "every attempt in the climb still resolves exactly once: {first_rows:?}"
     );
-    assert_eq!(first_rows[0]["data"]["attempt_id"], first_ids[0].as_str());
-    assert_ne!(
-        first_rows[0]["data"]["outcome"], "verified_success",
-        "an agent that shipped nothing must not be credited: {first_rows:?}"
-    );
+    for (attempt_id, row) in first_ids.iter().zip(first_rows.iter()) {
+        assert_eq!(row["data"]["attempt_id"], attempt_id.as_str());
+        assert_ne!(
+            row["data"]["outcome"], "verified_success",
+            "an agent that shipped nothing must not be credited: {row:?}"
+        );
+    }
 
     // The retry over the released bead mints a NEW identity end to end.
     let second = fixture.run(FixtureMode::Success);
@@ -1063,16 +1075,25 @@ fn subprocess_failed_attempt_releases_and_retry_mints_a_fresh_identity() {
         fixture.telemetry()
     );
     let ids = fixture.marker_attempt_ids(&fixture.home_workspace);
-    assert_eq!(ids.len(), 2, "the retry spawned exactly one more agent");
-    assert_ne!(
-        ids[1], ids[0],
-        "a retry must not reuse the failed attempt's identity"
+    assert_eq!(
+        ids.len(),
+        first_ids.len() + 1,
+        "the retry spawned exactly one more agent"
+    );
+    let retry_id = ids.last().expect("the retry attempt has an id");
+    assert!(
+        !first_ids.contains(retry_id),
+        "a retry must not reuse a failed attempt's identity: {ids:?}"
     );
     let rows = fixture.resolved_rows();
-    assert_eq!(rows.len(), 2, "each attempt owns exactly one ledger row");
+    assert_eq!(
+        rows.len(),
+        ids.len(),
+        "each attempt, climb and retry alike, owns exactly one ledger row"
+    );
     let retry_row = rows
         .iter()
-        .find(|row| row["data"]["attempt_id"] == ids[1].as_str())
+        .find(|row| row["data"]["attempt_id"] == retry_id.as_str())
         .expect("retry attempt must resolve under its own fresh identity");
     assert_eq!(retry_row["data"]["outcome"], "verified_success");
 }
