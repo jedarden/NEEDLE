@@ -32,21 +32,22 @@ We use **Option 1: Git-based cleanup** with the following rationale:
 
 ## Implementation
 
-The cleanup is integrated into `scripts/commit-checkpoint.sh`:
+The cleanup is integrated into `scripts/checkpoint-publish.sh`, which is used
+by the standalone commit wrapper:
 
 1. **Extract active objects:** Read `active_root.path` from `current.json` and `previous.json`
 2. **Find superseded objects:** List all tracked objects in `.beads/checkpoint/objects/`
-3. **Remove superseded:** `git rm` any tracked object not in the active set
-4. **Commit atomically:** Stage pointer files, active objects, and removals together
+3. **Remove superseded:** Remove stale object files from the working tree and
+   stage tracked deletions with the active roots
+4. **Commit atomically:** Update the index in one exact-path `git add` and
+   commit only those checkpoint paths
 
 This happens automatically as part of every checkpoint commit - no separate cleanup step needed.
 
-`commit-checkpoint.sh` itself debounces how often a *standalone* checkpoint
-commit runs (see "Batching (Debounce)" in `docs/checkpoint-tracking.md`), so
-this cleanup fires at most every `NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS`
-rather than once per flush -- superseded objects accumulate in the working
-tree between commits exactly as this section already describes, just over a
-longer window, and are still all dropped together in one commit.
+`commit-checkpoint.sh` debounces standalone checkpoint commits (see
+"Batching (Debounce)" in `docs/checkpoint-tracking.md`). Superseded objects
+accumulate between publications and are dropped together with the next
+validated current/previous roots.
 
 ## Recovery
 

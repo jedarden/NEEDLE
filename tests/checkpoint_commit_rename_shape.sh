@@ -26,13 +26,16 @@ new_repo() {
     local name="$1"
     local repo="$TEST_ROOT/$name"
     mkdir -p "$repo/scripts" "$repo/.beads/checkpoint/objects"
+    printf '*.lock\n' > "$repo/.beads/.gitignore"
     cp "$SCRIPT_UNDER_TEST" "$repo/scripts/commit-checkpoint.sh"
+    cp "$REPO_ROOT/scripts/checkpoint-publish.sh" "$repo/scripts/checkpoint-publish.sh"
     cp "$CLEANUP_HELPER" "$repo/scripts/cleanup-superseded-checkpoint-objects.sh"
     chmod +x "$repo/scripts/"*.sh
     git -C "$repo" init -q
     git -C "$repo" config user.name "checkpoint shape test"
     git -C "$repo" config user.email "checkpoint-shape@example.invalid"
-    git -C "$repo" add scripts
+    git -C "$repo" config core.hooksPath /dev/null
+    git -C "$repo" add scripts .beads/.gitignore
     git -C "$repo" commit -qm "test fixture scripts"
     printf '%s\n' "$repo"
 }
@@ -57,16 +60,21 @@ write_checkpoint() {
     local previous_name="$3"
     local generation="$4"
     local checkpoint="$repo/.beads/checkpoint"
+    current_name="$(printf '%s' "$current_name" | sha256sum | cut -c1-8).jsonl"
+    previous_name="$(printf '%s' "$previous_name" | sha256sum | cut -c1-8).jsonl"
 
     # bead-rs replaces the active pair during flush; critically, the old
     # tracked objects are already absent before commit-checkpoint.sh runs.
     rm -f "$checkpoint/objects/"*.jsonl
     write_similar_object "$checkpoint/objects/$current_name" current "$generation"
     write_similar_object "$checkpoint/objects/$previous_name" previous "$generation"
-    printf '{"active_root":{"path":"objects/%s"}}\n' "$current_name" \
-        > "$checkpoint/current.json"
-    printf '{"active_root":{"path":"objects/%s"}}\n' "$previous_name" \
-        > "$checkpoint/previous.json"
+    local current_sha previous_sha
+    current_sha="$(sha256sum "$checkpoint/objects/$current_name" | awk '{print $1}')"
+    previous_sha="$(sha256sum "$checkpoint/objects/$previous_name" | awk '{print $1}')"
+    printf '{"active_root":{"path":"objects/%s","sha256":"%s"}}\n' \
+        "$current_name" "$current_sha" > "$checkpoint/current.json"
+    printf '{"active_root":{"path":"objects/%s","sha256":"%s"}}\n' \
+        "$previous_name" "$previous_sha" > "$checkpoint/previous.json"
     printf '{"generation":"%s"}\n' "$generation" > "$checkpoint/forensic.jsonl"
 }
 
@@ -133,12 +141,17 @@ test_unpaired_addition_fails_closed() {
 
     local checkpoint="$repo/.beads/checkpoint"
     rm -f "$checkpoint/objects/"*.jsonl
-    printf '%s\n' "unrelated-current-payload" > "$checkpoint/objects/current-z.jsonl"
-    printf '%s\n' "unrelated-previous-payload" > "$checkpoint/objects/previous-z.jsonl"
-    printf '%s\n' '{"active_root":{"path":"objects/current-z.jsonl"}}' \
-        > "$checkpoint/current.json"
-    printf '%s\n' '{"active_root":{"path":"objects/previous-z.jsonl"}}' \
-        > "$checkpoint/previous.json"
+    local current_z previous_z current_sha previous_sha
+    current_z="$(printf current-z | sha256sum | cut -c1-8).jsonl"
+    previous_z="$(printf previous-z | sha256sum | cut -c1-8).jsonl"
+    printf '%s\n' "unrelated-current-payload" > "$checkpoint/objects/$current_z"
+    printf '%s\n' "unrelated-previous-payload" > "$checkpoint/objects/$previous_z"
+    current_sha="$(sha256sum "$checkpoint/objects/$current_z" | awk '{print $1}')"
+    previous_sha="$(sha256sum "$checkpoint/objects/$previous_z" | awk '{print $1}')"
+    printf '{"active_root":{"path":"objects/%s","sha256":"%s"}}\n' \
+        "$current_z" "$current_sha" > "$checkpoint/current.json"
+    printf '{"active_root":{"path":"objects/%s","sha256":"%s"}}\n' \
+        "$previous_z" "$previous_sha" > "$checkpoint/previous.json"
     printf '%s\n' '{"generation":"unpaired"}' > "$checkpoint/forensic.jsonl"
 
     local output="$TEST_ROOT/unpaired-output.log"
@@ -194,7 +207,53 @@ test_force_overrides_debounce() {
     echo "PASS: --force commits a standalone checkpoint immediately regardless of debounce"
 }
 
-test_other_staged_work_bypasses_debounce() {
+test_unchanged_checkpoint_is_a_noop() {
+    local repo before output
+    repo=$(new_repo noop)
+
+    write_checkpoint "$repo" current-a.jsonl previous-a.jsonl first
+    (cd / && "$repo/scripts/commit-checkpoint.sh" --workspace "$repo" --force "checkpoint first") >/dev/null
+    before=$(git -C "$repo" rev-parse HEAD)
+    output="$TEST_ROOT/noop-output.log"
+
+    (cd "$repo" && ./scripts/commit-checkpoint.sh "checkpoint noop") >"$output" 2>&1 \
+        || fail "an unchanged checkpoint should be a successful no-op"
+    grep -Fq "CHECKPOINT_COMMIT_NOOP" "$output" \
+        || fail "no-op publication did not explain why it skipped"
+    [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] \
+        || fail "no-op publication created a commit"
+
+    echo "PASS: unchanged checkpoint publication is a no-op"
+}
+
+test_missing_root_fails_before_pruning_or_staging() {
+    local repo checkpoint before status_before
+    repo=$(new_repo missing-root)
+    checkpoint="$repo/.beads/checkpoint"
+    write_checkpoint "$repo" current-a.jsonl previous-a.jsonl first
+    run_checkpoint_commit "$repo" "checkpoint first" >/dev/null
+    before=$(git -C "$repo" rev-parse HEAD)
+
+    rm -f "$checkpoint/objects/"*.jsonl
+    printf '{"active_root":{"path":"objects/00000000.jsonl","sha256":"%064d"}}\n' 0 \
+        > "$checkpoint/current.json"
+    printf 'must remain untracked\n' > "$checkpoint/objects/unrelated.jsonl"
+    status_before=$(git -C "$repo" status --porcelain --untracked-files=all)
+    if (cd "$repo" && ./scripts/commit-checkpoint.sh "checkpoint missing") \
+        >"$TEST_ROOT/missing-root-output.log" 2>&1; then
+        fail "missing current root unexpectedly committed"
+    fi
+    grep -Fq "references missing root" "$TEST_ROOT/missing-root-output.log" \
+        || fail "missing-root failure did not identify the invalid root"
+    [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] \
+        || fail "missing-root publication created a commit"
+    [ "$(git -C "$repo" status --porcelain --untracked-files=all)" = "$status_before" ] \
+        || fail "missing-root validation changed the worktree or index before refusing"
+
+    echo "PASS: missing roots fail before pruning or staging"
+}
+
+test_foreign_staged_work_is_preserved() {
     local repo
     repo=$(new_repo piggyback)
 
@@ -207,14 +266,18 @@ test_other_staged_work_bypasses_debounce() {
     printf 'real change\n' > "$repo/README.md"
     git -C "$repo" add README.md
 
-    (cd "$repo" && ./scripts/commit-checkpoint.sh "checkpoint second") >/dev/null
+    (cd "$repo" && ./scripts/commit-checkpoint.sh --force "checkpoint second") >/dev/null
 
     [ "$(git -C "$repo" rev-parse HEAD)" != "$before" ] \
-        || fail "a checkpoint commit with other real work already staged must never be debounced"
-    git -C "$repo" show --format= --name-only HEAD | grep -Fqx "README.md" \
-        || fail "the already-staged non-checkpoint file was not included in the piggybacked commit"
+        || fail "checkpoint change was not committed"
+    ! git -C "$repo" show --format= --name-only HEAD | grep -Fqx "README.md" \
+        || fail "foreign staged work was swept into the checkpoint commit"
+    git -C "$repo" diff --cached --name-only | grep -Fqx "README.md" \
+        || fail "foreign staged work was removed from the caller's index"
+    [ "$(cat "$repo/README.md")" = "real change" ] \
+        || fail "foreign staged work was changed in the worktree"
 
-    echo "PASS: other staged work rides the checkpoint along instead of being debounced"
+    echo "PASS: foreign staged work remains staged and outside the checkpoint commit"
 }
 
 test_debounce_is_per_repo() {
@@ -239,7 +302,9 @@ test_debounce_is_per_repo() {
 test_first_checkpoint_and_successive_flushes
 test_unpaired_addition_fails_closed
 test_standalone_commit_is_debounced
+test_unchanged_checkpoint_is_a_noop
+test_missing_root_fails_before_pruning_or_staging
 test_force_overrides_debounce
-test_other_staged_work_bypasses_debounce
+test_foreign_staged_work_is_preserved
 test_debounce_is_per_repo
 echo "All checkpoint rename-shape tests passed"

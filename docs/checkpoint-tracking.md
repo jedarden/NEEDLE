@@ -21,9 +21,9 @@ Use `scripts/commit-checkpoint.sh` to commit checkpoint changes:
 ```
 
 The script:
-1. Unless `--force` is given, or the repo already has other, non-checkpoint
-   changes staged or modified, skips (exit 0) when the last standalone
-   checkpoint commit for this repo was too recent -- see "Batching" below
+1. Skips (exit 0) when the checkpoint is unchanged or when its standalone
+   publication is inside the per-repository debounce window, unless `--force`
+   is given -- see "Batching" below
 2. Reads the checkpoint state already published by `bead sync flush-only`
 3. Extracts the active root paths from `current.json` and `previous.json`
 4. Stages the pointer files and both active root objects
@@ -31,22 +31,21 @@ The script:
    flush already removed from the worktree
 6. Verifies that Git pairs each new root with a superseded deletion as a
    rename whenever superseded history exists
-7. Commits the changes atomically
+7. Commits only the validated checkpoint paths, leaving unrelated staged and
+   unstaged edits untouched
 
 ## Batching (Debounce)
 
-A checkpoint-only commit is debounced: a second invocation with nothing else
-staged or modified is skipped unless `NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS`
-(default 900) has elapsed since the last one *for that repo*, or `--force` is
-passed. A skip is not a failure -- it exits 0, prints
+A standalone checkpoint commit is debounced: a second invocation is skipped
+unless `NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS` (default 900) has elapsed
+since the last one *for that repo*, or `--force` is passed. This limit applies
+even while unrelated work is staged or modified; the publisher uses
+`git commit --only` so that work is never swept into a checkpoint commit. A
+skip is not a failure -- it exits 0, prints
 `CHECKPOINT_COMMIT_SKIPPED_DEBOUNCE`, and leaves the checkpoint changes
 uncommitted in the working tree, where the next invocation (debounced or not)
 picks them up along with anything accumulated since. Nothing is lost, only
 coalesced.
-
-If the repo already has other, non-checkpoint work staged or modified when
-the script runs, debouncing never applies -- the checkpoint rides along on
-that commit immediately, at no cost, since that commit is happening anyway.
 
 This exists because the undebounced script produced roughly one standalone
 commit per `bead sync flush-only` invocation: ~40/day on a busy bead-rs
@@ -67,12 +66,13 @@ Objects listed in `deleted_paths` of the checkpoint manifests are superseded and
 
 **Strategy:** Git-based cleanup (see `docs/checkpoint-cleanup-strategy.md` for full rationale).
 
-**Implementation:** As part of each checkpoint commit, `scripts/commit-checkpoint.sh` calls `scripts/cleanup-superseded-checkpoint-objects.sh`, which:
+**Implementation:** `scripts/checkpoint-publish.sh` stages a checkpoint commit as one exact-path Git index update. It:
 
 1. Extracts the two active objects from `current.json.active_root.path` and `previous.json.active_root.path`
 2. Lists all tracked objects in `.beads/checkpoint/objects/`
-3. Removes any tracked object not in the active set using `git rm`
-4. Commits the removals atomically with the new checkpoint
+3. Removes stale working-tree objects and stages tracked removals together
+   with pointers and roots
+4. Verifies the staged roots and their rename pairing before commit
 
 This ensures:
 - Only two active objects exist in the working tree

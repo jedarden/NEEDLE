@@ -15,6 +15,7 @@ set -euo pipefail
 readonly CHECKPOINT_DIR=".beads/checkpoint"
 readonly CURRENT_POINTER="$CHECKPOINT_DIR/current.json"
 readonly PREVIOUS_POINTER="$CHECKPOINT_DIR/previous.json"
+readonly SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 die() {
     printf 'checkpoint-publish: error: %s\n' "$*" >&2
@@ -186,10 +187,9 @@ stage_checkpoint() {
         "$current_root"
         "$previous_root"
     )
-    git add -- "${checkpoint_paths[@]}"
-    if ((${#tracked_stale[@]} > 0)); then
-        git add -u -- "${tracked_stale[@]}"
-    fi
+    # Stage checkpoint roots, pointers, and stale tracked deletions through
+    # one Git index transaction without sweeping unrelated staged paths.
+    git add -A -- "${checkpoint_paths[@]}" "${tracked_stale[@]}"
 
     verify_index
     printf 'checkpoint-publish: staged current=%s previous=%s; pruned %d superseded object(s)\n' \
@@ -206,6 +206,10 @@ main() {
     case "$command" in
         stage)
             [[ $# -eq 1 ]] || usage
+            if [[ "${NEEDLE_CHECKPOINT_PUBLISH_LOCK_HELD:-0}" != 1 ]]; then
+                command -v flock >/dev/null 2>&1 || die "flock is required to coordinate with bead checkpoint writers"
+                exec flock -x "$CHECKPOINT_DIR/publish.lock" env NEEDLE_CHECKPOINT_PUBLISH_LOCK_HELD=1 "$SCRIPT_PATH" "$@"
+            fi
             stage_checkpoint
             ;;
         verify-index)
@@ -214,9 +218,16 @@ main() {
             ;;
         commit)
             shift
-            [[ $# -gt 0 ]] || usage
-            stage_checkpoint
-            git commit "$@"
+            local force=()
+            if [[ "${1:-}" == "--force" ]]; then
+                force=(--force)
+                shift
+            fi
+            if [[ "${1:-}" == "-m" ]]; then
+                shift
+            fi
+            [[ $# -eq 1 ]] || usage
+            exec "$root/scripts/commit-checkpoint.sh" "${force[@]}" "$1"
             ;;
         *)
             usage

@@ -39,6 +39,7 @@ cd "$tmp_dir/repo"
 git init -q
 git config user.name test
 git config user.email test@example.invalid
+git config core.hooksPath /dev/null
 
 write_pointer() {
     local pointer_file="$1"
