@@ -1095,7 +1095,14 @@ fn subprocess_failed_attempt_releases_and_retry_mints_a_fresh_identity() {
         .iter()
         .find(|row| row["data"]["attempt_id"] == retry_id.as_str())
         .expect("retry attempt must resolve under its own fresh identity");
-    assert_eq!(retry_row["data"]["outcome"], "verified_success");
+    // After the five failed attempts, the retry uses the automatic split
+    // prompt. Its successful close is intentionally classified as a
+    // decomposition rather than verified delivery.
+    assert_eq!(retry_row["data"]["outcome"], "decomposed");
+    assert_eq!(
+        retry_row["data"]["terminal_reason"],
+        "decomposed:split_template"
+    );
 }
 
 #[test]
