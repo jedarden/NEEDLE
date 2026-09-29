@@ -131,7 +131,7 @@ test_first_checkpoint_and_successive_flushes() {
     echo "PASS: first checkpoint and two worktree-deleted superseder flushes"
 }
 
-test_unpaired_addition_fails_closed() {
+test_low_similarity_valid_roots_publish() {
     local repo
     repo=$(new_repo unpaired)
     write_checkpoint "$repo" current-a.jsonl previous-a.jsonl first
@@ -155,15 +155,14 @@ test_unpaired_addition_fails_closed() {
     printf '%s\n' '{"generation":"unpaired"}' > "$checkpoint/forensic.jsonl"
 
     local output="$TEST_ROOT/unpaired-output.log"
-    if run_checkpoint_commit "$repo" "checkpoint unpaired" >"$output" 2>&1; then
-        fail "unpaired whole-object additions unexpectedly committed"
-    fi
-    grep -Fq "New checkpoint root is not paired with a superseded-object rename" "$output" \
-        || fail "unpaired failure did not explain the rename-shape requirement"
-    [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] \
-        || fail "unpaired failure created a commit"
+    run_checkpoint_commit "$repo" "checkpoint unpaired" >"$output" 2>&1 \
+        || fail "valid roots were rejected because Git could not display renames"
+    [ "$(git -C "$repo" rev-parse HEAD)" != "$before" ] \
+        || fail "valid roots did not publish"
+    [ "$(git -C "$repo" ls-files .beads/checkpoint/objects | wc -l)" -eq 2 ] \
+        || fail "publication retained stale objects"
 
-    echo "PASS: unpaired additions with tracked superseded roots fail closed"
+    echo "PASS: low-similarity valid roots publish with stale pruning"
 }
 
 test_standalone_commit_is_debounced() {
@@ -300,7 +299,7 @@ test_debounce_is_per_repo() {
 }
 
 test_first_checkpoint_and_successive_flushes
-test_unpaired_addition_fails_closed
+test_low_similarity_valid_roots_publish
 test_standalone_commit_is_debounced
 test_unchanged_checkpoint_is_a_noop
 test_missing_root_fails_before_pruning_or_staging

@@ -166,19 +166,8 @@ for object in "${TRACKED_OBJECTS_BEFORE[@]}"; do
     fi
 done
 
-# Preserve rename-friendly history, avoiding a full object addition when Git
-# can pair each new active root with a stale object.
-if ((${#TRACKED_OBJECTS_BEFORE[@]} > 0)); then
-    RENAME_DIFF="$(git -C "$REPO_ROOT" diff --cached --name-status -M -- "${COMMIT_PATHS[@]}")"
-    for root in "$CURRENT_ROOT_REPO" "$PREVIOUS_ROOT_REPO"; do
-        if git -C "$REPO_ROOT" diff --cached --no-renames --diff-filter=A --name-only -- "$root" | grep -Fqx "$root"; then
-            if ! awk -F '\t' -v destination="$root" '$1 ~ /^R[0-9]+$/ && $3 == destination { found = 1 } END { exit !found }' <<< "$RENAME_DIFF"; then
-                echo "Error: New checkpoint root is not paired with a superseded-object rename: $root" >&2
-                exit 1
-            fi
-        fi
-    done
-fi
+# Git may display similar roots as renames. Similarity is presentation, not
+# checkpoint integrity: a large valid change must still be publishable.
 
 git -C "$REPO_ROOT" -c user.email=github@jedarden.com -c user.name=jedarden \
     commit --only -m "$COMMIT_MSG" -- "${COMMIT_PATHS[@]}"

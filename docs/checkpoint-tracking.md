@@ -29,8 +29,7 @@ The script:
 4. Stages the pointer files and both active root objects
 5. Stages every superseded tracked object as deleted, including objects the
    flush already removed from the worktree
-6. Verifies that Git pairs each new root with a superseded deletion as a
-   rename whenever superseded history exists
+6. Verifies both staged pointer targets and their hashes
 7. Commits only the validated checkpoint paths, leaving unrelated staged and
    unstaged edits untouched
 
@@ -72,20 +71,17 @@ Objects listed in `deleted_paths` of the checkpoint manifests are superseded and
 2. Lists all tracked objects in `.beads/checkpoint/objects/`
 3. Removes stale working-tree objects and stages tracked removals together
    with pointers and roots
-4. Verifies the staged roots and their rename pairing before commit
+4. Verifies the staged roots and hashes before commit
 
 This ensures:
 - Only two active objects exist in the working tree
 - Superseded objects remain in git history for recovery
 - The cleanup is automatic and idempotent
 
-The rename shape is part of the checkpoint contract, not cosmetic diff
-formatting. A monolithic root added without its superseded deletion makes Git
-and Forgejo treat the entire snapshot as newly introduced text, needlessly
-rescanning tens of thousands of unchanged lines. The commit helper therefore
-checks `git diff --cached -M` and refuses an unpaired root addition when a
-tracked superseded object exists. A first-ever checkpoint, which has no
-historical object to pair, remains a valid addition.
+Publishing roots together with stale deletions lets Git display similar
+snapshots as renames. Large valid changes may fall below Git's similarity
+threshold; their publication still succeeds. Pointer targets and hashes prove
+integrity independently of how Git presents the diff.
 
 ## Verification
 

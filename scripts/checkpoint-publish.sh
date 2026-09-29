@@ -189,7 +189,7 @@ stage_checkpoint() {
     )
     # Stage checkpoint roots, pointers, and stale tracked deletions through
     # one Git index transaction without sweeping unrelated staged paths.
-    git add -A -- "${checkpoint_paths[@]}" "${tracked_stale[@]}"
+    git add -- "${checkpoint_paths[@]}" "${tracked_stale[@]}"
 
     verify_index
     printf 'checkpoint-publish: staged current=%s previous=%s; pruned %d superseded object(s)\n' \
