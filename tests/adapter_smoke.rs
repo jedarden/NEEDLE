@@ -487,65 +487,112 @@ fn managed_fleet_rendered_invocations_are_valid_shell_with_recorded_flags() {
 
 #[test]
 fn load_adapters_rejects_contradictory_managed_profiles() {
-    let baseline = fs::read_to_string(fleet_adapters_dir().join("claude-code-glm-5.3-flash.yaml"))
-        .expect("baseline fleet profile must be readable");
-    let one_m = fs::read_to_string(fleet_adapters_dir().join("claude-code-glm-5.3-flash-1m.yaml"))
-        .expect("1M fleet profile must be readable");
+    // Copy each checked-in profile into a private temporary fixture before
+    // mutating it. This keeps every case hermetic and makes the matrix cover
+    // the complete documented profile set rather than just the baseline and
+    // 1M canary.
+    for (name, effort, context_mode, _) in MANAGED_PROFILES {
+        let source_path = fleet_adapters_dir().join(format!("{name}.yaml"));
+        let source = fs::read_to_string(&source_path).unwrap_or_else(|error| {
+            panic!("read {name} fixture {}: {error}", source_path.display())
+        });
+        let model = if context_mode == "1m" {
+            "glm-5.3-flash[1m]"
+        } else {
+            "glm-5.3-flash"
+        };
+        let alternate_effort = if effort == "max" { "high" } else { "max" };
 
-    // (label, mutated text) — each mutation breaks exactly one declared fact.
-    let mutations: [(&str, String); 6] = [
-        (
-            "declared effort disagrees with the template",
-            baseline.replace("--effort max", "--effort high"),
-        ),
-        (
-            "1M context without --autocompact 1m",
-            one_m.replace(" --autocompact 1m", ""),
-        ),
-        (
-            "exit status masked by a trailing cat",
-            baseline.replace("< {prompt_file}\"", "< {prompt_file} | cat\""),
-        ),
-        (
-            "contradictory requested model",
-            baseline.replace(
-                "ANTHROPIC_MODEL='glm-5.3-flash'",
-                "ANTHROPIC_MODEL='glm-5.3'",
+        // Each mutation breaks exactly one declared fact or execution
+        // contract. Keep replacements anchored to the invoke template so a
+        // prose mention in the description cannot make a test vacuous.
+        let mutations = [
+            (
+                "declared effort disagrees with the template",
+                source.replacen(
+                    &format!("  effort: {effort}"),
+                    &format!("  effort: {alternate_effort}"),
+                    1,
+                ),
             ),
-        ),
-        (
-            "literal auth token",
-            baseline.replace(
-                "${NEEDLE_ZAI_AUTH_TOKEN:-proxy-handles-auth}",
-                "sk-live-credential",
+            (
+                "declared context disagrees with the model",
+                if context_mode == "1m" {
+                    source.replacen("  context_mode: 1m", "  context_mode: standard", 1)
+                } else {
+                    source.replacen("  context_mode: standard", "  context_mode: 1m", 1)
+                },
             ),
-        ),
-        (
-            "thinking disabled request",
-            baseline.replace("--effort max", "--thinking disabled --effort max"),
-        ),
-    ];
-    for (label, text) in mutations {
-        let dir = tempdir().expect("create mutation dir");
-        fs::write(dir.path().join("mutated.yaml"), &text).expect("write mutated adapter");
-        let error = load_adapters(dir.path(), &[])
-            .expect_err("a contradictory managed profile must fail to load");
-        assert!(
-            label == "declared effort disagrees with the template"
-                || error.to_string().contains("profile"),
-            "the load error for `{label}` should name the profile block: {error:#}"
-        );
+            (
+                "1M context settings are incomplete",
+                if context_mode == "1m" {
+                    source.replacen(" --autocompact 1m --max-turns", " --max-turns", 1)
+                } else {
+                    source.replacen("  context_mode: standard", "  context_mode: 1m", 1)
+                },
+            ),
+            (
+                "requested model disagrees with the declared model",
+                source.replacen(
+                    &format!("ANTHROPIC_MODEL='{model}'"),
+                    "ANTHROPIC_MODEL='glm-5.3-drifted'",
+                    1,
+                ),
+            ),
+            (
+                "thinking is disabled",
+                source.replacen(
+                    " --max-turns 100",
+                    " --thinking disabled --max-turns 100",
+                    1,
+                ),
+            ),
+            (
+                "auth is a literal credential",
+                source.replacen(
+                    "ANTHROPIC_AUTH_TOKEN=${NEEDLE_ZAI_AUTH_TOKEN:-proxy-handles-auth}",
+                    "ANTHROPIC_AUTH_TOKEN=sk-test-not-a-real-credential",
+                    1,
+                ),
+            ),
+            (
+                "stream settings are missing",
+                source.replacen("--include-partial-messages --model", "--model", 1),
+            ),
+            (
+                "exit status is masked",
+                source.replacen("< {prompt_file}\"", "< {prompt_file} | cat\"", 1),
+            ),
+        ];
+
+        for (label, text) in mutations {
+            assert_ne!(
+                text, source,
+                "{name} mutation `{label}` did not change its fixture"
+            );
+            let dir = tempdir().expect("create mutation dir");
+            fs::write(dir.path().join(format!("{name}.yaml")), &text)
+                .expect("write mutated adapter");
+            let error = load_adapters(dir.path(), &[])
+                .expect_err("a contradictory managed profile must fail to load");
+            assert!(
+                error.to_string().contains("profile"),
+                "the load error for `{name}` / `{label}` should name the profile block: {error:#}"
+            );
+        }
     }
 
-    // Controls: the unmutated baseline loads, and a legacy unmanaged adapter
-    // with `| cat` still loads — the validation scope is managed profiles
-    // only, so existing fleet files are not broken by this contract.
+    // Controls: every unmutated profile loads, and a legacy unmanaged adapter
+    // with `| cat` still loads. Validation is scoped to managed profiles only,
+    // so existing legacy files are not broken by this contract.
     let dir = tempdir().expect("create control dir");
-    fs::write(
-        dir.path().join("baseline.yaml"),
-        baseline.replace("name: claude-code-glm-5.3-flash", "name: control-managed"),
-    )
-    .expect("write control managed adapter");
+    for (name, _, _, _) in MANAGED_PROFILES {
+        fs::copy(
+            fleet_adapters_dir().join(format!("{name}.yaml")),
+            dir.path().join(format!("{name}.yaml")),
+        )
+        .unwrap_or_else(|error| panic!("copy {name} control fixture: {error}"));
+    }
     fs::write(
         dir.path().join("legacy.yaml"),
         concat!(
@@ -559,7 +606,12 @@ fn load_adapters_rejects_contradictory_managed_profiles() {
     .expect("write control legacy adapter");
     let adapters =
         load_adapters(dir.path(), &[]).expect("valid managed and legacy adapters must both load");
-    assert!(adapters.contains_key("control-managed"));
+    for (name, _, _, _) in MANAGED_PROFILES {
+        assert!(
+            adapters.contains_key(name),
+            "valid profile {name} must load"
+        );
+    }
     assert!(adapters.contains_key("control-legacy"));
 }
 
@@ -567,6 +619,27 @@ fn load_adapters_rejects_contradictory_managed_profiles() {
 fn managed_adapter_install_is_idempotent_and_keeps_a_rollback_copy() {
     let destination = tempdir().expect("create install destination");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/install-needle-adapters.sh");
+
+    // A dry run must report all four profiles without creating the destination
+    // directory or touching the caller's filesystem.
+    let dry_run_destination = destination.path().join("dry-run");
+    let dry_run = std::process::Command::new("bash")
+        .arg(&script)
+        .arg("--adapters-dir")
+        .arg(&dry_run_destination)
+        .arg("--dry-run")
+        .output()
+        .expect("run adapter installer dry-run");
+    assert!(dry_run.status.success(), "dry-run failed: {dry_run:?}");
+    assert!(
+        String::from_utf8_lossy(&dry_run.stdout).contains("done: 4 installed, 0 already current"),
+        "dry-run must report all four profiles: {}",
+        String::from_utf8_lossy(&dry_run.stdout)
+    );
+    assert!(
+        !dry_run_destination.exists(),
+        "dry-run must not create the destination directory"
+    );
 
     let run = |names: Option<&str>| {
         let mut command = std::process::Command::new("bash");

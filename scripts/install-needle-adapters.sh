@@ -86,6 +86,11 @@ for name in "${NAME_LIST[@]}"; do
     fi
     if [[ -f "$target" ]]; then
         backup="$target.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+        backup_suffix=0
+        while [[ -e "$backup" ]]; do
+            backup_suffix=$((backup_suffix + 1))
+            backup="$target.bak-$(date -u +%Y%m%dT%H%M%SZ)-$backup_suffix"
+        done
         cp "$target" "$backup"
         echo "- previous file kept at $backup"
     fi

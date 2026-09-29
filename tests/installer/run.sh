@@ -17,6 +17,7 @@ echo ""
 # Run the end-to-end suite first: it exercises the real install.sh against a
 # mock curl and is the authoritative regression gate.
 SUITES=(
+    "$SCRIPT_DIR/test_glm53_profiles.sh"
     "$SCRIPT_DIR/test_e2e_install.sh"
     "$SCRIPT_DIR/test_install.sh"
     "$SCRIPT_DIR/test_checksum_verification.sh"
