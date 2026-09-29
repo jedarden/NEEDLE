@@ -242,6 +242,74 @@ impl Drop for ScopeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct DispatchSpanCapture(Arc<Mutex<Vec<(String, String, String)>>>);
+
+    struct FieldVisitor {
+        span_name: String,
+        captured: Arc<Mutex<Vec<(String, String, String)>>>,
+    }
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record(field, value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.record(field, value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.record(field, value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.record(field, format!("{value:?}"));
+        }
+    }
+
+    impl FieldVisitor {
+        fn record(&mut self, field: &tracing::field::Field, value: String) {
+            self.captured.lock().unwrap().push((
+                self.span_name.clone(),
+                field.name().to_string(),
+                value,
+            ));
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for DispatchSpanCapture
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = FieldVisitor {
+                span_name: attrs.metadata().name().to_string(),
+                captured: self.0.clone(),
+            };
+            attrs.record(&mut visitor);
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let Some(span) = ctx.span(id) else { return };
+            let mut visitor = FieldVisitor {
+                span_name: span.metadata().name().to_string(),
+                captured: self.0.clone(),
+            };
+            values.record(&mut visitor);
+        }
+    }
 
     #[test]
     fn span_names_are_dotted_lowercase() {
@@ -304,6 +372,42 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn agent_dispatch_emits_gen_ai_contract_attributes() {
+        use tracing_subscriber::prelude::*;
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(DispatchSpanCapture(captured.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = agent_dispatch_span(
+                Some("anthropic"),
+                Some("claude-sonnet-4-6"),
+                "attempt-contract-test",
+            );
+            span.in_scope(|| {
+                // Match the post-execution records performed by the worker.
+                span.record(attrs::GEN_AI_USAGE_INPUT_TOKENS, 1_234_i64);
+                span.record(attrs::GEN_AI_USAGE_OUTPUT_TOKENS, 567_i64);
+            });
+        });
+
+        let captured = captured.lock().unwrap();
+        let fields: std::collections::HashMap<_, _> = captured
+            .iter()
+            .filter(|(span_name, _, _)| span_name == span_names::AGENT_DISPATCH)
+            .map(|(_, name, value)| (name.as_str(), value.as_str()))
+            .collect();
+
+        assert_eq!(fields.get("gen_ai.system"), Some(&"anthropic"));
+        assert_eq!(
+            fields.get("gen_ai.request.model"),
+            Some(&"claude-sonnet-4-6")
+        );
+        assert_eq!(fields.get("gen_ai.usage.input_tokens"), Some(&"1234"));
+        assert_eq!(fields.get("gen_ai.usage.output_tokens"), Some(&"567"));
     }
 
     #[test]

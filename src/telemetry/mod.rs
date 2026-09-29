@@ -7542,6 +7542,81 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn emits_worker_transition_and_terminal_outcome_events() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("contract-worker");
+        let bead_id = BeadId::from("needle-contract");
+
+        for kind in [
+            EventKind::StateTransition {
+                from: WorkerState::Executing,
+                to: WorkerState::Handling,
+                entered_at: None,
+            },
+            EventKind::OutcomeClassified {
+                bead_id: bead_id.clone(),
+                outcome: "success".to_string(),
+                exit_code: 0,
+                timeout_reason: None,
+            },
+            EventKind::OutcomeHandled {
+                bead_id: bead_id.clone(),
+                outcome: "success".to_string(),
+                action: "complete".to_string(),
+            },
+            EventKind::BeadCompleted {
+                bead_id: bead_id.clone(),
+                duration_ms: 1_500,
+            },
+            EventKind::OutcomeClassified {
+                bead_id: bead_id.clone(),
+                outcome: "failure".to_string(),
+                exit_code: 1,
+                timeout_reason: None,
+            },
+            EventKind::OutcomeHandled {
+                bead_id: bead_id.clone(),
+                outcome: "failure".to_string(),
+                action: "release".to_string(),
+            },
+            EventKind::BeadReleased {
+                bead_id,
+                reason: "agent_failure".to_string(),
+            },
+        ] {
+            helper
+                .telemetry()
+                .emit(kind, Utc::now())
+                .expect("enqueue telemetry event");
+        }
+        helper.sync().await;
+
+        let transition = helper
+            .find_event("worker.state_transition")
+            .expect("state transition was emitted");
+        assert_eq!(transition.data["from"], "EXECUTING");
+        assert_eq!(transition.data["to"], "HANDLING");
+
+        let outcomes = helper.events_by_type("outcome.handled");
+        assert_eq!(outcomes.len(), 2, "both terminal outcomes are emitted");
+        assert_eq!(outcomes[0].data["outcome"], "success");
+        assert_eq!(outcomes[0].data["action"], "complete");
+        assert_eq!(outcomes[1].data["outcome"], "failure");
+        assert_eq!(outcomes[1].data["action"], "release");
+
+        assert_eq!(helper.events_by_type("outcome.classified").len(), 2);
+        let completed = helper
+            .find_event("bead.completed")
+            .expect("successful terminal outcome was emitted");
+        assert_eq!(completed.data["duration_ms"], 1_500);
+        let released = helper
+            .find_event("bead.released")
+            .expect("failed terminal outcome was emitted");
+        assert_eq!(released.data["reason"], "agent_failure");
+    }
+
     #[test]
     fn attempt_archive_events_keep_their_otlp_event_types_and_payloads() {
         let spooled = EventKind::AttemptSpooled {

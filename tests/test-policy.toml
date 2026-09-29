@@ -294,7 +294,10 @@ version = 1
 # +11 CI watcher parsing, fingerprint, recovery, and state-machine contracts
 # (needle-7434c5cb).
 # +1 workspace configuration override for the CI watcher (needle-7434c5cb).
-max_tests = 4087
+# +2 GenAI span-field capture and emitted transition/terminal-event contracts
+# (needle-f13ecfe9); the unit tier can exercise the real tracing span helper and
+# telemetry sink without spawning a worker process.
+max_tests = 4089
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
