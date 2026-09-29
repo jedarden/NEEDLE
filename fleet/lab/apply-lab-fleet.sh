@@ -138,6 +138,15 @@ run install -m 755 "$SRC_DIR/bin/needle-checkpoint-unwedge" "$HOME/.local/bin/ne
 for helper in commit-checkpoint.sh checkpoint-publish.sh; do
     run install -m 755 "$SRC_DIR/../../scripts/$helper" "$HOME/.local/lib/needle-checkpoint/$helper"
 done
+for publisher in needle-checkpoint-unwedge needle-checkpoint-unwedge-beadrs needle-checkpoint-unwedge-fleet; do
+    for kind in service timer; do
+        # These timers exist only on hosts with checkpoint publication enabled.
+        [[ -f "$SYSTEMD_DIR/$publisher.$kind" ]] || continue
+        run install -d "$SYSTEMD_DIR/$publisher.$kind.d"
+        run install -m 644 "$SRC_DIR/checkpoint-publication-$kind.conf" \
+            "$SYSTEMD_DIR/$publisher.$kind.d/productivity.conf"
+    done
+done
 while IFS=$'\t' read -r id ws agent delay explore; do
     [[ "$id" =~ ^# ]] && continue
     target="$WORKERS_DIR/$id.env"

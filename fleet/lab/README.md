@@ -17,6 +17,7 @@ what it deliberately never touches (credentials, systemd-managed drop-ins).
 | `fleet-policy.env` | `~/.config/needle/fleet-policy.env` |
 | `bin/needle-checkpoint-unwedge` | `~/.local/bin/needle-checkpoint-unwedge` |
 | `../../scripts/{commit-checkpoint,checkpoint-publish}.sh` | `~/.local/lib/needle-checkpoint/` |
+| `checkpoint-publication-{service,timer}.conf` | drop-ins for existing checkpoint publication units |
 | `bin/cargo` | `~/.local/bin/cargo` (opt-in: `--install-cargo-wrapper`) |
 | `bin/cargo-remote` | `~/.local/bin/cargo-remote` (same flag; hardening below) |
 | `wrapper-drift.{service,timer}` | `~/.config/systemd/user/` + timer enabled (same flag) |
