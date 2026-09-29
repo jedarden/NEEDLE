@@ -297,7 +297,9 @@ version = 1
 # +2 GenAI span-field capture and emitted transition/terminal-event contracts
 # (needle-f13ecfe9); the unit tier can exercise the real tracing span helper and
 # telemetry sink without spawning a worker process.
-max_tests = 4089
+# +4 pending-proposal eligibility and distinct-outcome accounting contracts
+# (needle-db86e7d7, needle-14d6a271); pure transforms need no subprocess.
+max_tests = 4093
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -350,7 +352,8 @@ push = 678
 # scanning contracts (needle-5df91926).
 # +1 durable deduplicated alert-note occurrence contract (needle-8e4d8484).
 # +1 N-T16 provisional-row learning exclusion contract (needle-96dec90b).
-contract = 215
+# +3 aligned/durable checkpoint dispatch contracts (needle-260cae5d).
+contract = 218
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -539,7 +542,8 @@ tier = "contract"
 # +4 Explore rediscovery, rotation, exclusion cadence, and starvation-safe
 # scanning contracts (needle-5df91926).
 # +1 durable deduplicated alert-note occurrence contract (needle-8e4d8484).
-max_tests = 73
+# +3 aligned/durable checkpoint dispatch contracts (needle-260cae5d).
+max_tests = 76
 owner = "component:bead-rs-contract"
 
 [[harness]]
@@ -951,6 +955,10 @@ owner = "component:test-documentation"
 [[artifact]]
 pattern = "tests/*.sh"
 owner = "component:shell-verification"
+
+[[artifact]]
+pattern = "tests/verify-changes/*"
+owner = "component:change-evidence-hook"
 
 [[artifact]]
 pattern = "tests/cargo-targets/*"

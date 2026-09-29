@@ -49,6 +49,52 @@ esac
 }
 
 #[tokio::test]
+async fn durable_uncommitted_checkpoint_allows_work_without_a_git_commit() {
+    let (dir, store) = fixture("aligned", false);
+    fs::write(
+        dir.path().join("status.json"),
+        json!({"relationship":"aligned", "checkpoint_consistent":true,
+            "ready_to_commit":false,
+            "not_ready_reasons":["checkpoint not fully committed"]})
+        .to_string(),
+    )
+    .unwrap();
+    for operation in ["ready", "release"] {
+        store
+            .run_operation(operation, &HashMap::from([("id", "fixture-1".to_string())]))
+            .await
+            .unwrap();
+    }
+    assert!(store.workspace_pause_reason().is_none());
+    let calls = fs::read_to_string(dir.path().join("operations.txt")).unwrap();
+    assert!(!calls.contains("sync commit"));
+    assert!(!calls.contains("sync flush-only"));
+    assert!(calls.contains("release fixture-1"));
+}
+
+#[tokio::test]
+async fn explicit_integrity_failure_overrides_git_readiness() {
+    let (dir, store) = fixture("aligned", true);
+    fs::write(
+        dir.path().join("status.json"),
+        json!({"relationship":"aligned", "checkpoint_consistent":false,
+            "ready_to_commit":true, "not_ready_reasons":["root hash mismatch"]})
+        .to_string(),
+    )
+    .unwrap();
+    assert!(store.run_operation("ready", &HashMap::new()).await.is_err());
+    let calls = fs::read_to_string(dir.path().join("operations.txt")).unwrap();
+    assert_eq!(calls.trim(), "sync status --format json");
+}
+
+#[tokio::test]
+async fn legacy_unready_checkpoint_remains_paused() {
+    let (_dir, store) = fixture("aligned", false);
+    assert!(store.run_operation("ready", &HashMap::new()).await.is_err());
+    assert!(store.workspace_pause_reason().is_some());
+}
+
+#[tokio::test]
 async fn divergent_workspace_never_reaches_claim_release_or_repair() {
     let (dir, store) = fixture("covered-ahead-integrity-failure", false);
     for operation in ["ready", "claim_auto", "release", "doctor_repair", "import"] {

@@ -12,8 +12,18 @@ use std::time::Duration;
 struct SyncStatus {
     relationship: String,
     ready_to_commit: bool,
+    /// Newer bead-rs reports durable checkpoint integrity separately from
+    /// Git reachability. A claim must not require a commit after every write.
+    #[serde(default)]
+    checkpoint_consistent: Option<bool>,
     #[serde(default)]
     not_ready_reasons: Vec<String>,
+}
+
+impl SyncStatus {
+    fn published_consistently(&self) -> bool {
+        self.relationship == "aligned" && self.checkpoint_consistent.unwrap_or(self.ready_to_commit)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -130,7 +140,7 @@ impl CliBeadStore {
         }
         let status = self.checkpoint_status().await?;
         match status.relationship.as_str() {
-            "aligned" if status.ready_to_commit => return Ok(Some(file)),
+            "aligned" if status.published_consistently() => return Ok(Some(file)),
             "remote-advanced" => {
                 let args = ["sync", "reconcile", "--actor", "needle-sync"].map(str::to_string);
                 self.run_argv_unchecked("sync_reconcile", &args, 30).await?;
@@ -151,7 +161,7 @@ impl CliBeadStore {
 
     pub(super) async fn verify_checkpoint_published(&self) -> Result<()> {
         let status = self.checkpoint_status().await?;
-        if status.relationship != "aligned" || !status.ready_to_commit {
+        if !status.published_consistently() {
             bail!(
                 "workspace_sync_paused: checkpoint publication is not verified: {}: {}",
                 status.relationship,

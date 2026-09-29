@@ -30,6 +30,8 @@ workspace:
   # the authority for same-task and same-resource conflicts.
   max_workers: 3
 strands:
+  generation:
+    enabled: false
   pluck:
     exclude_labels: []
     split_after_failures: 0
@@ -52,7 +54,7 @@ strands:
     force_failure_threshold: 0
     repeat_interval: 0
   weave:
-    enabled: true
+    enabled: false
     max_beads_per_run: 5
     cooldown_hours: 24
     exclude_workspaces: []
@@ -68,7 +70,7 @@ strands:
     cooldown_hours: 168
     prompt_template: null
   pulse:
-    enabled: true
+    enabled: false
     scanners:
       # File-based health checks (work even when code doesn't compile)
       - name: todo-comments

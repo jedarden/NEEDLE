@@ -821,6 +821,7 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # The attribution logic decides whether a failing lane blocks or is somebody
   # else's breakage, so it is itself part of the gate. Pure bash, milliseconds.
   run_check "attribution tests" bash tests/dod-attribution/run.sh
+  run_check "change evidence hook" bash tests/verify-changes/run.sh
 
   # NEEDLE is a worker CLI with no UI pages today. Keep that inventory guarded;
   # a future page must wire Agentation's import map and browser mount assertion.

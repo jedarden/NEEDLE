@@ -28,22 +28,14 @@ exploration sample.
    in `workers.tsv` are Pluck-first routes, not an Explore allowlist; the fleet
    leaves Explore's workspace list empty so recursive discovery also reaches
    repositories created after this manifest was written.
-4. **Replenish automatically.** `fleet-policy.env` enables the low-water
-   generation gate with six eligible beads in reserve and a five-minute
-   workspace/strand lease, preventing a thundering herd of generators. Workers
-   replenish their home repository first; after roaming is needed, they use the
-   same approved workspace set as Explore, skip healthy or contended
-   repositories, and run at most one creative pass per selection cycle.
-5. **Enforce a backlog SLO.** For 27 workers, the nominal target is 108
-   eligible beads (four per worker) and the minimum is 54 (two per worker).
-   Fresh heartbeats raise those thresholds when temporary workers are also
-   deployed, so extra consumers cannot be hidden behind the steady-state
-   manifest count.
-   The verdict follows the roster: home-only routes, when configured, reserve
-   local inventory before the roaming pool is evaluated. The ex44 roster lets
-   every worker roam, so its minimum applies to the shared eligible frontier.
-   `needle-backlog-slo.timer` measures that frontier every five minutes and
-   emits under-provisioned routes in JSON.
+4. **Work the approved queue.** `fleet-policy.env` disables automatic
+   generation, Weave, Pulse, and Unravel. An exhausted queue may idle.
+   Explicitly enabled discovery produces proposals that need admission before
+   dispatch; see the [productivity policy](../../docs/productivity-policy.md).
+5. **Observe available work.** `needle-backlog-slo.timer` measures eligible
+   inventory every five minutes. Minimum and target counts are zero: fleet
+   capacity and unused quota do not justify creating tasks. Pending proposals
+   are excluded from runnable inventory.
 6. **Improve task yield.** Full agent-wallclock timeouts trigger Mitosis once
    90% of the configured timeout has elapsed. New beads should describe one
    bounded deliverable, name an executable acceptance check, and use dependency

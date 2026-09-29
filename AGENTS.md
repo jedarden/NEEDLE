@@ -200,6 +200,13 @@ If CI fails, record the failure on the bead, fix it, and do not close the bead a
 
 ## Bead Workflow
 
+Apply [the productivity policy](docs/productivity-policy.md) to every dispatch.
+Generated discoveries are unapproved proposals; only explicit admission may remove
+their `proposal-pending` and `human` labels. An empty approved queue may idle.
+Keep necessary implementation, tests, documentation and delivery under one outcome
+owner. Do not create verification-only children or commits to demonstrate activity.
+Use accepted outcomes, time/cost, repeated attempts and regressions to assess work.
+
 Each bead supplies its own deliverables and acceptance criteria. Complete and
 verify the requested repository work before closing it.
 
@@ -224,6 +231,15 @@ SQLite (`.beads/beads.db`) is the live store. `.beads/checkpoint/` is the
 git-tracked durable checkpoint, and mutations do not flush it implicitly.
 
 Flush explicitly before committing bead state:
+
+```bash
+bead sync flush-only
+./scripts/commit-checkpoint.sh "chore(beads): checkpoint"
+```
+
+This publishes the validated checkpoint paths with stale tracked-object
+removals and coalesces standalone publications. To include a flush in an
+intentional source commit instead, stage the checkpoint with:
 
 ```bash
 bead sync flush-only

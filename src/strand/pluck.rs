@@ -678,6 +678,7 @@ fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
 
     label == "alert"
         || label == "human"
+        || label == "proposal-pending"
         || label.starts_with("human:")
         || label == "human-owned"
         || label == "owner:human"
@@ -5724,6 +5725,18 @@ mod tests {
             Telemetry::new("test-worker".to_string()),
         );
         assert_eq!(strand.exclude_labels, vec!["custom"]);
+    }
+
+    #[test]
+    fn proposals_stay_ineligible_until_explicit_admission_even_when_queue_is_empty() {
+        let mut proposal = make_bead_with_labels("proposal", 1, vec!["proposal-pending", "human"]);
+        let now = Utc::now();
+        assert!(!passes_never_relaxed_ready_constraints(&proposal, now));
+        // Dropping the general human marker must not accidentally approve it.
+        proposal.labels.retain(|label| label != "human");
+        assert!(!passes_never_relaxed_ready_constraints(&proposal, now));
+        proposal.labels.clear();
+        assert!(passes_never_relaxed_ready_constraints(&proposal, now));
     }
 
     #[test]

@@ -20,6 +20,9 @@ use crate::learning::{GlobalLearningsFile, LearningsFile};
 use crate::skill::SkillLibrary;
 use crate::types::Bead;
 
+/// Applies to every adapter and template, including workspace overrides.
+const PRODUCTIVITY_POLICY: &str = include_str!("../../docs/productivity-policy.md");
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Default templates
 // ──────────────────────────────────────────────────────────────────────────────
@@ -60,10 +63,9 @@ Complete the task described above. When finished:
   task actually asked for.
 
   **Important:** The commit hook will reject commits that include files that were already
-  dirty before you started and you haven't modified. This prevents accidentally sweeping
-  in other workers' in-flight edits. If you need to commit a file that was dirty before
-  dispatch, make an actual change to it first (even a trivial edit is enough to prove
-  you touched it).
+  dirty before you started and you haven't modified. Review the diff and stage only
+  changes owned by this task. Never make a trivial edit to claim ownership of another
+  worker's work or to evade the commit hook.
 - **If the task needed no file changes, do NOT manufacture a commit.** Verification-only
   work, work that turned out to be already done, and work you found blocked are all
   legitimate outcomes with nothing to commit. Record the finding on the bead instead:
@@ -1071,6 +1073,9 @@ impl PromptBuilder {
             .replace("{prior_fixes}", "")
             .replace("{deadline_notice}", "");
 
+        content.push_str("\n\n");
+        content.push_str(PRODUCTIVITY_POLICY);
+
         let hash = hex_sha256(&content);
         let token_estimate = content.len() as u64 / 4;
 
@@ -1925,7 +1930,10 @@ mod tests {
             .replace("{failure_history}", "")
             .replace("{prior_fixes}", "")
             .replace("{deadline_notice}", "");
-        assert_eq!(legacy.content, expected);
+        assert_eq!(
+            legacy.content,
+            format!("{expected}\n\n{PRODUCTIVITY_POLICY}")
+        );
         assert!(legacy.content.contains("## Workspace Learnings"));
         assert!(!legacy.content.contains("(no context files found)"));
     }
@@ -2668,7 +2676,10 @@ mod tests {
         let pluck = builder
             .build_pluck(&bead, &fixture_root("ws-root"), "w1")
             .unwrap();
-        assert_eq!(pluck.content, "Custom pluck");
+        assert_eq!(
+            pluck.content,
+            format!("Custom pluck\n\n{PRODUCTIVITY_POLICY}")
+        );
 
         // weave still uses default
         let weave = builder

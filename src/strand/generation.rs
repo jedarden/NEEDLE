@@ -211,6 +211,7 @@ impl GeneratorGate {
                 "blocked" | "manual_blocked" | "manual-blocked" | "blocked:manual"
             );
             let human = label == "human"
+                || label == "proposal-pending"
                 || label.starts_with("human:")
                 || label == "human-owned"
                 || label == "owner:human";

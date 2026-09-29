@@ -6,6 +6,10 @@ MANIFEST="$SRC_DIR/workers.tsv"
 ADAPTER_POLICY_CHECK="$SRC_DIR/../../scripts/check-adapter-cargo-environment.sh"
 
 bash -n "$ADAPTER_POLICY_CHECK" "$SRC_DIR/apply-lab-fleet.sh"
+grep -q 'EnvironmentFile=-%h/.config/needle/fleet-policy.env' "$SRC_DIR/needle-worker@.service"
+for strand in GENERATION WEAVE PULSE UNRAVEL; do
+    grep -qx "NEEDLE_STRANDS__${strand}__ENABLED=false" "$SRC_DIR/fleet-policy.env"
+done
 "$ADAPTER_POLICY_CHECK" --self-test
 
 # The self-test exercises only synthetic fixtures: it stayed green while the

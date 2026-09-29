@@ -152,6 +152,7 @@ impl UnravelStrand {
         beads
             .iter()
             .filter(|b| b.labels.iter().any(|l| l == "human"))
+            .filter(|b| !b.labels.iter().any(|l| l == "proposal-pending"))
             .filter(|b| !is_internal_artifact(b))
             .filter(|b| matches!(b.status, BeadStatus::Open))
             .collect()
@@ -566,7 +567,10 @@ impl super::Strand for UnravelStrand {
                             &AlertKind::UnravelProposal,
                             &cause,
                         );
-                        let labels = build_alert_labels(&fingerprint, &["unravel-proposal"]);
+                        let labels = build_alert_labels(
+                            &fingerprint,
+                            &["unravel-proposal", "proposal-pending", "human"],
+                        );
 
                         deduplicated_specs.push((child_title, child_body, labels));
                     }
@@ -577,7 +581,11 @@ impl super::Strand for UnravelStrand {
                             error = %e,
                             "Failed to check unravel proposal deduplication, including anyway"
                         );
-                        let labels = vec!["unravel-proposal".to_string()];
+                        let labels = vec![
+                            "unravel-proposal".to_string(),
+                            "proposal-pending".to_string(),
+                            "human".to_string(),
+                        ];
                         deduplicated_specs.push((child_title, child_body, labels));
                     }
                 }
@@ -1076,6 +1084,9 @@ mod tests {
         let created = store.created_beads();
         assert_eq!(created.len(), 2, "should create 2 alternative beads");
         assert!(created[0].2.contains(&"unravel-proposal".to_string()));
+        assert!(created.iter().all(|(_, _, labels)| labels
+            .contains(&"proposal-pending".to_string())
+            && labels.contains(&"human".to_string())));
         assert!(created[1].2.contains(&"unravel-proposal".to_string()));
 
         let deps = store.deps();
@@ -1441,6 +1452,11 @@ mod tests {
             make_bead("nd-2", "Human task", &["human"]),
             make_bead("nd-3", "Deferred", &["deferred"]),
             make_bead("nd-4", "Human + other", &["human", "priority"]),
+            make_bead(
+                "nd-proposal",
+                "Unapproved discovery",
+                &["human", "proposal-pending"],
+            ),
             closed,
             done,
             in_progress,

@@ -58,6 +58,7 @@ eligible_counts() {
                  or $label == "manual-blocked"
                  or $label == "blocked:manual"
                  or $label == "human"
+                 or $label == "proposal-pending"
                  or ($label | startswith("human:"))
                  or $label == "human-owned"
                  or $label == "owner:human"
@@ -132,12 +133,13 @@ if [[ "$SELF_TEST" == 1 ]]; then
         printf '%s\n' \
             '{"labels":[]}' \
             '{"labels":["human"]}' \
+            '{"labels":["proposal-pending"]}' \
             '{"labels":["deferred","failure-count:1","quarantine-until:2020-01-01T00:00:00Z"]}' \
             '{"labels":["deferred"]}' \
             '{"labels":["deferred:2999-01-01T00:00:00Z"]}' \
         | eligible_counts
     )
-    [[ "$(jq -r '.raw_ready' <<<"$actual")" -eq 5 ]]
+    [[ "$(jq -r '.raw_ready' <<<"$actual")" -eq 6 ]]
     [[ "$(jq -r '.eligible_ready' <<<"$actual")" -eq 2 ]]
 
     owner_test_dir=$(mktemp -d "${TMPDIR:-/tmp}/needle-backlog-owner.XXXXXX")

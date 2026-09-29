@@ -53,6 +53,7 @@ EnvironmentFile=%h/.config/needle/workers/%i.env
 # This file is host-only and deliberately NOT tracked (it carries
 # NEEDLE_OTLP_AUTHORIZATION); apply-lab-fleet.sh requires it to already exist.
 EnvironmentFile=-%h/.config/needle/worker-common.env
+EnvironmentFile=-%h/.config/needle/fleet-policy.env
 
 # NEEDLE_INNER=1 runs the worker loop in the foreground instead of
 # detaching into tmux, so systemd supervises the real process.

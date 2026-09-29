@@ -668,7 +668,11 @@ impl WeaveStrand {
                 proposed_bead.body
             );
             match store
-                .create_bead(&proposed_bead.title, &body, &["weave-generated"])
+                .create_bead(
+                    &proposed_bead.title,
+                    &body,
+                    &["weave-generated", "proposal-pending", "human"],
+                )
                 .await
             {
                 Ok(bead_id) => {
@@ -1740,6 +1744,9 @@ timeout_secs: 5
         let created = store.created_beads();
         assert_eq!(created.len(), 2, "should create 2 beads");
         assert!(created[0].2.contains(&"weave-generated".to_string()));
+        assert!(created.iter().all(|(_, _, labels)| labels
+            .contains(&"proposal-pending".to_string())
+            && labels.contains(&"human".to_string())));
         assert!(created[1].2.contains(&"weave-generated".to_string()));
     }
 

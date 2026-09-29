@@ -13,6 +13,7 @@
 //! second source of truth, and the first thing it would hide is the generator
 //! having stopped.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -41,9 +42,9 @@ const HUMAN_PROPOSAL_LIMIT: usize = 15;
 pub struct FleetTrend {
     /// Costed attempts in the window.
     pub attempts: u64,
-    /// Verified closures among them.
+    /// Distinct workspace/bead outcomes whose latest known attempt verified.
     pub verified: u64,
-    /// Verified closures per costed attempt.
+    /// Distinct verified outcomes per costed attempt.
     pub yield_per_attempt: f64,
     /// Dollars spent on costed attempts.
     pub cost_usd: f64,
@@ -239,24 +240,44 @@ fn flatten(
     }
 }
 
-/// The rolling fleet trend over costed, non-fixture rows.
+/// The rolling fleet trend over authoritative, costed, non-fixture attempts.
+/// Infrastructure failures still consumed capacity and belong in this cost.
 fn trend(rows: &[LedgerRow]) -> FleetTrend {
-    let live: Vec<&LedgerRow> = rows
+    let mut live: Vec<&LedgerRow> = rows
         .iter()
-        .filter(|row| crate::evidence_routing::is_learning_evidence_row(&row.data))
+        .filter(|row| crate::evidence_routing::is_authoritative_attempt_row(&row.data))
         .filter(|row| !state_dir::is_fixture_row(field(row, "worker"), field(row, "workspace")))
         .filter(|row| field(row, "outcome") != crate::attempt_accounting::DECOMPOSED)
         .filter(|row| costed(row))
         .collect();
 
+    // File iteration order is not attempt order. Unknown timestamps are kept
+    // conservatively after known ones, so they cannot silently disappear.
+    live.sort_by_key(|row| (row.timestamp.is_none(), row.timestamp));
+    let mut seen = BTreeSet::new();
+    let mut latest_attempt = Vec::new();
+    for row in live.into_iter().rev() {
+        let attempt_id = field(row, "attempt_id");
+        if attempt_id.is_empty() || seen.insert((field(row, "workspace"), attempt_id)) {
+            latest_attempt.push(row);
+        }
+    }
+    latest_attempt.reverse();
+    let live = latest_attempt;
+
     let attempts = live.len() as u64;
     if attempts == 0 {
         return FleetTrend::default();
     }
-    let verified = live
-        .iter()
-        .filter(|row| field(row, "outcome") == VERIFIED_SUCCESS)
-        .count() as u64;
+    let mut outcomes = BTreeMap::new();
+    for row in &live {
+        let workspace = field(row, "workspace");
+        let bead = field(row, "bead_id");
+        if !workspace.is_empty() && !bead.is_empty() {
+            outcomes.insert((workspace, bead), field(row, "outcome") == VERIFIED_SUCCESS);
+        }
+    }
+    let verified = outcomes.values().filter(|verified| **verified).count() as u64;
     let cost_usd: f64 = live
         .iter()
         .map(|row| {
@@ -334,7 +355,7 @@ pub fn render_human(report: &ImprovementsReport) -> String {
         out.push_str("  no costed attempts in the window\n");
     } else {
         out.push_str(&format!(
-            "  {} costed attempts, {} verified ({:.1}% yield)\n",
+            "  {} costed attempts, {} verified distinct outcomes ({:.1}% yield)\n",
             trend.attempts,
             trend.verified,
             trend.yield_per_attempt * 100.0
@@ -440,4 +461,62 @@ pub fn render_human(report: &ImprovementsReport) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn attempt(second: i64, id: &str, bead: &str, outcome: &str) -> LedgerRow {
+        LedgerRow {
+            timestamp: Some(Utc.timestamp_opt(second, 0).unwrap()),
+            data: serde_json::json!({
+                "provisional": false, "costed": true,
+                "workspace": "/home/coding/product", "worker": "worker-live",
+                "attempt_id": id, "bead_id": bead, "outcome": outcome,
+                "estimated_cost_usd": 2.0
+            }),
+        }
+    }
+
+    #[test]
+    fn repeated_closures_credit_one_outcome_and_keep_retry_cost() {
+        let first = attempt(1, "first", "bead-1", VERIFIED_SUCCESS);
+        let retry = attempt(2, "retry", "bead-1", VERIFIED_SUCCESS);
+        let report = trend(&[retry.clone(), first, retry]);
+        assert_eq!(
+            report.attempts, 2,
+            "replayed ledger rows are not new attempts"
+        );
+        assert_eq!(report.verified, 1);
+        assert_eq!(report.cost_usd, 4.0);
+        assert_eq!(report.cost_per_verified, Some(4.0));
+    }
+
+    #[test]
+    fn later_failure_removes_credit_but_degraded_spend_still_counts() {
+        let first = attempt(1, "first", "bead-1", VERIFIED_SUCCESS);
+        let mut failed = attempt(2, "retry", "bead-1", "infra_failure");
+        failed.data["gate_degraded"] = serde_json::json!(true);
+        let report = trend(&[failed, first]);
+        assert_eq!(report.attempts, 2);
+        assert_eq!(report.verified, 0);
+        assert_eq!(report.cost_usd, 4.0);
+        assert_eq!(report.cost_per_verified, None);
+    }
+
+    #[test]
+    fn outcome_identity_includes_workspace_and_requires_bead_id() {
+        let first = attempt(1, "a", "bead-1", VERIFIED_SUCCESS);
+        let mut other = attempt(2, "a", "bead-1", VERIFIED_SUCCESS);
+        other.data["workspace"] = serde_json::json!("/home/coding/other-product");
+        let unknown = attempt(3, "c", "", VERIFIED_SUCCESS);
+        let mut provisional = attempt(4, "d", "bead-2", VERIFIED_SUCCESS);
+        provisional.data["provisional"] = serde_json::json!(true);
+        let report = trend(&[first, other, unknown, provisional]);
+        assert_eq!(report.attempts, 3);
+        assert_eq!(report.verified, 2);
+        assert_eq!(report.cost_usd, 6.0);
+    }
 }

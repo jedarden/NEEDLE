@@ -575,7 +575,10 @@ impl super::Strand for PulseStrand {
                         finding.body,
                     );
 
-                    let labels = build_alert_labels(&fingerprint, &["pulse-finding"]);
+                    let labels = build_alert_labels(
+                        &fingerprint,
+                        &["pulse-finding", "proposal-pending", "human"],
+                    );
                     let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
                     match store

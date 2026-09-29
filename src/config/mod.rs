@@ -4558,7 +4558,7 @@ impl Default for GenerationConfig {
 
 impl GenerationConfig {
     fn default_enabled() -> bool {
-        true
+        false
     }
 
     fn default_low_water_reserve() -> usize {
@@ -12028,7 +12028,7 @@ strands:
     #[test]
     fn default_generation_config_values() {
         let config = GenerationConfig::default();
-        assert!(config.enabled);
+        assert!(!config.enabled);
         assert_eq!(config.low_water_reserve, 2);
         assert_eq!(config.lease_ttl_secs, 300);
     }

@@ -132,6 +132,7 @@ done
 
 # --- per-instance env files --------------------------------------------------
 mkdir -p "$WORKERS_DIR"
+run install -m 644 "$SRC_DIR/fleet-policy.env" "$HOME/.config/needle/fleet-policy.env"
 while IFS=$'\t' read -r id ws agent delay explore; do
     [[ "$id" =~ ^# ]] && continue
     target="$WORKERS_DIR/$id.env"

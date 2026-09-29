@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 192 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 193 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
@@ -24,6 +24,7 @@ New to NEEDLE? Start with these guides to get up and running quickly.
 | **[Configuration Guide](configuration.md)** | Complete configuration reference (config.yaml, environment variables, CLI args) |
 | **[Fleet adapter Cargo environment](adapter-cargo-environment.md)** | One `RUSTFLAGS` policy for codinghome and lab adapters |
 | **[Bead Authoring](bead-authoring.md)** | One deliverable, one acceptance command per bead — titles agents execute instead of decompose |
+| **[Productivity Policy](productivity-policy.md)** | Approved outcomes, proposal admission, and bounded verification |
 | **[Agent Adapter Authoring](plan/plan.md#agent-adapters)** | How to write custom agent adapters (invoke_template schema) |
 | **[Plugin: Claude Interactive](templates/AGENTS-needle.md)** | NEEDLE workspace template for Claude Code sessions |
 
@@ -300,7 +301,7 @@ See [Investigations & Post-Mortems](#investigations--post-mortems) for:
 
 ## File Count Summary
 
-- **Total markdown files:** 192
+- **Total markdown files:** 193
 - **ADRs:** 30
 - **Research documents:** 18
 - **Operational notes:** 31
