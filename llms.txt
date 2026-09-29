@@ -2,10 +2,7 @@ NEEDLE (Navigates Every Enqueued Deliverable, Logs Effort) is a deterministic be
 
 # Quickstart (agent-readable)
 
-Forgejo (`git.ardenone.com/jedarden/NEEDLE`) is the source of truth: clone and
-push there. GitHub (`github.com/jedarden/NEEDLE`) is a read-only mirror. The
-public release artifacts and checksums are published on GitHub, so the install
-URL below intentionally uses GitHub; do not add GitHub as a push remote.
+Forgejo (`git.ardenone.com/jedarden/NEEDLE`) is the source of truth: clone and push there. GitHub (`github.com/jedarden/NEEDLE`) is a read-only mirror. The public release artifacts and checksums are published on GitHub, so the install URL below intentionally uses GitHub; do not add GitHub as a push remote.
 
 ## Install
 curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
