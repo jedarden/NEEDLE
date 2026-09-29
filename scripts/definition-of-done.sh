@@ -822,6 +822,10 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # else's breakage, so it is itself part of the gate. Pure bash, milliseconds.
   run_check "attribution tests" bash tests/dod-attribution/run.sh
 
+  # NEEDLE is a worker CLI with no UI pages today. Keep that inventory guarded;
+  # a future page must wire Agentation's import map and browser mount assertion.
+  run_check "Agentation UI entrypoint guard" bash tests/agentation-ui/run.sh
+
   # Keep compiled NEEDLE subprocess tests isolated from real HOME and Explore
   # scan roots. Run the static guard as a small standalone Rust test binary so
   # this source-only policy stays in the fast lane without building the full

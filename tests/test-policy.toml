@@ -980,6 +980,11 @@ owner = "component:definition-of-done"
 pattern = "tests/dod-modes/*"
 owner = "component:definition-of-done"
 
+# Current no-UI inventory and future-entrypoint Agentation guard.
+[[artifact]]
+pattern = "tests/agentation-ui/*"
+owner = "component:agentation-ui-guard"
+
 # Mutation suite for scripts/check-doc-links.sh (needle-a66631da): the
 # documentation navigation guard wired into the definition-of-done fast lane.
 [[artifact]]
