@@ -7,7 +7,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+# The suite also runs from a git archive during the clean-tree verification;
+# derive the root from this script instead of requiring a .git directory.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 echo "========================================="
 echo "NEEDLE Installer Test Suite"
