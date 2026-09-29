@@ -133,6 +133,11 @@ done
 # --- per-instance env files --------------------------------------------------
 mkdir -p "$WORKERS_DIR"
 run install -m 644 "$SRC_DIR/fleet-policy.env" "$HOME/.config/needle/fleet-policy.env"
+run install -d "$HOME/.local/bin" "$HOME/.local/lib/needle-checkpoint"
+run install -m 755 "$SRC_DIR/bin/needle-checkpoint-unwedge" "$HOME/.local/bin/needle-checkpoint-unwedge"
+for helper in commit-checkpoint.sh checkpoint-publish.sh; do
+    run install -m 755 "$SRC_DIR/../../scripts/$helper" "$HOME/.local/lib/needle-checkpoint/$helper"
+done
 while IFS=$'\t' read -r id ws agent delay explore; do
     [[ "$id" =~ ^# ]] && continue
     target="$WORKERS_DIR/$id.env"

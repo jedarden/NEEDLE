@@ -14,9 +14,19 @@ what it deliberately never touches (credentials, systemd-managed drop-ins).
 | `needle-worker@.service` | `~/.config/systemd/user/needle-worker@.service` |
 | `needle.slice` | `~/.config/systemd/user/needle.slice` |
 | `workers.tsv` | rendered to `~/.config/needle/workers/<identifier>.env` |
+| `fleet-policy.env` | `~/.config/needle/fleet-policy.env` |
+| `bin/needle-checkpoint-unwedge` | `~/.local/bin/needle-checkpoint-unwedge` |
+| `../../scripts/{commit-checkpoint,checkpoint-publish}.sh` | `~/.local/lib/needle-checkpoint/` |
 | `bin/cargo` | `~/.local/bin/cargo` (opt-in: `--install-cargo-wrapper`) |
 | `bin/cargo-remote` | `~/.local/bin/cargo-remote` (same flag; hardening below) |
 | `wrapper-drift.{service,timer}` | `~/.config/systemd/user/` + timer enabled (same flag) |
+
+Checkpoint publication validates aligned durable state and coalesces standalone
+commits for 15 minutes. It does not release claims, repair stores, or restart
+workers. Upgrade workers to a build containing `1eaefdf8` before enabling that
+cadence: older dispatch guards require Git publication after every mutation.
+During a rolling upgrade, retain `NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS=0`
+on the publisher services until their workspace's workers have upgraded.
 
 ## Wrapper tracking and drift detection (claudego-dd2fa6f4, 2026-09-24)
 

@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Publish an aligned bead-rs checkpoint; never change claims or worker state."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    # Retain the old timer interface during rollout. Recovery belongs to
+    # NEEDLE's ownership/state machine, so these legacy options have no effect.
+    for name in ("unit", "worker-log", "stall-min", "grace-secs", "wedge-min", "restart-gap-min"):
+        parser.add_argument("--" + name, help=argparse.SUPPRESS)
+    parser.add_argument("--restart-on-wedge", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    workspace = Path(args.workspace).resolve()
+    if not (workspace / ".beads/config.json").is_file():
+        print("checkpoint publisher requires a bead-rs workspace", file=sys.stderr)
+        return 2
+
+    result = subprocess.run(
+        ["bead", "sync", "status", "--format", "json"], cwd=workspace,
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode:
+        print("checkpoint status failed; no publication attempted", file=sys.stderr)
+        return 2
+    try:
+        status = json.loads(result.stdout)
+    except ValueError:
+        print("invalid checkpoint status; no publication attempted", file=sys.stderr)
+        return 2
+    if not isinstance(status, dict) or status.get("relationship") != "aligned":
+        print("checkpoint is not aligned; no repair or publication attempted", file=sys.stderr)
+        return 2
+    if status.get("checkpoint_consistent") is False:
+        print("checkpoint is inconsistent; no publication attempted", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        print("aligned checkpoint; dry run leaves Git and bead state unchanged")
+        return 0
+
+    # This helper holds bead-rs's publish lock, validates pointers and hashes,
+    # prunes stale objects and commits exact paths. Its default cadence is 900s.
+    helper = Path(os.environ.get(
+        "NEEDLE_CHECKPOINT_HELPER",
+        str(Path.home() / ".local/lib/needle-checkpoint/commit-checkpoint.sh"),
+    ))
+    if not helper.is_file():
+        print("checkpoint commit helper is not installed", file=sys.stderr)
+        return 2
+    return subprocess.run(
+        [str(helper), "chore(beads): publish durable checkpoint"],
+        cwd=workspace, timeout=300,
+    ).returncode
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"checkpoint publisher failed: {type(error).__name__}", file=sys.stderr)
+        sys.exit(2)
