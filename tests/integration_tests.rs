@@ -90,6 +90,11 @@ mod version_probe_comprehensive;
 mod version_probe_test;
 #[path = "integration_tests/workspace_tilde_expansion_tests.rs"]
 mod workspace_tilde_expansion_tests;
+// Keep the subprocess-isolation audit in an acceptance target. The guard scans
+// every Rust test source, so a newly added NEEDLE launch cannot bypass the
+// HOME and Explore-root requirements merely by living outside integration_spawn.
+#[path = "integration_spawn/subprocess_isolation.rs"]
+mod subprocess_isolation;
 
 use chrono::{DateTime, Duration, Utc};
 use needle::bead_store::{BeadStore, Filters};
