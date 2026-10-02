@@ -116,15 +116,13 @@ Fleet size: **8 workers** (`workers.tsv`), against the 2026-09-09 right-size
 of the 15-unit fleet down to 7 — one workspace family each, ~1 core per worker
 against the 7-core slice, start-staggered 15s → 165s.
 
-`lab-codex-tgplat` (needle-bf3a9907, 2026-09-27) is the deliberate exception to
-the "no eighth worker" rule below: it shares `tradegraph-platform` with
-`lab-tgplat` (the workspace tolerates two claimants) and exists to burn a
-shared OpenAI ChatGPT-Pro subscription's banked reset credits before they
-expire (see codinghome memory `codex-banked-reset-credits-2026-09-27`), not to
-add steady-state capacity. It drops the average to ~0.875 cores/worker against
-the same 7-core slice — a real, if modest, increase in admission pressure. If
-the banked-credit motivation goes away, retiring this slot restores the
-7-worker budget the rest of this section assumes.
+`lab-codex-loom` (needle-f14e1ec3, 2026-10-02) is the deliberate eighth worker.
+It is pinned to the lab-owned LOOM development queue and replaces the temporary
+duplicate `lab-codex-tgplat` slot without increasing fleet size or the 7-core
+slice. LOOM's production runtime and release control remain on their existing
+hosts. The slot drops the average to ~0.875 cores/worker against the same
+7-core slice, so it must be reassigned or retired rather than duplicated when
+queue ownership changes again.
 
 On 2026-09-23, the idle `lab-needle` slot was reassigned to `lab-tgplat` to
 move one build-heavy `tradegraph-platform` route off codinghome without adding

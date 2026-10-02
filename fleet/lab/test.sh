@@ -32,14 +32,14 @@ rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 8 ]]
 [[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 8 ]]
 [[ "$(awk -F'\t' '$1 !~ /^lab-/ {n++} END {print n+0}' <<<"$rows")" -eq 0 ]]
-# needle-bf3a9907: exactly one non-GLM row is now allowed -- the lab-owned
-# TradeGraph queue (needle-4164f30e) is unreachable from codinghome, so a
-# lab-based Codex worker is the only way to Pluck against it.
+# needle-f14e1ec3: exactly one non-GLM row is allowed. It owns the LOOM
+# development queue on lab without increasing the eight-worker fleet.
 [[ "$(awk -F'\t' '$3 != "claude-code-glm-5.3-flash" && $3 != "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 0 ]]
 [[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
 [[ "$(awk -F'\t' '$5 != "false" {n++} END {print n+0}' <<<"$rows")" -eq 0 ]]
 grep -q $'^lab-tgplat\t/home/coding/tradegraph-platform\tclaude-code-glm-5.3-flash\t30\tfalse$' "$MANIFEST"
-grep -q $'^lab-codex-tgplat\t/home/coding/tradegraph-platform\tcodex-gpt-5.6-luna-xhigh\t165\tfalse$' "$MANIFEST"
+grep -q $'^lab-codex-loom\t/home/coding/LOOM\tcodex-gpt-5.6-luna-xhigh\t165\tfalse$' "$MANIFEST"
+! grep -q $'^lab-codex-tgplat\t' "$MANIFEST"
 ! grep -q $'^lab-needle\t' "$MANIFEST"
 grep -q 'default.target.wants"/needle-worker@\*.service' "$SRC_DIR/apply-lab-fleet.sh"
 grep -q 'systemctl --user disable' "$SRC_DIR/apply-lab-fleet.sh"

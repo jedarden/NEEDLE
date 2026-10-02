@@ -8,10 +8,10 @@
 #   start_delay     NEEDLE_START_DELAY seconds; spreads launches after reboot/mass restart
 #   explore         NEEDLE_STRANDS__EXPLORE__ENABLED (false pins the scan root away from $HOME)
 #
-# Seven workers on a 7-core fleet slice = ~1 core per worker. This is the
-# 2026-09-09 right-size of the 15-unit fleet that starved during the
-# 2026-09-03 CPU saturation (needle-3d5c65d8). Do not grow the fleet past
-# the slice quota in needle.slice without raising CPUQuota deliberately.
+# Seven baseline workers plus one Codex queue-owner slot share the 7-core
+# fleet slice. This preserves the existing eight-worker ceiling while moving
+# that Codex slot between products. Do not grow the fleet past this manifest
+# without raising CPUQuota deliberately.
 #
 # Secret-bearing configuration deliberately stays OFF this host-copy list:
 # worker-common.env (NEEDLE_OTLP_AUTHORIZATION) is host-only, mode 600, and
@@ -25,4 +25,4 @@ lab-gantry	/home/coding/gantry-rs	claude-code-glm-5.3-flash	75	false
 lab-miroir	/home/coding/miroir	claude-code-glm-5.3-flash	90	false
 lab-pdftract-php	/home/coding/pdftract-php	claude-code-glm-5.3-flash	120	false
 lab-pdftract-swift	/home/coding/pdftract-swift	claude-code-glm-5.3-flash	150	false
-lab-codex-tgplat	/home/coding/tradegraph-platform	codex-gpt-5.6-luna-xhigh	165	false
+lab-codex-loom	/home/coding/LOOM	codex-gpt-5.6-luna-xhigh	165	false
