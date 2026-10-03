@@ -992,32 +992,33 @@ fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
     assert_eq!(spooled.sha256, digest);
     assert_eq!(spooled.bundle_path, receipt.bundle.display().to_string());
 
-    let listing = if bundle
+    // List the bundle in-process with the same tar/zstd crates that wrote it.
+    // Shelling out to `tar --zstd` needs an external zstd program, which the
+    // needle-ci builder image does not ship. tar then failed, and its empty
+    // stdout read as an empty bundle (needle-d4399e62).
+    let file = fs::File::open(&bundle).expect("open spooled bundle");
+    let reader: Box<dyn std::io::Read> = if bundle
         .extension()
         .is_some_and(|extension| extension == "zst")
     {
-        Command::new("tar")
-            .args(["--zstd", "-tf"])
-            .arg(&bundle)
-            .output()
-            .unwrap()
+        Box::new(zstd::Decoder::new(file).expect("bundle is a valid zstd stream"))
     } else {
-        Command::new("tar")
-            .arg("-tf")
-            .arg(&bundle)
-            .output()
-            .unwrap()
+        Box::new(file)
     };
-    let listing = String::from_utf8_lossy(&listing.stdout);
-    let listed: Vec<_> = listing.lines().collect();
-    assert_eq!(
-        listed,
-        sidecar
-            .contents
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-    );
+    let mut archive = tar::Archive::new(reader);
+    let listed: Vec<String> = archive
+        .entries()
+        .expect("bundle is a valid tar stream")
+        .map(|entry| {
+            entry
+                .expect("readable tar entry")
+                .path()
+                .expect("tar entry has a path")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(listed, sidecar.contents);
 }
 
 #[serial_test::file_serial(process_contracts)]
@@ -2605,9 +2606,29 @@ async fn dispatch_telemetry_process_contracts_e2e_outer_cancellation_still_kills
         .expect("PID file should contain a valid integer PID");
 
     // Poll until the grandchild is dead or we give up waiting.
+    //
+    // "Dead" means no live process: /proc/<pid>/stat is gone, OR its state is
+    // 'Z'. The guard SIGKILLs the whole group synchronously, so the grandchild
+    // dies at once. Its parent shell dies too, so it is reparented to the pid
+    // namespace's init, and it stays a zombie until that init reaps it. In a CI
+    // container init is the Argo executor, not systemd, and may reap late or
+    // never. `kill(pid, 0)` succeeds on a zombie, so the old check failed
+    // intermittently in needle-ci for a correctly killed process
+    // (needle-c586ae9f). This matches the product's own liveness rule
+    // (orphan_reaper::process_alive).
+    let process_alive = |pid: libc::pid_t| -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        // Format: "<pid> (<comm>) <state> ..."; comm may contain spaces/parens.
+        let state = stat
+            .rfind(')')
+            .and_then(|end| stat[end + 1..].trim_start().chars().next());
+        state != Some('Z')
+    };
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let dead = loop {
-        let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+        let alive = process_alive(grandchild_pid);
         if !alive {
             break true;
         }
