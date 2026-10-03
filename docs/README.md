@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 193 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 194 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
@@ -107,6 +107,7 @@ Running, maintaining, and operating NEEDLE fleets.
 | **[Binary Freshness Verification](binary-freshness-verification.md)** | Verifying automatic worker rotation on binary updates |
 | **[Binary Freshness Status](binary-freshness-verification-status.md)** | Status tracking for binary freshness feature |
 | **[Upgrade Channels](upgrade.md)** | Canary-gated GitHub releases, rollback, and hot reload |
+| **[Re-run needle-ci for a Commit](notes/ci-rerun.md)** | Tailnet-only token-gated trigger that re-runs needle-ci for a SHA when its run was lost |
 | **[Heartbeat System](heartbeat.md)** | Worker heartbeat protocol and peer monitoring |
 | **[Definition of Done](definition-of-done.md)** | DoD adoption guide and pattern reference |
 | **[DoD Pattern](definition-of-done-pattern.md)** | Reusable DoD pattern for bead deliverables |
@@ -301,10 +302,10 @@ See [Investigations & Post-Mortems](#investigations--post-mortems) for:
 
 ## File Count Summary
 
-- **Total markdown files:** 193
+- **Total markdown files:** 194
 - **ADRs:** 30
 - **Research documents:** 18
-- **Operational notes:** 31
+- **Operational notes:** 32
 
 These counts, every link in this index, and every internal Markdown link in
 `docs/` and the repository `README.md` are validated in CI by
