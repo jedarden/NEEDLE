@@ -61,13 +61,12 @@ source, prompts, scripts, tests, or documentation.
 
 ## Rust Compatibility
 
-The declared MSRV is Rust 1.88 (`Cargo.toml` `rust-version`). It is enforced
-by the `verify-msrv` lane in needle-ci, which runs the authoritative MSRV
-check (`RUSTUP_TOOLCHAIN=<msrv> cargo build --workspace --all-targets`, then
-`cargo test --workspace --lib`) and fails when the declaration and the lane
-drift apart. Do not add language features or dependencies that require a
-newer compiler without intentionally updating `rust-version` and the lane's
-`MSRV_TOOLCHAIN` in the same change.
+The declared MSRV is Rust 1.95 (`Cargo.toml` `rust-version`), equal to the
+build toolchain pinned in `rust-toolchain.toml`. Every needle-ci lane builds
+with that pin, so ordinary CI enforces the MSRV; there is no separate MSRV
+lane. `scripts/check-msrv-drift.sh` (definition-of-done) fails when any
+workspace `rust-version` differs from the pin's major.minor. To move to a
+newer compiler, bump the pin and every `rust-version` in the same change.
 
 ## Code Conventions
 

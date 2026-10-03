@@ -130,7 +130,7 @@ value wins. This fallback is the **INTERIM** mechanism. The
 declare their own Definition of Done; that runner is intended to replace this
 fallback gate rather than add another permanent gate layer.
 
-**Build from source** (Rust 1.85+; NEEDLE pins its toolchain in `rust-toolchain.toml`) — from the canonical Forgejo remotes, or from the read-only GitHub mirror by swapping the hostname:
+**Build from source** (Rust 1.95+, the toolchain pinned in `rust-toolchain.toml`) — from the canonical Forgejo remotes, or from the read-only GitHub mirror by swapping the hostname:
 
 ```bash
 # canonical (git.ardenone.com — see "Hosting — Forgejo First" below)

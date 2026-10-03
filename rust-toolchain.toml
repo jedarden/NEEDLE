@@ -16,13 +16,9 @@
 # The durable fix belongs in the builder image — put RUSTUP_HOME and rustup's
 # temp dir on the same filesystem — and is tracked separately.
 #
-# NOTE: 1.95.0 is the known-good BUILD toolchain this repo compiles with, not
-# the MSRV. The MSRV lives in Cargo.toml `rust-version` (1.88 since 2026-09-25,
-# re-derived from the locked dependency graph after 1.75 proved unenforceable)
-# and is enforced by needle-ci's verify-msrv lane, which builds and unit-tests
-# under exactly that toolchain. Keep this file on the newer build toolchain;
-# pinning it to the MSRV would force every lane onto the oldest supported
-# compiler.
+# This pin is also the MSRV: every Cargo.toml `rust-version` must equal its
+# major.minor (scripts/check-msrv-drift.sh enforces it). Bump the pin and every
+# rust-version together, deliberately, never by tracking stable.
 [toolchain]
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]

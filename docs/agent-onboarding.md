@@ -4,7 +4,7 @@ This guide walks you through setting up NEEDLE from a clean environment to your 
 
 ## Prerequisites
 
-- Linux x86_64 system (prebuilt binaries) or Rust 1.85+ for source build
+- Linux x86_64 system (prebuilt binaries) or Rust 1.95+ for source build
 - `git` and `tmux` installed
 - An agent CLI on PATH (this guide uses Claude Code: `claude`)
 

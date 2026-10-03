@@ -833,7 +833,7 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # integration_spawn harness.
   run_check "subprocess test isolation" bash tests/subprocess-isolation/run.sh
 
-  # Keep Cargo's declared MSRV and the needle-ci verify-msrv contract aligned.
+  # Keep every workspace rust-version equal to the rust-toolchain.toml pin.
   run_check "MSRV configuration drift" bash scripts/check-msrv-drift.sh
   run_check "MSRV drift checker tests" bash tests/msrv-drift/run.sh
 

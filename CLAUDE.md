@@ -9,30 +9,21 @@ workspaces) to select, claim, dispatch an AI agent, and handle outcomes.
 
 ## MSRV
 
-Minimum Supported Rust Version: **1.88** (2025-06-26).
+Minimum Supported Rust Version: **1.95**, which is the build toolchain pinned
+in `rust-toolchain.toml` (1.95.0).
 
-Declared in `Cargo.toml` (`rust-version`) and enforced by the `verify-msrv`
-lane of the `needle-ci` WorkflowTemplate on iad-ci, which fails the run when
-the declaration and the lane's `MSRV_TOOLCHAIN` drift apart. The authoritative
-MSRV check is the exact command pair that lane runs:
+The MSRV *is* the pin. Every `needle-ci` lane and every local build compiles
+with it, so ordinary CI enforces the declaration. `scripts/check-msrv-drift.sh`
+(run by the definition-of-done) fails when any workspace `rust-version`
+(`Cargo.toml`, `crates/*/Cargo.toml`) differs from the pin's major.minor. To
+adopt a newer compiler, bump the pin and every `rust-version` in one change.
 
-```bash
-RUSTUP_TOOLCHAIN=<msrv> cargo build --workspace --all-targets
-RUSTUP_TOOLCHAIN=<msrv> cargo test --workspace --lib
-```
-
-with `<msrv>` = the `rust-version` above (currently 1.88.0).
-`rust-toolchain.toml` is NOT the MSRV — it pins the newer build toolchain
-(currently 1.95.0) that development and the other CI lanes compile with; a
-plain `cargo build` honours that pin and proves nothing about the MSRV.
-
-The declaration read 1.75 from project scaffolding until 2026-09-25, when it
-was found unenforceable: 55 locked crates declare a higher `rust-version` and
-`clap v4.6.6` uses edition2024, which cargo 1.75 cannot even parse. The floor
-was re-derived from the locked dependency graph rather than downgrading the
-core stack (bead needle-c63fbb7f). Do not add dependencies that require a
-newer Rust edition without updating `rust-version` and the lane's
-`MSRV_TOOLCHAIN` together.
+History: the declaration read 1.75 from scaffolding until 2026-09-25, then
+1.88, enforced by a separate `verify-msrv` needle-ci lane (bead
+needle-c63fbb7f). That lane was removed on 2026-10-03 (needle-9cdd39b6,
+needle-5e78a10d). It took 23 of a 37-minute median run, and NEEDLE is an
+application with no crate dependents, so a floor below the build toolchain
+protected only source builds on old compilers.
 
 ## Module Dependency Graph
 
