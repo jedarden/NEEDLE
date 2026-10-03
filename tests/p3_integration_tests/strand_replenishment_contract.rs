@@ -148,6 +148,20 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn remove_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
+    let output = bead_command(workspace)
+        .args(["label", "remove", bead_id.as_ref(), "--label", label])
+        .output()
+        .context("failed to unlabel fixture bead")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "native bead-rs label remove failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
 fn write_readme(workspace: &Path) -> Result<()> {
     fs::write(
         workspace.join("README.md"),
@@ -348,8 +362,18 @@ async fn local_empty_remote_ready_and_invalid_duplicate_workspaces_are_safe() {
     );
 }
 
+/// Fleet-empty replenishment under the admission policy (needle-db86e7d7,
+/// docs/productivity-policy.md): Weave's generated work is a PROPOSAL,
+/// labelled `proposal-pending` + `human`, and no strand may select it until it
+/// is explicitly admitted. The waterfall still restarts once on Weave's
+/// WorkCreated, then idles. ("An exhausted approved queue may idle.") Once the
+/// labels are removed (the human admission step), the same runner selects it
+/// through Explore, and it can be claimed.
+///
+/// Before 1eaefdf8 this test asserted that generated work was claimed
+/// immediately; that contract was retired deliberately (needle-cb90fbfb).
 #[tokio::test]
-async fn fleet_empty_weave_restarts_pluck_and_claims_real_generated_work() {
+async fn fleet_empty_weave_proposal_is_claimable_only_after_admission() {
     let home = create_workspace("fleet-home").unwrap();
     let remote = create_workspace("fleet-target").unwrap();
     write_readme(remote.path()).unwrap();
@@ -387,18 +411,63 @@ async fn fleet_empty_weave_restarts_pluck_and_claims_real_generated_work() {
         telemetry.clone(),
     );
 
+    // 1. Fleet empty: Weave generates a proposal and the waterfall restarts
+    //    once, but nothing is selectable, because the proposal is not admitted.
     let outcome = runner
         .select(home_store.as_ref(), &HashSet::new())
         .await
         .unwrap();
-    let (generated, strand) = outcome.bead.expect("restart should select generated work");
-    assert_eq!(strand, "explore");
-    assert_eq!(generated.title, "generated-real-work");
-    assert_eq!(generated.workspace, remote.path());
+    assert!(
+        outcome.bead.is_none(),
+        "an unadmitted proposal must not be selected: {:?}",
+        outcome
+            .bead
+            .as_ref()
+            .map(|(bead, strand)| (&bead.title, strand))
+    );
     assert_eq!(outcome.waterfall_restarts, 1);
     assert_eq!(outcome.restart_triggers, vec!["weave"]);
 
+    // 2. The proposal is real work in the target workspace, held for admission.
     let remote_store = Arc::new(store_for(remote.path()).unwrap());
+    let all_open = remote_store
+        .list_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|bead| bead.status == BeadStatus::Open)
+        .collect::<Vec<_>>();
+    let proposal = all_open
+        .iter()
+        .find(|bead| bead.title == "generated-real-work")
+        .unwrap_or_else(|| panic!("Weave should have created the proposal: {all_open:?}"))
+        .clone();
+    for label in ["weave-generated", "proposal-pending", "human"] {
+        assert!(
+            proposal.labels.iter().any(|l| l == label),
+            "proposal should carry {label}: {:?}",
+            proposal.labels
+        );
+    }
+
+    // 3. Explicit admission: the human removes both hold labels. The same
+    //    runner then selects the admitted work through Explore with no
+    //    further generation.
+    remove_label(remote.path(), &proposal.id, "proposal-pending").unwrap();
+    remove_label(remote.path(), &proposal.id, "human").unwrap();
+    let outcome = runner
+        .select(home_store.as_ref(), &HashSet::new())
+        .await
+        .unwrap();
+    let (generated, strand) = outcome
+        .bead
+        .expect("admitted generated work should be selected");
+    assert_eq!(strand, "explore");
+    assert_eq!(generated.id, proposal.id);
+    assert_eq!(generated.title, "generated-real-work");
+    assert_eq!(generated.workspace, remote.path());
+    assert_eq!(outcome.waterfall_restarts, 0);
+
     let claimed = Claimer::new(
         remote_store,
         state.path().to_path_buf(),
