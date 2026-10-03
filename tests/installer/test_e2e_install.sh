@@ -97,13 +97,35 @@ setup() {
 # Mock curl for install.sh e2e tests. Serves from $MOCK_ROOT.
 out=""
 url=""
+wfmt=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -o) out="$2"; shift 2 ;;
+        -w) wfmt="$2"; shift 2 ;;
         -*) shift ;;
         *)  url="$1"; shift ;;
     esac
 done
+# github.com (not api.github.com) /releases/latest is the public redirect to
+# /releases/tag/<tag>. Served from $MOCK_ROOT/latest_tag; absent = 404.
+if [[ "$url" == "https://github.com/"*"/releases/latest" ]]; then
+    if [[ ! -f "$MOCK_ROOT/latest_tag" ]]; then
+        echo "curl: (22) The requested URL returned error: 404 (mock)" >&2
+        exit 22
+    fi
+    tag=$(cat "$MOCK_ROOT/latest_tag")
+    [[ -n "$out" && "$out" != /dev/null ]] && : > "$out"
+    if [[ "$wfmt" == *"url_effective"* ]]; then
+        printf '%s' "${url%/latest}/tag/${tag}"
+    fi
+    exit 0
+fi
+# $MOCK_ROOT/api_status=403 makes every api.github.com call fail like a
+# rate-limited anonymous client.
+if [[ "$url" == "https://api.github.com/"* && -f "$MOCK_ROOT/api_status" ]]; then
+    echo "curl: (22) The requested URL returned error: $(cat "$MOCK_ROOT/api_status") (mock)" >&2
+    exit 22
+fi
 if [[ "$url" == *"/bead-rs/"* ]]; then
     # bead-rs release: separate fixture tree so its checksums.txt does not
     # collide with needle's.
@@ -492,6 +514,34 @@ test_api_fetch_failure_aborts() {
     teardown
 }
 
+test_api_rate_limited_falls_back_to_release_redirect() {
+    echo "TEST: GitHub API 403 (rate limit) falls back to the release redirect and installs"
+    setup
+    write_checksums correct
+    echo 403 > "$MOCK_ROOT/api_status"
+    echo v0.1.0 > "$MOCK_ROOT/latest_tag"
+    run_installer
+    assert_rc_zero
+    assert_installed
+    assert_output_contains "fallback is announced" "resolved v0.1.0 from the release page"
+    assert_output_contains "checksum still verified on the fallback path" "Checksum verified"
+    teardown
+}
+
+test_api_rate_limited_missing_asset_aborts() {
+    echo "TEST: on the redirect fallback a release without the platform asset still aborts"
+    setup
+    write_checksums correct
+    echo 403 > "$MOCK_ROOT/api_status"
+    echo v0.1.0 > "$MOCK_ROOT/latest_tag"
+    rm -f "$MOCK_ROOT/files/$ASSET_NAME"
+    run_installer
+    assert_rc 1
+    assert_not_installed
+    assert_output_contains "legible missing-asset reason" "No prebuilt binary for $ASSET_NAME"
+    teardown
+}
+
 test_version_discovery_large_payload() {
     echo "TEST: version discovery on >pipe-buffer payload, no broken-pipe diagnostic"
     setup
@@ -833,6 +883,8 @@ main() {
             test_no_hash_tool_aborts
             test_binary_download_failure_aborts
             test_api_fetch_failure_aborts
+            test_api_rate_limited_falls_back_to_release_redirect
+            test_api_rate_limited_missing_asset_aborts
             test_version_discovery_large_payload
             test_help_documents_security_tradeoff
             test_unknown_option_rejected

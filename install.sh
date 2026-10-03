@@ -254,18 +254,49 @@ get_latest_version() {
     if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
         error "Neither curl nor wget is available. Please install one of them."
     fi
-    api_output=$(fetch_release_json "$GITHUB_API") ||
-        error "Could not reach the GitHub API to determine the latest version. Please check your internet connection."
-
-    version=$(extract_tag "$api_output")
-    if [[ -z "$version" ]]; then
-        error "Failed to determine the latest version. Please check your internet connection."
+    if api_output=$(fetch_release_json "$GITHUB_API"); then
+        version=$(extract_tag "$api_output")
+        if [[ -z "$version" ]]; then
+            error "Failed to determine the latest version. Please check your internet connection."
+        fi
+        # Check if the required asset exists in the release
+        check_asset_available "$api_output" "$1" "$version" || return 1
+        echo "$version"
+        return 0
     fi
 
-    # Check if the required asset exists in the release
-    check_asset_available "$api_output" "$1" "$version" || return 1
+    # The REST API refused or was unreachable. Anonymous API calls are limited
+    # to 60/hour per IP, so a shared egress IP (corporate NAT, CI runners, the
+    # needle-quickstart-gate) gets HTTP 403 while github.com itself works.
+    # Resolve the tag from the public release redirect instead, and confirm the
+    # asset with a HEAD request (needle-e851827c).
+    version=$(latest_tag_via_redirect) ||
+        error "Could not reach the GitHub API to determine the latest version. Please check your internet connection."
+    warn "GitHub API unavailable (rate limit or network); resolved ${version} from the release page instead"
+    if ! release_asset_exists "$version" "$1"; then
+        check_asset_available '{"assets": [{"name": "none"}]}' "$1" "$version" || return 1
+    fi
 
     echo "$version"
+}
+
+# Resolve the latest release tag without the REST API: github.com redirects
+# /releases/latest to /releases/tag/<tag>. curl only; with wget the API path
+# above is the only discovery route.
+latest_tag_via_redirect() {
+    command -v curl &>/dev/null || return 1
+    local effective
+    effective=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${REPO}/releases/latest" 2>/dev/null) || return 1
+    case "$effective" in
+        */releases/tag/?*) printf '%s\n' "${effective##*/releases/tag/}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# release_asset_exists <version> <asset>: HEAD the public download URL.
+release_asset_exists() {
+    curl -fsSLI -o /dev/null "https://github.com/${REPO}/releases/download/$1/$2" 2>/dev/null
 }
 
 # Check if the required asset exists in the release JSON
