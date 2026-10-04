@@ -2550,6 +2550,24 @@ async fn dispatch_telemetry_process_contracts_idle_timeout_resets_on_activity_ha
     assert!(result.stdout.contains("output"));
 }
 
+/// True while `pid` is a live process: /proc/<pid>/stat exists and its state
+/// is not 'Z'. A killed process whose parent also died is reparented to the
+/// pid namespace's init and stays a zombie until that init reaps it. In a CI
+/// container init is the Argo executor, which may reap late or never.
+/// `kill(pid, 0)` succeeds on a zombie, so it must not be used to prove a kill
+/// (needle-c586ae9f, needle-ec4c57cc). Same rule as
+/// orphan_reaper::process_alive.
+fn process_is_live(pid: libc::pid_t) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // Format: "<pid> (<comm>) <state> ..."; comm may contain spaces/parens.
+    let state = stat
+        .rfind(')')
+        .and_then(|end| stat[end + 1..].trim_start().chars().next());
+    state != Some('Z')
+}
+
 #[tokio::test]
 async fn dispatch_telemetry_process_contracts_e2e_outer_cancellation_still_kills_process_group() {
     // Regression test for bf-653n7 (the mitosis-evaluation-timeout leak).
@@ -2616,19 +2634,9 @@ async fn dispatch_telemetry_process_contracts_e2e_outer_cancellation_still_kills
     // intermittently in needle-ci for a correctly killed process
     // (needle-c586ae9f). This matches the product's own liveness rule
     // (orphan_reaper::process_alive).
-    let process_alive = |pid: libc::pid_t| -> bool {
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            return false;
-        };
-        // Format: "<pid> (<comm>) <state> ..."; comm may contain spaces/parens.
-        let state = stat
-            .rfind(')')
-            .and_then(|end| stat[end + 1..].trim_start().chars().next());
-        state != Some('Z')
-    };
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let dead = loop {
-        let alive = process_alive(grandchild_pid);
+        let alive = process_is_live(grandchild_pid);
         if !alive {
             break true;
         }
@@ -3137,11 +3145,11 @@ async fn dispatch_telemetry_process_contracts_e2e_timeout_kills_entire_process_g
         .parse()
         .expect("PID file should contain a valid integer PID");
 
-    // Poll until the grandchild is dead or we time out waiting.  SIGKILL
-    // delivery and OS reaping can be slow in container environments.
+    // Poll until the grandchild is dead or we time out waiting. "Dead"
+    // includes a zombie awaiting reap: see process_is_live (needle-ec4c57cc).
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let dead = loop {
-        let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+        let alive = process_is_live(grandchild_pid);
         if !alive {
             break true;
         }
