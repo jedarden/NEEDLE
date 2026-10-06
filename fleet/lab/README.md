@@ -124,6 +124,14 @@ hosts. The slot drops the average to ~0.875 cores/worker against the same
 7-core slice, so it must be reassigned or retired rather than duplicated when
 queue ownership changes again.
 
+On 2026-10-05, `lab-gantry` switched from GLM-5.3-Flash to the existing Codex
+adapter after 39 `max_turns` work failures in 24 hours and repeated upstream
+429/5xx retries. This changes one route, not the worker count or slice budget.
+Compare verified closures per worker-hour after the switch; restore the GLM
+adapter in `workers.tsv` if the alternate route performs worse. The running
+instance picks up the adapter only after its current claim finishes and the
+unit is restarted.
+
 On 2026-09-23, the idle `lab-needle` slot was reassigned to `lab-tgplat` to
 move one build-heavy `tradegraph-platform` route off codinghome without adding
 an eighth lab worker or raising the 7-core slice quota. The retired slot had no
