@@ -719,8 +719,6 @@ async fn extract_committed_state(
     bead_id: &str,
     subject: &GateSubject,
 ) -> Result<PathBuf> {
-    use std::process::Command;
-
     // Name the extraction after the bead. A failing clean gate leaves this
     // directory behind on purpose, and a bare `.tmpXXXXXX` is not something
     // anyone can find later or attribute to a bead.
@@ -753,53 +751,7 @@ async fn extract_committed_state(
     }
 
     // Extract the captured revision, never the moving HEAD reference.
-    let output = Command::new("git")
-        .args(["archive", "--format=tar", subject.revision()])
-        .current_dir(workspace)
-        .output()
-        .context("failed to run git archive")?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "git archive failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    // Extract the tar archive to the temporary directory.
-    //
-    // stdin MUST be piped: without it the child inherits this process's stdin,
-    // `child.stdin` is None, the archive is silently never written, and tar
-    // fails on whatever it reads instead — which is how every `run_in: clean`
-    // gate failed with a bare "tar extraction failed".
-    let mut child = Command::new("tar")
-        .args(["-x", "-f", "-"])
-        .current_dir(extract_dir)
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("failed to spawn tar extraction")?;
-
-    // Write the archive to tar's stdin, then close it so tar sees EOF.
-    {
-        let mut stdin = child
-            .stdin
-            .take()
-            .context("tar extraction stdin was not piped")?;
-        std::io::copy(&mut output.stdout.as_slice(), &mut stdin)
-            .context("failed to write archive to tar")?;
-    }
-
-    let tar_output = child
-        .wait_with_output()
-        .context("failed to wait for tar extraction")?;
-
-    if !tar_output.status.success() {
-        anyhow::bail!(
-            "tar extraction failed: {}",
-            String::from_utf8_lossy(&tar_output.stderr).trim()
-        );
-    }
+    crate::dispatch::extract_git_archive_revision(workspace, subject.revision(), extract_dir)?;
 
     // Keep the temp directory alive by leaking it
     // This is safe because the temporary directory will be cleaned up when the process exits

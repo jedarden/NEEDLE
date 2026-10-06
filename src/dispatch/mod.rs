@@ -150,6 +150,7 @@ mod context_propagation;
 // ──────────────────────────────────────────────────────────────────────────────
 
 mod extraction;
+pub(crate) use extraction::extract_git_archive_revision;
 pub use extraction::{
     cleanup_extraction, extract_clean_workspace, ExtractionConfig, ExtractionResult,
 };

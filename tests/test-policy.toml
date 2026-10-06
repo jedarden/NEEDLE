@@ -299,7 +299,8 @@ version = 1
 # telemetry sink without spawning a worker process.
 # +4 pending-proposal eligibility and distinct-outcome accounting contracts
 # (needle-db86e7d7, needle-14d6a271); pure transforms need no subprocess.
-max_tests = 4093
+# +2 committed-state streaming and stderr-flood regressions (needle-c128a520).
+max_tests = 4095
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -756,6 +757,13 @@ kind = "sleep"
 max_occurrences = 1
 owner = "component:dispatch"
 reason = "The remaining wait proves a deadline timer's observed remaining duration decreases with real time; all external-shell timing contracts live in integration_spawn."
+
+[[unit_exception]]
+path = "src/dispatch/extraction.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-c128a520"
+reason = "A temporary Git repository exercises the real archive-to-tar process boundary, including a stderr flood that previously deadlocked extraction."
 
 [[unit_exception]]
 path = "src/gate_health.rs"

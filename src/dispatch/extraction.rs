@@ -12,7 +12,7 @@
 //! - Cleans up extraction on success, preserves on failure with path in release reason
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
@@ -124,7 +124,7 @@ pub async fn extract_clean_workspace(
     }
 
     // Extract git archive to the temp directory
-    extract_git_archive(workspace, &extraction_dir)?;
+    extract_git_archive_revision(workspace, &current_head, &extraction_dir)?;
 
     tracing::debug!(
         extraction_dir = %extraction_dir.display(),
@@ -203,58 +203,94 @@ fn get_head_sha(workspace: &Path) -> Result<String> {
     Ok(sha)
 }
 
-/// Extract git archive to the target directory.
-///
-/// Runs: `git archive --format=tar HEAD | tar -x -C <target_dir>`
-fn extract_git_archive(workspace: &Path, target_dir: &Path) -> Result<()> {
-    // Create git archive
-    let archive_output = Command::new("git")
-        .args(["archive", "--format=tar", "HEAD"])
+/// Stream a committed tree to tar without holding the archive in NEEDLE's
+/// address space. Both stderr pipes are drained concurrently and capped in
+/// memory, so a noisy child cannot block the archive pipe.
+pub(crate) fn extract_git_archive_revision(
+    workspace: &Path,
+    revision: &str,
+    target_dir: &Path,
+) -> Result<()> {
+    extract_git_archive_with_commands(workspace, revision, target_dir, "git", "tar")
+}
+
+fn extract_git_archive_with_commands(
+    workspace: &Path,
+    revision: &str,
+    target_dir: &Path,
+    git_command: &str,
+    tar_command: &str,
+) -> Result<()> {
+    let mut archive = Command::new(git_command)
+        .args(["archive", "--format=tar", revision])
         .current_dir(workspace)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("failed to run git archive")?;
+    let archive_stdout = archive.stdout.take().expect("git stdout was piped");
+    let archive_stderr = archive.stderr.take().expect("git stderr was piped");
+    let git_diagnostics = std::thread::spawn(move || drain_diagnostics(archive_stderr));
 
-    if !archive_output.status.success() {
-        anyhow::bail!(
-            "git archive failed: {}",
-            String::from_utf8_lossy(&archive_output.stderr)
-        );
-    }
-
-    // Extract the tar archive to the target directory
-    // stdin MUST be piped: without it tar inherits this process's stdin,
-    // `tar_child.stdin` is None, the archive is silently never written, and
-    // tar fails on whatever it reads instead.
-    let mut tar_child = Command::new("tar")
+    let mut tar = match Command::new(tar_command)
         .args(["-x", "-f", "-"])
         .current_dir(target_dir)
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::from(archive_stdout))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .context("failed to spawn tar extraction")?;
-
-    // Write the archive to tar's stdin, then close it so tar sees EOF.
     {
-        let mut stdin = tar_child
-            .stdin
-            .take()
-            .context("tar extraction stdin was not piped")?;
-        std::io::copy(&mut archive_output.stdout.as_slice(), &mut stdin)
-            .context("failed to write archive to tar")?;
+        Ok(child) => child,
+        Err(error) => {
+            let _ = archive.kill();
+            let _ = archive.wait();
+            let _ = git_diagnostics.join();
+            return Err(error).context("failed to spawn tar extraction");
+        }
+    };
+    let tar_stderr = tar.stderr.take().expect("tar stderr was piped");
+    let tar_diagnostics = std::thread::spawn(move || drain_diagnostics(tar_stderr));
+
+    let tar_status = tar.wait();
+    if tar_status.is_err() {
+        let _ = tar.kill();
+        let _ = archive.kill();
+        let _ = tar.wait();
     }
-
-    let tar_output = tar_child
-        .wait_with_output()
-        .context("failed to wait for tar extraction")?;
-
-    if !tar_output.status.success() {
+    let archive_status = archive.wait();
+    let tar_error = tar_diagnostics.join().unwrap_or_default();
+    let git_error = git_diagnostics.join().unwrap_or_default();
+    let tar_status = tar_status.context("failed to wait for tar extraction")?;
+    let archive_status = archive_status.context("failed to wait for git archive")?;
+    if !tar_status.success() {
         anyhow::bail!(
             "tar extraction failed: {}",
-            String::from_utf8_lossy(&tar_output.stderr).trim()
+            String::from_utf8_lossy(&tar_error).trim()
         );
     }
-
+    if !archive_status.success() {
+        anyhow::bail!(
+            "git archive failed: {}",
+            String::from_utf8_lossy(&git_error).trim()
+        );
+    }
     Ok(())
+}
+
+fn drain_diagnostics(mut stderr: impl std::io::Read) -> Vec<u8> {
+    const MAX_DIAGNOSTICS: usize = 4096;
+    let mut prefix = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match stderr.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                let keep = count.min(MAX_DIAGNOSTICS - prefix.len());
+                prefix.extend_from_slice(&chunk[..keep]);
+            }
+        }
+    }
+    prefix
 }
 
 /// Get the default scratch base directory (`$HOME/scratch`).
@@ -296,6 +332,80 @@ pub async fn cleanup_extraction(extraction_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn committed_workspace() -> tempfile::TempDir {
+        let workspace = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        std::fs::write(workspace.path().join("committed.txt"), "committed\n").unwrap();
+        run(&["add", "committed.txt"]);
+        run(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ]);
+        workspace
+    }
+
+    #[test]
+    fn archive_stream_extracts_only_the_captured_revision() {
+        let workspace = committed_workspace();
+        let revision = get_head_sha(workspace.path()).unwrap();
+        std::fs::write(workspace.path().join("committed.txt"), "uncommitted\n").unwrap();
+        std::fs::write(workspace.path().join("untracked.txt"), "untracked\n").unwrap();
+        let target = tempfile::tempdir().unwrap();
+
+        extract_git_archive_revision(workspace.path(), &revision, target.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.path().join("committed.txt")).unwrap(),
+            "committed\n"
+        );
+        assert!(!target.path().join("untracked.txt").exists());
+        assert!(!target.path().join(".git").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn noisy_tar_failure_does_not_block_archive_and_caps_diagnostics() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = committed_workspace();
+        let target = tempfile::tempdir().unwrap();
+        let fake_tar = target.path().join("noisy-tar.sh");
+        std::fs::write(
+            &fake_tar,
+            "#!/bin/sh\nhead -c 131072 /dev/zero >&2\nexit 17\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_tar, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let start = std::time::Instant::now();
+        let error = extract_git_archive_with_commands(
+            workspace.path(),
+            "HEAD",
+            target.path(),
+            "git",
+            fake_tar.to_str().unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.starts_with("tar extraction failed:"), "{error}");
+        assert!(error.len() <= 4200, "diagnostics were unbounded");
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
 
     #[test]
     fn test_sanitize_filename() {
