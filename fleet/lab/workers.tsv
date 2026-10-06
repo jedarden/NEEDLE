@@ -8,9 +8,9 @@
 #   start_delay     NEEDLE_START_DELAY seconds; spreads launches after reboot/mass restart
 #   explore         NEEDLE_STRANDS__EXPLORE__ENABLED (false pins the scan root away from $HOME)
 #
-# Seven baseline workers plus one Codex queue-owner slot share the 7-core
-# fleet slice. This preserves the existing eight-worker ceiling while moving
-# that Codex slot between products. Do not grow the fleet past this manifest
+# Eight workers, including two Codex routes, share the 7-core fleet slice.
+# The gantry route avoids the degraded GLM provider while retaining the
+# existing eight-worker ceiling. Do not grow the fleet past this manifest
 # without raising CPUQuota deliberately.
 #
 # Secret-bearing configuration deliberately stays OFF this host-copy list:
@@ -21,7 +21,7 @@
 lab-beadrs	/home/coding/bead-rs	claude-code-glm-5.3-flash	15	false
 lab-tgplat	/home/coding/tradegraph-platform	claude-code-glm-5.3-flash	30	false
 lab-drawrace-public	/home/coding/drawrace	claude-code-glm-5.3-flash	60	false
-lab-gantry	/home/coding/gantry-rs	claude-code-glm-5.3-flash	75	false
+lab-gantry	/home/coding/gantry-rs	codex-gpt-5.6-luna-xhigh	75	false
 lab-miroir	/home/coding/miroir	claude-code-glm-5.3-flash	90	false
 lab-pdftract-php	/home/coding/pdftract-php	claude-code-glm-5.3-flash	120	false
 lab-pdftract-swift	/home/coding/pdftract-swift	claude-code-glm-5.3-flash	150	false
