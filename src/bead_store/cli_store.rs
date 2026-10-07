@@ -161,6 +161,7 @@ pub struct CliBeadStore {
     claim_capabilities: ClaimCapabilities,
     /// Whether `bead resolve` (attempt-outcome-v1) is available.
     attempt_outcome_supported: bool,
+    atomic_resolution_supported: bool,
     /// Whether the selected runtime advertised the bead-rs manifest command.
     /// A descriptor may require an atomic split while an older binary still
     /// resolves; that combination must fail closed at split time.
@@ -194,6 +195,7 @@ impl CliBeadStore {
             claim_tokens: std::sync::Mutex::new(HashMap::new()),
             claim_capabilities: ClaimCapabilities::default(),
             attempt_outcome_supported: false,
+            atomic_resolution_supported: false,
             manifest_supported,
             process_runner: std::sync::Arc::new(TokioProcessRunner),
         })
@@ -218,6 +220,11 @@ impl CliBeadStore {
     /// `resolve` command, and NEEDLE must not fail an attempt over it.
     pub fn with_attempt_outcome_support(mut self, supported: bool) -> Self {
         self.attempt_outcome_supported = supported;
+        self
+    }
+
+    pub fn with_atomic_resolution_support(mut self, supported: bool) -> Self {
+        self.atomic_resolution_supported = supported;
         self
     }
 
@@ -814,6 +821,7 @@ impl BeadStore for CliBeadStore {
             "transactional_batch": self.backend.capabilities.transactional_batch,
             "velocity_metadata": self.backend.capabilities.velocity_metadata,
             "attempt_resolution": self.attempt_outcome_supported,
+            "atomic_resolution": self.atomic_resolution_supported,
             "manifest": self.manifest_supported,
             "claim_handle": {
                 "fenced_claim": self.claim_capabilities.fenced_claim,
@@ -1085,6 +1093,7 @@ impl BeadStore for CliBeadStore {
             ("id", resolution.bead_id.to_string()),
             ("attempt_id", resolution.attempt_id.clone()),
             ("outcome", resolution.outcome.clone()),
+            ("resolve_action", "none".to_string()),
             ("actor", resolution.actor.clone()),
             (
                 "resolve_reason",
@@ -1584,6 +1593,7 @@ impl BeadStore for CliBeadStore {
             ("id", resolution.bead_id.to_string()),
             ("attempt_id", resolution.attempt_id.clone()),
             ("outcome", resolution.outcome.clone()),
+            ("resolve_action", "none".to_string()),
             ("actor", resolution.actor.clone()),
             (
                 "resolve_reason",
@@ -1621,6 +1631,81 @@ impl BeadStore for CliBeadStore {
                     .get("is_replay")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
+            }),
+        ))
+    }
+
+    async fn resolve_lifecycle_claim(
+        &self,
+        handle: &ClaimHandle,
+        resolution: &super::AttemptResolution,
+        action: super::ResolutionAction,
+    ) -> Result<(ClaimMutationResult, Option<super::ResolveReceipt>)> {
+        if !self.atomic_resolution_supported || !self.attempt_outcome_supported {
+            return Ok((ClaimMutationResult::Unsupported, None));
+        }
+        if resolution.bead_id != handle.bead_id || !handle.is_protected() {
+            return Ok((ClaimMutationResult::Unsupported, None));
+        }
+        let (Some(credential), Some(revision)) =
+            (handle.fencing_credential(), handle.current_revision)
+        else {
+            return Ok((ClaimMutationResult::Unsupported, None));
+        };
+        if !self.claim_capabilities.fully_fenced() || self.operation("resolve_fenced").is_err() {
+            return Ok((ClaimMutationResult::Unsupported, None));
+        }
+        let values = HashMap::from([
+            ("id", resolution.bead_id.to_string()),
+            ("attempt_id", resolution.attempt_id.clone()),
+            ("outcome", resolution.outcome.clone()),
+            ("resolve_action", action.as_str().to_string()),
+            ("actor", resolution.actor.clone()),
+            (
+                "resolve_reason",
+                resolution.reason.clone().unwrap_or_default(),
+            ),
+            (
+                "evidence_ref",
+                resolution.evidence_ref.clone().unwrap_or_default(),
+            ),
+            ("if_revision", revision.to_string()),
+        ]);
+        let output = match self
+            .run_operation_with_fencing_stdin("resolve_fenced", &values, credential.expose())
+            .await
+        {
+            Ok(output) => output,
+            Err(error) if operation_failed_with(&error, "resolve_fenced", 4) => {
+                return Ok((ClaimMutationResult::LostOwnership, None));
+            }
+            Err(error) => return Err(error),
+        };
+        let value: serde_json::Value = serde_json::from_str(output.trim())
+            .context("atomic resolution returned non-JSON output")?;
+        let receipt_id = value
+            .get("receipt_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .context("atomic resolution omitted receipt_id")?;
+        let resulting_state = value
+            .get("resulting_state")
+            .and_then(serde_json::Value::as_str)
+            .context("atomic resolution omitted resulting_state")?;
+        let is_replay = value
+            .get("is_replay")
+            .and_then(serde_json::Value::as_bool)
+            .context("atomic resolution omitted is_replay")?;
+        Ok((
+            ClaimMutationResult::Applied,
+            Some(super::ResolveReceipt {
+                receipt_id: receipt_id.to_string(),
+                resulting_state: Some(resulting_state.to_string()),
+                resulting_attempt_tier: value
+                    .get("resulting_attempt_tier")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|tier| tier as u32),
+                is_replay,
             }),
         ))
     }
@@ -2895,6 +2980,78 @@ mod process_runner_tests {
                 Some(b"stale-opaque-credential\n".as_slice())
             );
         }
+        advertised_atomic_resolve_uses_action_and_stdin_fence().await;
+    }
+
+    async fn advertised_atomic_resolve_uses_action_and_stdin_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(
+            r#"{"receipt_id":"receipt-1","resulting_state":"closed","is_replay":false}"#
+                .as_bytes()
+                .to_vec(),
+        ));
+        let capabilities = ClaimCapabilities {
+            fenced_claim: true,
+            renewable_lease: true,
+            guarded_mutations: true,
+            credential_stdin: true,
+        };
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner.clone())
+        .with_claim_capabilities(capabilities.clone())
+        .with_attempt_outcome_support(true)
+        .with_atomic_resolution_support(true);
+        let handle = ClaimHandle::fenced(
+            BeadId::from("needle-atomic"),
+            "workspace-sha256".to_string(),
+            "worker-a".to_string(),
+            Some(11),
+            Some(3),
+            "opaque-secret".to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(60),
+            capabilities,
+        );
+        let resolution = super::super::AttemptResolution {
+            bead_id: handle.bead_id.clone(),
+            attempt_id: "attempt-1".to_string(),
+            outcome: "verified_success".to_string(),
+            actor: "worker-a".to_string(),
+            reason: Some("verified".to_string()),
+            evidence_ref: Some("commit:abc".to_string()),
+        };
+        let (mutation, receipt) = store
+            .resolve_lifecycle_claim(&handle, &resolution, super::super::ResolutionAction::Close)
+            .await
+            .unwrap();
+        assert_eq!(mutation, ClaimMutationResult::Applied);
+        assert_eq!(receipt.unwrap().resulting_state.as_deref(), Some("closed"));
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        let args = requests[0].arguments();
+        assert!(args.windows(2).any(|pair| pair == ["--action", "close"]));
+        assert!(args.windows(2).any(|pair| pair == ["--if-revision", "11"]));
+        assert!(args
+            .iter()
+            .all(|argument| argument.to_string_lossy() != "opaque-secret"));
+        assert_eq!(
+            requests[0].standard_input(),
+            Some(b"opaque-secret\n".as_slice())
+        );
     }
 }
 
@@ -3286,6 +3443,7 @@ mod tests {
             ("id", "needle-1".to_string()),
             ("attempt_id", "0192-attempt".to_string()),
             ("outcome", "work_failure".to_string()),
+            ("resolve_action", "none".to_string()),
             ("actor", "needle-alpha".to_string()),
             ("resolve_reason", String::new()),
             ("evidence_ref", String::new()),
@@ -3312,6 +3470,7 @@ mod tests {
             ("id", "needle-1".to_string()),
             ("attempt_id", "0192-attempt".to_string()),
             ("outcome", "verified_success".to_string()),
+            ("resolve_action", "none".to_string()),
             ("actor", "needle-alpha".to_string()),
             ("resolve_reason", String::new()),
             ("evidence_ref", "commit:abc123".to_string()),

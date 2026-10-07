@@ -34,6 +34,7 @@
 
 pub mod evidence;
 pub mod executor;
+pub mod reducer;
 
 use std::fmt;
 use std::time::Duration;

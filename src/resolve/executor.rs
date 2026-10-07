@@ -48,16 +48,36 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{AttemptResolution, BeadStore, ClaimMutationResult, ResolutionAction};
+use crate::claim::ClaimHandle;
 use crate::config::Config;
 use crate::mitosis::MitosisEvaluator;
 use crate::outcome::OutcomeHandler;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadStatus};
 use crate::validation::predispatch;
+use crate::validation::resolution::{self as gate_resolution, GateVerdict};
 use crate::validation::verify_shipped_work;
 
+use super::evidence::EvidenceBundle;
+use super::reducer::{self, ResolutionFacts, ResolutionPolicy, ResolutionProposal};
 use super::ResolveDecision;
+
+/// Dispatch facts retained across the resolver and lifecycle applier.
+pub struct ResolutionObservation<'a> {
+    pub evidence: &'a EvidenceBundle,
+    pub exit_code: i32,
+    pub interrupted: bool,
+    pub attempt_id: &'a str,
+    pub claim_handle: Option<&'a ClaimHandle>,
+}
+
+struct AtomicSimple<'a> {
+    action: ResolutionAction,
+    outcome: &'a str,
+    reason: String,
+    applied: AppliedDecision,
+}
 
 /// How long any single store operation may take before the executor stops
 /// waiting and treats it as failed. Mirrors the outcome handler's op timeout:
@@ -74,6 +94,10 @@ const MAX_NOTE_CHARS: usize = 400;
 pub enum AppliedDecision {
     /// Gates and shipped-work verification passed; the bead was closed.
     Completed,
+    /// A replay observed an already closed bead; no new completion occurred.
+    AlreadyClosed,
+    /// The backend returned the original receipt for this attempt.
+    Replayed,
     /// The bead was released back to the ready frontier.
     Released(ReleaseCause),
     /// The concrete prerequisite was recorded and the bead was blocked.
@@ -96,6 +120,8 @@ impl AppliedDecision {
     pub fn as_str(&self) -> &'static str {
         match self {
             AppliedDecision::Completed => "completed",
+            AppliedDecision::AlreadyClosed => "already_closed",
+            AppliedDecision::Replayed => "replayed",
             AppliedDecision::Released(_) => "released",
             AppliedDecision::Blocked => "blocked",
             AppliedDecision::Split { .. } => "split",
@@ -197,6 +223,21 @@ impl DecisionExecutor {
         actor: &str,
         fallback: Option<&predispatch::PreDispatch>,
     ) -> Result<AppliedDecision> {
+        self.apply_observed(store, bead, decision, actor, fallback, None)
+            .await
+    }
+
+    /// Apply with the process evidence and retained fencing handle from this
+    /// dispatch. Production post-Pluck resolution uses this path.
+    pub async fn apply_observed(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        decision: &ResolveDecision,
+        actor: &str,
+        fallback: Option<&predispatch::PreDispatch>,
+        observation: Option<&ResolutionObservation<'_>>,
+    ) -> Result<AppliedDecision> {
         // Defensive re-check of the resolver's own validation. The contract
         // says only validated decisions reach this point; refusing here keeps
         // a malformed decision from driving any mutation.
@@ -206,17 +247,136 @@ impl DecisionExecutor {
                 .await);
         }
 
+        if let Some(observation) = observation {
+            let claim = self
+                .op(store.claim_status(&bead.id), "claim_status")
+                .await?;
+            let (expected_revision, expected_epoch) = observation
+                .claim_handle
+                .map(|handle| (handle.current_revision, handle.claim_epoch))
+                .unwrap_or((None, None));
+            let proposal = reducer::reduce(&ResolutionFacts {
+                bead,
+                claim: &claim,
+                actor,
+                expected_revision,
+                expected_epoch,
+                evidence: Some(observation.evidence),
+                gates: GateVerdict::Pending,
+                // Complete is reduced again after real gate and shipped-work
+                // verdicts below. This preflight screens malformed evidence,
+                // crashes and ownership before any decision writes.
+                work_accepted: false,
+                decision: Some(decision),
+                exit_code: observation.exit_code,
+                interrupted: observation.interrupted,
+                policy: ResolutionPolicy::default(),
+            });
+            match proposal {
+                ResolutionProposal::OwnershipLost => return Ok(AppliedDecision::OwnershipLost),
+                ResolutionProposal::AdmissionFailure => {
+                    return Err(self
+                        .fail_safely(
+                            store,
+                            bead,
+                            actor,
+                            "resolution evidence",
+                            anyhow::anyhow!("resolution evidence was not accepted"),
+                        )
+                        .await);
+                }
+                ResolutionProposal::Release
+                    if observation.interrupted || observation.exit_code < 0 =>
+                {
+                    return self
+                        .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                        .await
+                        .map(|released| {
+                            if released {
+                                AppliedDecision::Released(ReleaseCause::Unverifiable)
+                            } else {
+                                AppliedDecision::OwnershipLost
+                            }
+                        });
+                }
+                ResolutionProposal::VerifyThenComplete
+                | ResolutionProposal::Complete
+                | ResolutionProposal::Release
+                | ResolutionProposal::Quarantine
+                | ResolutionProposal::Block
+                | ResolutionProposal::Split => {}
+            }
+        }
+
+        let atomic = store
+            .negotiated_capabilities()
+            .and_then(|capabilities| {
+                capabilities
+                    .get("atomic_resolution")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false);
         let applied = match decision {
             ResolveDecision::Complete {
                 evidence,
                 commit_message,
             } => {
-                self.apply_complete(store, bead, actor, evidence, commit_message, fallback)
-                    .await
+                self.apply_complete(
+                    store,
+                    bead,
+                    actor,
+                    (evidence, commit_message),
+                    fallback,
+                    observation,
+                )
+                .await
+            }
+            ResolveDecision::Retry { evidence, strategy } if atomic => {
+                self.apply_atomic_simple(
+                    store,
+                    bead,
+                    actor,
+                    observation,
+                    AtomicSimple {
+                        action: ResolutionAction::Release,
+                        outcome: "work_failure",
+                        reason: format!(
+                            "resolve retry ({}): {}",
+                            concise(strategy, 120),
+                            concise(evidence, MAX_NOTE_CHARS)
+                        ),
+                        applied: AppliedDecision::Released(ReleaseCause::Retry),
+                    },
+                )
+                .await
             }
             ResolveDecision::Retry { evidence, strategy } => {
                 self.apply_retry(store, bead, actor, evidence, strategy)
                     .await
+            }
+            ResolveDecision::Blocked {
+                evidence,
+                blocker_type,
+                description,
+            } if atomic => {
+                self.apply_atomic_simple(
+                    store,
+                    bead,
+                    actor,
+                    observation,
+                    AtomicSimple {
+                        action: ResolutionAction::Block,
+                        outcome: "indeterminate",
+                        reason: format!(
+                            "resolve blocked on {}: {} (evidence: {})",
+                            concise(blocker_type, 80),
+                            concise(description, MAX_NOTE_CHARS),
+                            concise(evidence, MAX_NOTE_CHARS)
+                        ),
+                        applied: AppliedDecision::Blocked,
+                    },
+                )
+                .await
             }
             ResolveDecision::Blocked {
                 evidence,
@@ -237,7 +397,38 @@ impl DecisionExecutor {
         };
 
         match applied {
-            Ok(applied) => {
+            Ok(mut applied) => {
+                // Every compatibility sequence is followed by an immediate
+                // authoritative read. A backend may report success after a
+                // partial or no-op mutation; that is never a completed action.
+                if !matches!(applied, AppliedDecision::OwnershipLost) {
+                    let current = self
+                        .op(store.show(&bead.id), "show after resolution")
+                        .await?;
+                    let reconciled = match &applied {
+                        AppliedDecision::Completed | AppliedDecision::AlreadyClosed => {
+                            current.status.is_done()
+                        }
+                        AppliedDecision::Released(_) => current.status == BeadStatus::Open,
+                        AppliedDecision::Blocked | AppliedDecision::Split { .. } => {
+                            matches!(current.status, BeadStatus::Blocked | BeadStatus::Deferred)
+                        }
+                        AppliedDecision::Replayed | AppliedDecision::OwnershipLost => true,
+                    };
+                    if !reconciled {
+                        applied = self
+                            .mutation_failure(
+                                store,
+                                bead,
+                                actor,
+                                "resolution postcondition",
+                                anyhow::anyhow!(
+                                    "applied decision did not reach its required state"
+                                ),
+                            )
+                            .await?;
+                    }
+                }
                 // One terminal row per applied decision: what the resolver
                 // asked, what the lifecycle did.
                 let _ = self.telemetry.emit(
@@ -254,6 +445,122 @@ impl DecisionExecutor {
         }
     }
 
+    /// Atomic backend transition for a resolver retry or external block.
+    /// The reason is carried in the same transaction as the lifecycle effect;
+    /// no preliminary note or label update can invalidate the retained fence.
+    async fn apply_atomic_simple(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        actor: &str,
+        observation: Option<&ResolutionObservation<'_>>,
+        request: AtomicSimple<'_>,
+    ) -> Result<AppliedDecision> {
+        if !self.ensure_owned(store, &bead.id, actor).await? {
+            return Ok(AppliedDecision::OwnershipLost);
+        }
+        let Some(observation) = observation else {
+            return self
+                .mutation_failure(
+                    store,
+                    bead,
+                    actor,
+                    "atomic resolution missing observation",
+                    anyhow::anyhow!("atomic resolution needs dispatch evidence"),
+                )
+                .await;
+        };
+        let Some(handle) = observation.claim_handle else {
+            return self
+                .mutation_failure(
+                    store,
+                    bead,
+                    actor,
+                    "atomic resolution missing claim handle",
+                    anyhow::anyhow!("atomic resolution needs a retained claim handle"),
+                )
+                .await;
+        };
+        let resolution = AttemptResolution {
+            bead_id: bead.id.clone(),
+            attempt_id: observation.attempt_id.to_string(),
+            outcome: request.outcome.to_string(),
+            actor: actor.to_string(),
+            reason: Some(request.reason),
+            evidence_ref: observation
+                .evidence
+                .commits
+                .first()
+                .map(|commit| format!("commit:{}", commit.sha)),
+        };
+        let receipt = match self
+            .op(
+                store.resolve_lifecycle_claim(handle, &resolution, request.action),
+                "resolve_lifecycle_claim",
+            )
+            .await
+        {
+            Ok((ClaimMutationResult::Applied, Some(receipt))) => receipt,
+            Ok((ClaimMutationResult::LostOwnership, _)) => {
+                return Ok(AppliedDecision::OwnershipLost)
+            }
+            Ok((ClaimMutationResult::Unsupported, _))
+            | Ok((ClaimMutationResult::Applied, None)) => {
+                return self
+                    .mutation_failure(
+                        store,
+                        bead,
+                        actor,
+                        "atomic resolution unavailable",
+                        anyhow::anyhow!("advertised atomic resolution did not apply"),
+                    )
+                    .await;
+            }
+            Err(error) => {
+                return self
+                    .mutation_failure(store, bead, actor, "atomic resolution", error)
+                    .await;
+            }
+        };
+        let current = self
+            .op(store.show(&bead.id), "show after atomic resolution")
+            .await?;
+        let expected = match request.action {
+            ResolutionAction::Release => current.status == BeadStatus::Open,
+            ResolutionAction::Block => {
+                matches!(current.status, BeadStatus::Blocked | BeadStatus::Deferred)
+            }
+            ResolutionAction::Close => current.status.is_done(),
+            ResolutionAction::Quarantine => current.status == BeadStatus::Deferred,
+        };
+        if !expected {
+            return self
+                .mutation_failure(
+                    store,
+                    bead,
+                    actor,
+                    "atomic resolution postcondition",
+                    anyhow::anyhow!("atomic receipt did not match live bead state"),
+                )
+                .await;
+        }
+        self.op(store.flush(), "flush after atomic resolution")
+            .await?;
+        if receipt.is_replay {
+            return Ok(AppliedDecision::Replayed);
+        }
+        if matches!(request.action, ResolutionAction::Release) {
+            let _ = self.telemetry.emit(
+                EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: "retry".to_string(),
+                },
+                Utc::now(),
+            );
+        }
+        Ok(request.applied)
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // complete
     // ──────────────────────────────────────────────────────────────────────
@@ -265,10 +572,11 @@ impl DecisionExecutor {
         store: &dyn BeadStore,
         bead: &Bead,
         actor: &str,
-        evidence: &str,
-        commit_message: &str,
+        completion: (&str, &str),
         fallback: Option<&predispatch::PreDispatch>,
+        observation: Option<&ResolutionObservation<'_>>,
     ) -> Result<AppliedDecision> {
+        let (evidence, commit_message) = completion;
         if !self.ensure_owned(store, &bead.id, actor).await? {
             return Ok(AppliedDecision::OwnershipLost);
         }
@@ -299,6 +607,7 @@ impl DecisionExecutor {
                         .await;
                 }
             };
+        let gate_verdict = gate_resolution::verdict(verified, gate_report.as_ref());
         if let Some(report) = gate_report.as_ref().filter(|report| !report.all_passed) {
             if report.results.iter().any(|(_, r)| r.is_execution_error()) {
                 // A gate that could not run is not a gate that failed
@@ -402,6 +711,51 @@ impl DecisionExecutor {
             );
         }
 
+        if let Some(observation) = observation {
+            let claim = self
+                .op(store.claim_status(&bead.id), "claim_status before close")
+                .await?;
+            let (expected_revision, expected_epoch) = observation
+                .claim_handle
+                .map(|handle| (handle.current_revision, handle.claim_epoch))
+                .unwrap_or((None, None));
+            match reducer::reduce(&ResolutionFacts {
+                bead: &current,
+                claim: &claim,
+                actor,
+                expected_revision,
+                expected_epoch,
+                evidence: Some(observation.evidence),
+                gates: gate_verdict,
+                work_accepted: shipped_verified || !self.enforce_shipped_work,
+                decision: Some(&ResolveDecision::Complete {
+                    evidence: evidence.to_string(),
+                    commit_message: commit_message.to_string(),
+                }),
+                exit_code: observation.exit_code,
+                interrupted: observation.interrupted,
+                policy: ResolutionPolicy {
+                    allow_unshipped_completion: !self.enforce_shipped_work,
+                    ..ResolutionPolicy::default()
+                },
+            }) {
+                ResolutionProposal::Complete => {}
+                ResolutionProposal::OwnershipLost => return Ok(AppliedDecision::OwnershipLost),
+                _ => {
+                    return self
+                        .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                        .await
+                        .map(|released| {
+                            if released {
+                                AppliedDecision::Released(ReleaseCause::Unverifiable)
+                            } else {
+                                AppliedDecision::OwnershipLost
+                            }
+                        });
+                }
+            }
+        }
+
         // Ownership once more, immediately before the close: everything above
         // is read-only, this is the mutation a stale dispatch must not make.
         if !self.ensure_owned(store, &bead.id, actor).await? {
@@ -411,8 +765,120 @@ impl DecisionExecutor {
             "closed by NEEDLE resolve: {}",
             concise(commit_message, MAX_NOTE_CHARS)
         );
-        match self.op(store.close(&bead.id, &reason), "close").await {
-            Ok(_) => {
+        let atomic = store
+            .negotiated_capabilities()
+            .and_then(|capabilities| {
+                capabilities
+                    .get("atomic_resolution")
+                    .and_then(|value| value.as_bool())
+            })
+            .unwrap_or(false);
+        let close_result = if atomic {
+            let Some(observation) = observation else {
+                return self
+                    .mutation_failure(
+                        store,
+                        bead,
+                        actor,
+                        "atomic resolution missing observation",
+                        anyhow::anyhow!("atomic resolution needs dispatch evidence"),
+                    )
+                    .await;
+            };
+            let Some(handle) = observation.claim_handle else {
+                return self
+                    .mutation_failure(
+                        store,
+                        bead,
+                        actor,
+                        "atomic resolution missing claim handle",
+                        anyhow::anyhow!("atomic resolution needs a retained claim handle"),
+                    )
+                    .await;
+            };
+            let resolution = AttemptResolution {
+                bead_id: bead.id.clone(),
+                attempt_id: observation.attempt_id.to_string(),
+                outcome: "verified_success".to_string(),
+                actor: actor.to_string(),
+                reason: Some(reason.clone()),
+                evidence_ref: observation
+                    .evidence
+                    .commits
+                    .first()
+                    .map(|commit| format!("commit:{}", commit.sha)),
+            };
+            match self
+                .op(
+                    store.resolve_lifecycle_claim(handle, &resolution, ResolutionAction::Close),
+                    "resolve_lifecycle_claim",
+                )
+                .await
+            {
+                Ok((ClaimMutationResult::Applied, Some(receipt))) => Ok(receipt.is_replay),
+                Ok((ClaimMutationResult::LostOwnership, _)) => {
+                    return Ok(AppliedDecision::OwnershipLost)
+                }
+                Ok((ClaimMutationResult::Unsupported, _))
+                | Ok((ClaimMutationResult::Applied, None)) => {
+                    return self
+                        .mutation_failure(
+                            store,
+                            bead,
+                            actor,
+                            "atomic resolution unavailable",
+                            anyhow::anyhow!("advertised atomic resolution did not apply"),
+                        )
+                        .await;
+                }
+                Err(error) => Err(error),
+            }
+        } else if let Some(handle) = observation.and_then(|observation| observation.claim_handle) {
+            match self
+                .op(store.close_claim(handle, &reason), "close_claim")
+                .await
+            {
+                Ok(ClaimMutationResult::Applied) => Ok(false),
+                Ok(ClaimMutationResult::LostOwnership) => {
+                    return Ok(AppliedDecision::OwnershipLost)
+                }
+                Ok(ClaimMutationResult::Unsupported) => {
+                    return self
+                        .mutation_failure(
+                            store,
+                            bead,
+                            actor,
+                            "close_claim unsupported",
+                            anyhow::anyhow!("protected close was unavailable"),
+                        )
+                        .await;
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            self.op(store.close(&bead.id, &reason), "close")
+                .await
+                .map(|_| false)
+        };
+        match close_result {
+            Ok(replay) => {
+                // A successful command is not proof of a lifecycle change.
+                // Re-read immediately, including on an identical replay.
+                let closed = self.op(store.show(&bead.id), "show after close").await?;
+                if !closed.status.is_done() || replay {
+                    return if replay && closed.status.is_done() {
+                        Ok(AppliedDecision::AlreadyClosed)
+                    } else {
+                        self.mutation_failure(
+                            store,
+                            bead,
+                            actor,
+                            "close postcondition",
+                            anyhow::anyhow!("close did not produce a confirmed closed bead"),
+                        )
+                        .await
+                    };
+                }
                 tracing::info!(
                     bead_id = %bead.id,
                     evidence = %concise(evidence, 120),
@@ -424,13 +890,6 @@ impl DecisionExecutor {
                 if shipped_verified {
                     let _ = self.outcome.reset_failure_count(store, bead).await;
                 }
-                let _ = self.telemetry.emit(
-                    EventKind::BeadCompleted {
-                        bead_id: bead.id.clone(),
-                        duration_ms: 0,
-                    },
-                    Utc::now(),
-                );
                 if let Err(error) = self.op(store.flush(), "flush").await {
                     store.pause_workspace(format!(
                         "checkpoint publication failed after resolve close: {error:#}"
@@ -440,6 +899,13 @@ impl DecisionExecutor {
                          unverified",
                     ));
                 }
+                let _ = self.telemetry.emit(
+                    EventKind::BeadCompleted {
+                        bead_id: bead.id.clone(),
+                        duration_ms: 0,
+                    },
+                    Utc::now(),
+                );
                 Ok(AppliedDecision::Completed)
             }
             Err(error) => {
@@ -738,6 +1204,14 @@ impl DecisionExecutor {
         }
         match self.op(store.release(&bead.id), "release").await {
             Ok(_) => {
+                let current = self.op(store.show(&bead.id), "show after release").await?;
+                if current.status != BeadStatus::Open {
+                    anyhow::bail!(
+                        "resolve: release of {} returned success but the live bead is {}",
+                        bead.id,
+                        current.status
+                    );
+                }
                 tracing::info!(
                     bead_id = %bead.id,
                     cause = %cause.as_str(),
@@ -942,6 +1416,10 @@ mod tests {
         fail_release: bool,
         fail_block: bool,
         fail_close: bool,
+        noop_close: bool,
+        atomic_resolution_supported: bool,
+        atomic_replay: bool,
+        atomic_calls: AtomicUsize,
         /// `create_bead` fails once this many children already exist.
         fail_create_after: Option<usize>,
         /// A *parent* `add_label` fails once this many parent labels have
@@ -998,6 +1476,10 @@ mod tests {
                 fail_release: false,
                 fail_block: false,
                 fail_close: false,
+                noop_close: false,
+                atomic_resolution_supported: false,
+                atomic_replay: false,
+                atomic_calls: AtomicUsize::new(0),
                 fail_create_after: None,
                 fail_parent_label_after: None,
                 armed_failure: StateMutex::new(None),
@@ -1046,6 +1528,17 @@ mod tests {
 
         fn with_stored_notes(mut self, notes: &str) -> Self {
             self.stored_notes = notes.to_string();
+            self
+        }
+
+        fn with_noop_close(mut self) -> Self {
+            self.noop_close = true;
+            self
+        }
+
+        fn with_atomic_resolution(mut self, replay: bool) -> Self {
+            self.atomic_resolution_supported = true;
+            self.atomic_replay = replay;
             self
         }
 
@@ -1154,6 +1647,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for RecordingStore {
+        fn negotiated_capabilities(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({"atomic_resolution": self.atomic_resolution_supported}))
+        }
+
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             Ok(vec![])
         }
@@ -1187,9 +1684,40 @@ mod tests {
             Ok(crate::types::ClaimStatus {
                 status: claim.status.clone(),
                 assignee: claim.assignee.clone(),
-                revision: None,
-                claim_epoch: None,
+                revision: self.atomic_resolution_supported.then_some(7),
+                claim_epoch: self.atomic_resolution_supported.then_some(3),
             })
+        }
+        async fn resolve_lifecycle_claim(
+            &self,
+            handle: &ClaimHandle,
+            resolution: &AttemptResolution,
+            action: ResolutionAction,
+        ) -> Result<(
+            ClaimMutationResult,
+            Option<crate::bead_store::ResolveReceipt>,
+        )> {
+            assert!(self.atomic_resolution_supported);
+            assert_eq!(handle.current_revision, Some(7));
+            assert_eq!(resolution.bead_id, handle.bead_id);
+            self.atomic_calls.fetch_add(1, Ordering::SeqCst);
+            let mut claim = self.claim.lock().unwrap();
+            claim.status = match action {
+                ResolutionAction::Close => BeadStatus::Done,
+                ResolutionAction::Release => BeadStatus::Open,
+                ResolutionAction::Block => BeadStatus::Blocked,
+                ResolutionAction::Quarantine => BeadStatus::Deferred,
+            };
+            claim.assignee = None;
+            Ok((
+                ClaimMutationResult::Applied,
+                Some(crate::bead_store::ResolveReceipt {
+                    receipt_id: "receipt-1".to_string(),
+                    resulting_state: Some(claim.status.to_string()),
+                    resulting_attempt_tier: None,
+                    is_replay: self.atomic_replay,
+                }),
+            ))
         }
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             anyhow::bail!("not used")
@@ -1240,6 +1768,9 @@ mod tests {
                 anyhow::bail!("close failed (injected)");
             }
             self.closes.lock().unwrap().push(reason.to_string());
+            if self.noop_close {
+                return Ok(());
+            }
             let mut claim = self.claim.lock().unwrap();
             claim.status = BeadStatus::Done;
             Ok(())
@@ -1399,6 +1930,178 @@ mod tests {
         assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "nothing blocked");
 
         complete_verified_success_resets_failure_accounting().await;
+        compatibility_close_must_change_authoritative_state().await;
+        advertised_atomic_resolution_closes_once_and_replay_is_not_completion().await;
+        stale_revision_refuses_atomic_resolution().await;
+        crate::resolve::reducer::test_contracts::complete_requires_authoritative_work_and_gate_acceptance();
+        crate::resolve::reducer::test_contracts::stale_fence_crash_and_split_mismatch_fail_quiet();
+        assert_eq!(
+            gate_resolution::verdict(false, None),
+            GateVerdict::Unavailable
+        );
+    }
+
+    async fn compatibility_close_must_change_authoritative_state() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .with_noop_close();
+        let applied = apply(&executor(), &store, &complete_decision())
+            .await
+            .expect("a no-op close should be recovered by release");
+        assert_eq!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::MutationFailed)
+        );
+        assert_eq!(store.released(), 1);
+        assert_eq!(
+            store.show(&store.bead().id).await.unwrap().status,
+            BeadStatus::Open
+        );
+    }
+
+    fn protected_handle(bead: &Bead, revision: u64) -> ClaimHandle {
+        crate::claim::ClaimHandle::fenced(
+            bead.id.clone(),
+            bead.workspace.display().to_string(),
+            "worker-a".to_string(),
+            Some(revision),
+            Some(3),
+            "fixture-token".to_string(),
+            Utc::now() + chrono::Duration::minutes(5),
+            crate::claim::ClaimCapabilities {
+                fenced_claim: true,
+                renewable_lease: true,
+                guarded_mutations: true,
+                credential_stdin: true,
+            },
+        )
+    }
+
+    async fn advertised_atomic_resolution_closes_once_and_replay_is_not_completion() {
+        for replay in [false, true] {
+            let (_dir, workspace) = temp_workspace();
+            let store = RecordingStore::new(workspace)
+                .with_stored_notes("did the work")
+                .with_atomic_resolution(replay);
+            let bead = store.bead();
+            let handle = protected_handle(&bead, 7);
+            let evidence =
+                crate::resolve::evidence::capture(&bead.workspace, &bead, 0, "", "", false).await;
+            let observation = ResolutionObservation {
+                evidence: &evidence,
+                exit_code: 0,
+                interrupted: false,
+                attempt_id: "attempt-1",
+                claim_handle: Some(&handle),
+            };
+            let applied = executor()
+                .apply_observed(
+                    &store,
+                    &bead,
+                    &complete_decision(),
+                    "worker-a",
+                    None,
+                    Some(&observation),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                applied,
+                if replay {
+                    AppliedDecision::AlreadyClosed
+                } else {
+                    AppliedDecision::Completed
+                }
+            );
+            assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 1);
+            assert!(
+                store.closes_snapshot().is_empty(),
+                "atomic path must not issue a separate close"
+            );
+            assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Done);
+        }
+    }
+
+    async fn advertised_atomic_retry_and_block_have_one_lifecycle_effect() {
+        for (decision, expected, expected_status) in [
+            (
+                retry_decision(),
+                AppliedDecision::Released(ReleaseCause::Retry),
+                BeadStatus::Open,
+            ),
+            (
+                blocked_decision(),
+                AppliedDecision::Blocked,
+                BeadStatus::Blocked,
+            ),
+        ] {
+            let (_dir, workspace) = temp_workspace();
+            let store = RecordingStore::new(workspace).with_atomic_resolution(false);
+            let bead = store.bead();
+            let handle = protected_handle(&bead, 7);
+            let evidence =
+                crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+            let observation = ResolutionObservation {
+                evidence: &evidence,
+                exit_code: 1,
+                interrupted: false,
+                attempt_id: "attempt-1",
+                claim_handle: Some(&handle),
+            };
+            let applied = executor()
+                .apply_observed(
+                    &store,
+                    &bead,
+                    &decision,
+                    "worker-a",
+                    None,
+                    Some(&observation),
+                )
+                .await
+                .unwrap();
+            assert_eq!(applied, expected);
+            assert_eq!(store.show(&bead.id).await.unwrap().status, expected_status);
+            assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(store.released(), 0, "no separate release command");
+            assert_eq!(
+                store.blocks.load(Ordering::SeqCst),
+                0,
+                "no separate block command"
+            );
+        }
+    }
+
+    async fn stale_revision_refuses_atomic_resolution() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .with_atomic_resolution(false);
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 6);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 0, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 0,
+            interrupted: false,
+            attempt_id: "attempt-1",
+            claim_handle: Some(&handle),
+        };
+        let applied = executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &complete_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.released(), 0);
     }
 
     #[tokio::test]
@@ -1621,6 +2324,7 @@ mod tests {
             "a retry is not a hard quarantine"
         );
         assert_eq!(store.released(), 1, "bead released for retry");
+        advertised_atomic_retry_and_block_have_one_lifecycle_effect().await;
     }
 
     #[tokio::test]

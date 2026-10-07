@@ -6022,6 +6022,15 @@ impl Worker {
             .map(|effort| self.clock.elapsed_since(effort.cycle_start))
             .unwrap_or_default();
         let resolve_started = Instant::now();
+        let evidence = crate::resolve::evidence::capture(
+            &current.workspace,
+            &current,
+            output.exit_code,
+            &output.stdout,
+            &output.stderr,
+            was_interrupted,
+        )
+        .await;
         let context = ResolveContext::new(
             &current,
             output.exit_code,
@@ -6030,7 +6039,8 @@ impl Worker {
             duration,
             started_at,
             was_interrupted,
-        );
+        )
+        .with_evidence(evidence.clone());
         let resolver = Resolver::with_config(
             self.prompt_builder.clone(),
             self.config.strands.resolve.clone(),
@@ -6088,13 +6098,34 @@ impl Worker {
                 captured_at: None,
             }
         });
+        let retained_claim = match self.claim_handle.as_ref() {
+            Some(handle) => Some(handle.lock().await.clone()),
+            None => None,
+        };
+        let Some(attempt_id) = self.attempt_id.as_deref() else {
+            return self
+                .record_resolution_failure(
+                    &current,
+                    "attempt_identity_missing",
+                    resolve_started.elapsed().as_millis() as u64,
+                )
+                .await;
+        };
+        let observation = crate::resolve::executor::ResolutionObservation {
+            evidence: &evidence,
+            exit_code: output.exit_code,
+            interrupted: was_interrupted,
+            attempt_id,
+            claim_handle: retained_claim.as_ref(),
+        };
         let applied = match executor
-            .apply(
+            .apply_observed(
                 target_store.as_ref(),
                 &current,
                 &decision,
                 &self.qualified_id(),
                 fallback.as_ref(),
+                Some(&observation),
             )
             .await
         {

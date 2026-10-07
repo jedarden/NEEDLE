@@ -2335,6 +2335,39 @@ impl OutcomeHandler {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // An atomic lifecycle resolve uses the attempt ID as its idempotency
+        // key. Recording `--action none` while this dispatch still holds its
+        // claim would consume that key before Resolve can close or release it.
+        // Leave the ledger write to the guarded applier in that case.
+        let atomic = store
+            .negotiated_capabilities()
+            .and_then(|capabilities| {
+                capabilities
+                    .get("atomic_resolution")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false);
+        if atomic && active_handle.is_some() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                store.claim_status(&bead.id),
+            )
+            .await
+            {
+                Ok(Ok(claim)) if claim.status == BeadStatus::InProgress => {
+                    return false;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(bead_id = %bead.id, error = %error, "claim status unavailable before attempt recording");
+                    return false;
+                }
+                Err(_) => {
+                    tracing::warn!(bead_id = %bead.id, "claim status timed out before attempt recording");
+                    return false;
+                }
+            }
+        }
         let result = if let Some(handle) = active_handle {
             let handle = handle.lock().await.clone();
             match tokio::time::timeout(
@@ -3495,8 +3528,22 @@ impl OutcomeHandler {
                                     tracing::warn!(
                                         bead_id = %bead.id,
                                         error = %e,
-                                        "DoD bypass check errored — failing open"
+                                        "DoD bypass check errored — withholding completion"
                                     );
+                                    *late = Some(LateVerdict::GateError {
+                                        gate: dod_bypass::GATE_NAME.to_string(),
+                                    });
+                                    return self
+                                        .handle_gate_error(
+                                            store,
+                                            bead,
+                                            &bead.workspace.display().to_string(),
+                                            dod_bypass::GATE_NAME,
+                                            "dod_bypass_check",
+                                            &e.to_string(),
+                                            gate_telemetry,
+                                        )
+                                        .await;
                                 }
                             }
 
@@ -3554,13 +3601,22 @@ impl OutcomeHandler {
                             tracing::warn!(
                                 bead_id = %bead.id,
                                 error = %e,
-                                "shipped-work check errored — failing open, NOT resetting failure count"
+                                "shipped-work check errored — withholding completion"
                             );
-                            // CRITICAL: Do NOT reset failure count on error.
-                            // A bead that closes repeatedly with errors (e.g., no snapshot,
-                            // verification failures) must accumulate failures and eventually
-                            // quarantine, not loop forever with a freshly-reset count each time.
-                            // See GitHub issue #16 (bead needle-0fbf5145 cycled 14 times).
+                            *late = Some(LateVerdict::GateError {
+                                gate: "shipped_work".to_string(),
+                            });
+                            return self
+                                .handle_gate_error(
+                                    store,
+                                    bead,
+                                    &bead.workspace.display().to_string(),
+                                    "shipped_work",
+                                    "verify_shipped_work",
+                                    &e.to_string(),
+                                    gate_telemetry,
+                                )
+                                .await;
                         }
                     }
                 } else {
@@ -3629,17 +3685,6 @@ impl OutcomeHandler {
                                 bead_id = %bead.id,
                                 "shipped work detected — marking orphaned bead as completed"
                             );
-                            // Clear the predispatch snapshot since work is complete —
-                            // only this dispatch's own baseline (see the twin-dispatch
-                            // note on the closed-bead path).
-                            crate::validation::predispatch::clear_if_own(
-                                &bead.workspace,
-                                &bead.id,
-                                attempt.predispatch_token.as_deref(),
-                            )
-                            .await;
-                            // Shipped work detected — reset failure count.
-                            let _ = self.reset_failure_count(store, bead).await;
                             // The gate CONFIRMED the work landed; the agent merely failed to
                             // close the bead. Close it here.
                             //
@@ -3652,15 +3697,53 @@ impl OutcomeHandler {
                             // while the fleet looks busy. It also emitted BeadCompleted AND
                             // BeadReleased for the same bead, which is why completed and released
                             // counts overlapped and deliberate releases read as failures.
-                            events.push(EventKind::BeadCompleted {
-                                bead_id: bead.id.clone(),
-                                duration_ms: 0,
-                            });
                             match self
                                 .close_for_attempt(store, bead, SHIPPED_WORK_CLOSE_REASON)
                                 .await
                             {
-                                Ok(Some(())) => return Ok((BeadAction::Closed, events)),
+                                Ok(Some(())) => {
+                                    let confirmed = self
+                                        .timeout_op(|| store.show(&bead.id), "show after close")
+                                        .await?;
+                                    if !confirmed.is_some_and(|bead| bead.status.is_done()) {
+                                        anyhow::bail!("shipped-work close returned success without a confirmed closed bead");
+                                    }
+                                    let _ = self.reset_failure_count(store, bead).await;
+                                    match self
+                                        .timeout_op(|| store.flush(), "flush after close")
+                                        .await
+                                    {
+                                        Ok(Some(())) => {}
+                                        Ok(None) => {
+                                            store.pause_workspace(
+                                                "checkpoint publication timed out after close"
+                                                    .to_string(),
+                                            );
+                                            anyhow::bail!(
+                                                "checkpoint publication timed out after close"
+                                            );
+                                        }
+                                        Err(error) => {
+                                            store.pause_workspace(format!("checkpoint publication failed after close: {error:#}"));
+                                            return Err(error.context(
+                                                "checkpoint publication failed after close",
+                                            ));
+                                        }
+                                    }
+                                    // Only a confirmed, durable close may
+                                    // consume this dispatch's baseline.
+                                    crate::validation::predispatch::clear_if_own(
+                                        &bead.workspace,
+                                        &bead.id,
+                                        attempt.predispatch_token.as_deref(),
+                                    )
+                                    .await;
+                                    events.push(EventKind::BeadCompleted {
+                                        bead_id: bead.id.clone(),
+                                        duration_ms: 0,
+                                    });
+                                    return Ok((BeadAction::Closed, events));
+                                }
                                 other => {
                                     // A backend that cannot close, or a timeout. Fall back to the
                                     // previous behaviour rather than leaving the claim dangling —
@@ -3866,8 +3949,8 @@ impl OutcomeHandler {
     /// in a clean extraction before the close is honoured. The gate applies
     /// only where the backend can expose the close reason at all — everywhere
     /// else it skips rather than judging closes it cannot see. A close reason
-    /// that cannot be *fetched* is a store hiccup, not missing evidence, so
-    /// it also fails open; a reason that plainly carries no block does not.
+    /// that cannot be *fetched* is an unavailable verdict and withholds
+    /// completion; a reason that plainly carries no block is rejected.
     async fn verify_close_evidence(
         &self,
         store: &dyn BeadStore,
@@ -3884,7 +3967,7 @@ impl OutcomeHandler {
 
         // Not `timeout_op`: its Ok(None) folds "store timed out" and "store
         // returned nothing" into one value, and the two mean opposite things
-        // here — a timeout fails open, a fetched-empty reason is the missing
+        // here — a timeout withholds completion, a fetched-empty reason is the missing
         // evidence the gate exists to reject.
         let close_reason = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -3897,16 +3980,22 @@ impl OutcomeHandler {
                 tracing::warn!(
                     bead_id = %bead.id,
                     error = %e,
-                    "close reason could not be fetched — failing open, not rejecting the close"
+                    "close reason could not be fetched — withholding completion"
                 );
-                return Ok(close_verification::CloseEvidenceVerdict::Skipped);
+                return Ok(close_verification::CloseEvidenceVerdict::ExecutionError {
+                    command: "close_reason".to_string(),
+                    reason: e.to_string(),
+                });
             }
             Err(_) => {
                 tracing::warn!(
                     bead_id = %bead.id,
-                    "close_reason timed out after 30s — failing open, not rejecting the close"
+                    "close_reason timed out after 30s — withholding completion"
                 );
-                return Ok(close_verification::CloseEvidenceVerdict::Skipped);
+                return Ok(close_verification::CloseEvidenceVerdict::ExecutionError {
+                    command: "close_reason".to_string(),
+                    reason: "close_reason timed out after 30s".to_string(),
+                });
             }
         };
 
@@ -5964,7 +6053,7 @@ mod tests {
 
     struct MockBeadStore {
         actions: Mutex<Vec<StoreAction>>,
-        show_status: BeadStatus,
+        show_status: Mutex<BeadStatus>,
         labels: Vec<String>,
         /// Owns the workspace returned by `show()` for as long as the store
         /// can return beads that name it.
@@ -5990,13 +6079,14 @@ mod tests {
         /// `bead_in_workspace` fixture body).
         description: Option<String>,
         fail_flush: bool,
+        noop_close: bool,
     }
 
     impl MockBeadStore {
         fn new(show_status: BeadStatus) -> Self {
             MockBeadStore {
                 actions: Mutex::new(Vec::new()),
-                show_status,
+                show_status: Mutex::new(show_status),
                 labels: Vec::new(),
                 workspace: tempfile::TempDir::new().unwrap(),
                 dependencies: Vec::new(),
@@ -6006,11 +6096,17 @@ mod tests {
                 exposes_close_reason: false,
                 description: None,
                 fail_flush: false,
+                noop_close: false,
             }
         }
 
         fn with_notes(mut self, notes: &str) -> Self {
             self.notes = Some(notes.to_string());
+            self
+        }
+
+        fn with_noop_close(mut self) -> Self {
+            self.noop_close = true;
             self
         }
 
@@ -6140,6 +6236,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Close(id.to_string(), reason.to_string()));
+            if !self.noop_close {
+                *self.show_status.lock().unwrap() = BeadStatus::Done;
+            }
             Ok(())
         }
 
@@ -6154,7 +6253,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Show(id.to_string()));
-            let mut bead = bead_in_workspace(self.show_status.clone(), self.workspace.path());
+            let mut bead = bead_in_workspace(
+                self.show_status.lock().unwrap().clone(),
+                self.workspace.path(),
+            );
             bead.labels = self.labels.clone();
             bead.dependencies = self.dependencies.clone();
             if let Some(description) = &self.description {
@@ -6199,6 +6301,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Reopen(id.to_string()));
+            *self.show_status.lock().unwrap() = BeadStatus::Open;
             Ok(())
         }
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
@@ -6724,6 +6827,26 @@ mod tests {
             !actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
             "a finished bead must not be returned to the ready frontier: {actions:?}"
         );
+        no_op_close_never_emits_bead_completed().await;
+    }
+
+    async fn no_op_close_never_emits_bead_completed() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-noop");
+        let handler = OutcomeHandler::new(Config::default(), helper.telemetry().clone());
+        let store = test_store(BeadStatus::Open)
+            .with_notes("evidence: implemented and verified the change")
+            .with_noop_close();
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler.handle(&store, &bead, &test_output(0), false).await;
+        assert!(
+            result.is_err(),
+            "a successful close command is not proof of closure"
+        );
+        helper.sync().await;
+        assert!(helper.events_by_type("bead.completed").is_empty());
+        assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Open);
     }
 
     #[tokio::test]

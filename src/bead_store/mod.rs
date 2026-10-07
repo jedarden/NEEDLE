@@ -304,9 +304,12 @@ pub fn open_configured_with_transitions(
             )
         })?;
     verify_backend_identity(&backend, &binary, &workspace)?;
-    let (attempt_outcome_supported, manifest_supported, claim_capabilities) = if backend
-        == crate::config::Backend::Bead
-    {
+    let (
+        attempt_outcome_supported,
+        atomic_resolution_supported,
+        manifest_supported,
+        claim_capabilities,
+    ) = if backend == crate::config::Backend::Bead {
         let (runtime_capabilities, attempt_outcome_supported, claim_capabilities) =
             verify_bead_rs_capabilities(&binary, &workspace)?;
         let manifest_supported = runtime_capabilities
@@ -322,11 +325,12 @@ pub fn open_configured_with_transitions(
         }
         (
             attempt_outcome_supported,
+            runtime_capabilities.advertises(capabilities::TransitionCapability::AtomicResolution),
             manifest_supported,
             claim_capabilities,
         )
     } else {
-        (false, false, ClaimCapabilities::default())
+        (false, false, false, ClaimCapabilities::default())
     };
 
     match backend {
@@ -345,6 +349,7 @@ pub fn open_configured_with_transitions(
                     harness_version,
                 )?
                 .with_attempt_outcome_support(attempt_outcome_supported)
+                .with_atomic_resolution_support(atomic_resolution_supported)
                 .with_manifest_support(manifest_supported)
                 .with_claim_capabilities(claim_capabilities),
             ))
@@ -1427,6 +1432,26 @@ pub struct AttemptResolution {
     pub evidence_ref: Option<String>,
 }
 
+/// The lifecycle mutation included in an atomic attempt resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionAction {
+    Close,
+    Release,
+    Quarantine,
+    Block,
+}
+
+impl ResolutionAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::Release => "release",
+            Self::Quarantine => "quarantine",
+            Self::Block => "block",
+        }
+    }
+}
+
 /// A claim result paired with the handle returned by the same claim request.
 /// Legacy stores return an explicitly unprotected handle; they never mint one
 /// from a subsequent query as if it were a fencing credential.
@@ -1824,6 +1849,18 @@ pub trait BeadStore: Send + Sync {
             ClaimMutationResult::Applied,
             self.resolve_attempt(resolution).await?,
         ))
+    }
+
+    /// Apply the attempt outcome and lifecycle action in one backend
+    /// transaction. Stores without an advertised atomic resolver refuse this
+    /// method; callers must run their guarded compatibility sequence.
+    async fn resolve_lifecycle_claim(
+        &self,
+        _handle: &ClaimHandle,
+        _resolution: &AttemptResolution,
+        _action: ResolutionAction,
+    ) -> Result<(ClaimMutationResult, Option<ResolveReceipt>)> {
+        Ok((ClaimMutationResult::Unsupported, None))
     }
 
     /// Perform a resource lock change on behalf of the exact claim.

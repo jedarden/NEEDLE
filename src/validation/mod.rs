@@ -24,6 +24,7 @@ pub mod default_gates;
 pub mod dod_bypass;
 pub mod fallback;
 pub mod predispatch;
+pub mod resolution;
 mod shipped_work;
 pub mod worker_config;
 pub use shipped_work::{upstream_status, verify_shipped_work, UpstreamStatus};

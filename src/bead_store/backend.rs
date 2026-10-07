@@ -633,6 +633,7 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
             "id",
             "attempt_id",
             "outcome",
+            "resolve_action",
             "actor",
             "model",
             "harness",
@@ -658,6 +659,7 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
             "id",
             "attempt_id",
             "outcome",
+            "resolve_action",
             "actor",
             "model",
             "harness",
@@ -986,7 +988,7 @@ fn builtin_bead_rs() -> BeadBackend {
                 "--outcome",
                 "{outcome}",
                 "--action",
-                "none",
+                "{resolve_action}",
                 "--actor",
                 "{actor}",
                 "--reason",
@@ -1171,8 +1173,8 @@ fn builtin_bead_rs() -> BeadBackend {
     );
     // bead-rs attempt-outcome-v1 (`bead resolve`, 0.2.6+): record one
     // attempt's outcome atomically and idempotently. NEEDLE applies the
-    // lifecycle transition itself through the guarded action path, so the
-    // action here is always `none`; the receipt is the durable, cross-host
+    // lifecycle transition itself through the guarded action path unless
+    // the runtime advertises atomic resolution; the receipt is the durable, cross-host
     // attempt record and the input to the backend's failure-tier scheduling.
     // `--model/--harness/--harness-version` are implicit worker facts and
     // `--reason/--evidence-ref` are optional; an empty value drops the flag.
@@ -1187,7 +1189,7 @@ fn builtin_bead_rs() -> BeadBackend {
                 "--outcome",
                 "{outcome}",
                 "--action",
-                "none",
+                "{resolve_action}",
                 "--actor",
                 "{actor}",
                 "--model",
