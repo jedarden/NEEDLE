@@ -649,6 +649,7 @@ fn make_adapter(name: &str) -> AgentAdapter {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: vec![],
     }
 }
 
