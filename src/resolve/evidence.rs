@@ -598,7 +598,17 @@ async fn git_head(workspace: &Path) -> Option<String> {
 /// Dirty paths from `git status --porcelain`, with the same `.beads/` noise
 /// filter the predispatch snapshot uses. `None` when not a git repo.
 async fn git_dirty_paths(workspace: &Path) -> Option<Vec<String>> {
-    let stdout = git_text(workspace, &["status", "--porcelain"]).await?;
+    let stdout = git_text(
+        workspace,
+        &[
+            "status",
+            "--porcelain",
+            "--",
+            ".",
+            crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
+        ],
+    )
+    .await?;
     Some(
         stdout
             .lines()

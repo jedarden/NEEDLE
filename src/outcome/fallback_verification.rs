@@ -275,7 +275,14 @@ impl FallbackVerificationRuntime {
     /// travels to the caller's `gate.no_verifier` count.
     async fn verify_clean_tree(&self, bead: &Bead, reason: NoVerifierReason) -> FallbackVerdict {
         let output = tokio::process::Command::new("git")
-            .args(["status", "--porcelain", "--untracked-files=all"])
+            .args([
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                ".",
+                crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
+            ])
             .current_dir(&bead.workspace)
             .kill_on_drop(true)
             .output()

@@ -322,7 +322,11 @@ version = 1
 # ambiguous/contradictory, superseded attempt, atomic reclaim that never takes
 # an active or modified marker, and local process liveness. Fixture-driven
 # against a tempdir; no subprocess.
-max_tests = 4131
+# +6 Phase 20 Git-safety contracts (needle-9e778fad): marker predicate/filter,
+# idempotent local exclude without .gitignore, exclude pathspec, force-added
+# rejection, committed-marker range detection, and linked-worktree exclude.
+# They drive real git in a tempdir but need no NEEDLE subprocess.
+max_tests = 4137
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -779,6 +783,13 @@ kind = "sleep"
 max_occurrences = 1
 owner = "component:dispatch"
 reason = "The remaining wait proves a deadline timer's observed remaining duration decreases with real time; all external-shell timing contracts live in integration_spawn."
+
+[[unit_exception]]
+path = "src/file_contention/git_safety.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-9e778fad"
+reason = "The Git-safety contract is about git's own index, info/exclude, and pathspec behavior (forced add, committed range, linked worktree); a temporary real repository is the only faithful fixture. One test helper spawns git."
 
 [[unit_exception]]
 path = "src/dispatch/extraction.rs"

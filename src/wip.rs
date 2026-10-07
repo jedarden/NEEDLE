@@ -137,7 +137,11 @@ fn modified_time(path: PathBuf) -> Option<SystemTime> {
 }
 
 fn is_internal_path(path: &str) -> bool {
-    path == ".beads" || path.starts_with(".beads/") || path == ".needle-predispatch-sha"
+    path == ".beads"
+        || path.starts_with(".beads/")
+        || path == ".needle-predispatch-sha"
+        // Phase 20 markers are checkout-local runtime state, never patch content.
+        || crate::file_contention::git_safety::is_marker_path(path)
 }
 
 async fn current_paths(workspace: &Path) -> Result<Vec<String>> {

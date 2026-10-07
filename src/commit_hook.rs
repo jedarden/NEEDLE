@@ -41,6 +41,20 @@ use crate::validation::predispatch::load;
 pub async fn validate_commit(workspace: &Path, bead_id: &BeadId) -> Result<()> {
     let ws = workspace.to_str().unwrap_or(".").to_string();
 
+    // Phase 20: file-contention markers are never committed, even when
+    // force-added. Checked before (and regardless of) the snapshot. Only a
+    // FOUND marker rejects; a git error keeps this function's existing
+    // tolerant behavior (non-repositories pass).
+    if let Ok(found) = crate::file_contention::git_safety::staged_or_tracked_markers(workspace) {
+        if !found.is_empty() {
+            anyhow::bail!(
+                "file-contention markers must never be committed; staged or tracked: {}. \
+                 Unstage with `git rm --cached -r -- .needle/locks`",
+                found.join(", ")
+            );
+        }
+    }
+
     // Load the predispatch snapshot
     let snapshot = match load(workspace, bead_id).await {
         Some(s) => s,
@@ -269,6 +283,29 @@ pub async fn inject_bead_id_trailer(
     // No new commits → nothing to tag.
     if current_head == pre_dispatch_head {
         return Ok(());
+    }
+
+    // Phase 20: never amend (and so re-publish) a range that committed
+    // file-contention markers. Non-fatal like the rest of this step; the
+    // worker refuses to accept the attempt separately.
+    match crate::file_contention::git_safety::markers_in_range(
+        workspace,
+        pre_dispatch_head,
+        &current_head,
+    ) {
+        Ok(markers) if !markers.is_empty() => {
+            tracing::error!(
+                bead_id = %bead_id,
+                workspace = %ws,
+                markers = ?markers,
+                "commits contain file-contention markers; refusing to amend"
+            );
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(bead_id = %bead_id, error = %e, "could not check commits for file-contention markers");
+        }
     }
 
     // Check if the trailer is already present (idempotent).

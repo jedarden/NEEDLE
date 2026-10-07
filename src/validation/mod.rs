@@ -1098,7 +1098,14 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
 /// in exactly the case it exists for.
 async fn get_git_diff(workspace: &Path) -> Result<String> {
     let output = tokio::process::Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=all"])
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
+        ])
         .current_dir(workspace)
         .kill_on_drop(true)
         .output()

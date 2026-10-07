@@ -169,6 +169,17 @@ done
 # Git may display similar roots as renames. Similarity is presentation, not
 # checkpoint integrity: a large valid change must still be publishable.
 
+# Phase 20 (needle-9e778fad): file-contention markers are checkout-local runtime
+# state and are never published, whatever ends up in the path list.
+for path in "${COMMIT_PATHS[@]}"; do
+    case "$path" in
+        .needle/locks|.needle/locks/*)
+            echo "Error: refusing to commit file-contention marker: $path" >&2
+            exit 1
+            ;;
+    esac
+done
+
 git -C "$REPO_ROOT" -c user.email=github@jedarden.com -c user.name=jedarden \
     commit --only -m "$COMMIT_MSG" -- "${COMMIT_PATHS[@]}"
 

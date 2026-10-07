@@ -246,7 +246,15 @@ async fn capture_dirty_files(workspace: &Path) -> Option<Vec<DirtyFile>> {
             let workspace = workspace.clone();
             async move {
                 tokio::process::Command::new("git")
-                    .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                    .args([
+                        "status",
+                        "--porcelain=v1",
+                        "-z",
+                        "--untracked-files=all",
+                        "--",
+                        ".",
+                        crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
+                    ])
                     .current_dir(&workspace)
                     .kill_on_drop(true)
                     .output()
