@@ -56,6 +56,7 @@ fn test_adapter_with_idle_timeout(
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 
@@ -203,6 +204,7 @@ async fn idle_deadline_resets_on_activity_prevents_timeout() {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
 
     let telemetry = Telemetry::new("test-worker".to_string());
@@ -320,6 +322,7 @@ async fn idle_timeout_with_config_none_falls_back_to_global() {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
 
     let telemetry = Telemetry::new("test-worker".to_string());
@@ -428,6 +431,7 @@ async fn idle_timeout_mixed_activity_pattern() {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
 
     let telemetry = Telemetry::new("test-worker".to_string());

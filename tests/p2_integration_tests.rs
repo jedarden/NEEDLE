@@ -36,6 +36,8 @@ mod double_dispatch_prevention;
 mod fail_closed_verification;
 #[path = "p2_integration_tests/fallback_gate.rs"]
 mod fallback_gate;
+#[path = "p2_integration_tests/file_contention.rs"]
+mod file_contention;
 #[path = "p2_integration_tests/label_import_strategies.rs"]
 mod label_import_strategies;
 #[path = "p2_integration_tests/mend_multi_claim_staleness.rs"]
@@ -2003,6 +2005,7 @@ fn create_mitosis_dispatcher(
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
     adapters.insert("mitosis-bash".to_string(), adapter);
     let telemetry = Telemetry::new("mitosis-test".to_string());

@@ -307,7 +307,48 @@ version = 1
 # preservation. The process boundary is the defect being guarded.
 # +2 execution-checkpoint append-once and rejection contracts
 # (needle-9295ead6); private filesystem publication helpers need the unit tier.
-max_tests = 4102
+# +13 Phase 20 file-contention marker store contracts (needle-ae8ff2a3): path
+# normalization and escape rejection, record schema and baseline, renewal,
+# all-or-none conflicts, owner-only release/renew, corrupt-marker listing,
+# registry contention, and checkout independence. They exercise private store
+# internals against a tempdir and need no subprocess, so the unit tier is home.
+# +5 Phase 20 file-contention opt-in contracts (needle-dcb47589): disabled
+# default, bead-workspace resolution, unknown-key/short-lease rejection, the
+# three coverage states, and optional adapter capability parsing. Pure config
+# parsing; no subprocess.
+# +11 Phase 20 marker assessment contracts (needle-3f3c6825): free/same-attempt,
+# live holder past lease (warning, not authority loss), unknown liveness vs
+# lease, timestamp-only vs content change, created/deleted, verified-closed,
+# ambiguous/contradictory, superseded attempt, atomic reclaim that never takes
+# an active or modified marker, and local process liveness. Fixture-driven
+# against a tempdir; no subprocess.
+# +6 Phase 20 Git-safety contracts (needle-9e778fad): marker predicate/filter,
+# idempotent local exclude without .gitignore, exclude pathspec, force-added
+# rejection, committed-marker range detection, and linked-worktree exclude.
+# They drive real git in a tempdir but need no NEEDLE subprocess.
+# +8 Phase 20 `needle contention` CLI contracts (needle-f0552fec): rename-pair
+# parsing, acquire then cross-attempt conflict with holder JSON, disabled
+# workspace no-op, release-own-only, read-only check, interactive session
+# identity in list, all-or-none rename, and escaping-path/missing-identity
+# rejection. Identity arrives through an injected lookup (no global env); the
+# real-git fixture is git_safety::test_support, under its existing exception.
+# +5 Phase 20 worker lifecycle contracts (needle-04798783): unsupported and
+# supported_disabled dispatch stays byte-identical with no marker tree, enabled
+# dispatch passes the hook contract and attempt identity, hook-written markers
+# are released by do_log for this attempt only, shutdown release drops markers
+# without claim context, and an invalid opt-in reports degraded instead of
+# advertising protection. In-process Worker via make_worker (Explore pinned).
+# +5 Phase 20 hook contract (needle-7f04ec50): the capable fixture adapter
+# receives the contract through a real dispatch, unsupported/disabled
+# dispatches see none, inherited contract vars are stripped unless this
+# dispatch set them, no built-in adapter claims support, and the published
+# contract document names every input, exit code, and assessment.
+# +4 Phase 20 doctor row (needle-0d2df6d5): per-adapter coverage states,
+# active/stale-unchanged/stale-modified/unreadable census with holder, bead,
+# worker, age and workspace but no file contents, a live holder past its
+# lease as a warning rather than stale, and an unreadable tree or invalid
+# opt-in reported as degraded without failing doctor.
+max_tests = 4159
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -325,7 +366,8 @@ max_tests = 4102
 # +1 N-T25 deadline checkpoint integration contract (needle-212f3568):
 # adapter-specific prompt deadlines and terminal resolved-row accounting.
 # +1 fake-Forgejo CI watcher deduplication scenario (needle-7434c5cb).
-push = 678
+# +6 p2 file-contention integration fixture (needle-4386d7bd).
+push = 684
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -528,7 +570,13 @@ tier = "push"
 # with a real verdict in both directions.
 # +1 fake-Forgejo CI red filing, fingerprint deduplication, and green no-op
 # scenario with an isolated HOME (needle-7434c5cb).
-max_tests = 130
+# +6 Phase 20 file-contention release evidence (needle-4386d7bd): two workers
+# contending with disjoint writes coexisting, interactive session with
+# all-or-none rename/multi-path, stale-unchanged takeover vs stale-modified
+# preservation, dispatch coverage plus terminal cleanup, independent
+# checkouts, and markers untracked under normal and forced add. Real binary
+# with env_clear and an isolated HOME.
+max_tests = 136
 owner = "component:pluck-mend-explore"
 
 [[harness]]
@@ -764,6 +812,13 @@ kind = "sleep"
 max_occurrences = 1
 owner = "component:dispatch"
 reason = "The remaining wait proves a deadline timer's observed remaining duration decreases with real time; all external-shell timing contracts live in integration_spawn."
+
+[[unit_exception]]
+path = "src/file_contention/git_safety.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-9e778fad"
+reason = "The Git-safety contract is about git's own index, info/exclude, and pathspec behavior (forced add, committed range, linked worktree); a temporary real repository is the only faithful fixture. One test helper spawns git."
 
 [[unit_exception]]
 path = "src/dispatch/extraction.rs"

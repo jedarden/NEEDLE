@@ -58,6 +58,7 @@ fn make_test_adapter(name: &str, cli: &str, template: &str) -> AgentAdapter {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 

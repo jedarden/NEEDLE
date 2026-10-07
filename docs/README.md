@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 196 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 197 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
@@ -42,6 +42,7 @@ NEEDLE's design principles, component architecture, and implementation phases.
 | **[Bead-forge to Bead-rs Rehydration Playbook](plan/bead-forge-to-bead-rs-rehydration-playbook.md)** | Migration playbook from bead-forge to bead-rs |
 | **[Agent Event Schema](agent-event-schema.md)** | Structured events emitted during agent execution |
 | **[Capabilities Negotiation](capabilities-negotiation.md)** | Backend capability verification contract |
+| **[File-Contention Hook Contract](file-contention-hook-contract.md)** | Optional pre-write marker protocol for agents sharing one checkout (`file_contention_hook/v1`) |
 
 ### Design Documents
 
@@ -304,7 +305,7 @@ See [Investigations & Post-Mortems](#investigations--post-mortems) for:
 
 ## File Count Summary
 
-- **Total markdown files:** 196
+- **Total markdown files:** 197
 - **ADRs:** 30
 - **Research documents:** 18
 - **Operational notes:** 33

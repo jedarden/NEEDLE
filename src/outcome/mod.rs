@@ -691,12 +691,22 @@ async fn candidate_intervention_summary(
 ) -> crate::learning::InterventionSummary {
     let (mut changed_paths, mut commit_subjects) = match baseline {
         Some(baseline) if !baseline.is_empty() => {
-            let changed_paths = candidate_git_lines(workspace, &["diff", "--name-only", baseline])
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|path| !path.starts_with(".beads/") && path != ".needle-predispatch-sha")
-                .collect();
+            let changed_paths = candidate_git_lines(
+                workspace,
+                &[
+                    "diff",
+                    "--name-only",
+                    baseline,
+                    "--",
+                    ".",
+                    crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
+                ],
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| !path.starts_with(".beads/") && path != ".needle-predispatch-sha")
+            .collect();
             let range = format!("{baseline}..HEAD");
             let commit_subjects =
                 candidate_git_lines(workspace, &["log", "--format=%s", "--reverse", &range])
@@ -727,6 +737,9 @@ async fn candidate_intervention_summary(
                     "--name-only",
                     "-r",
                     commit.as_str(),
+                    "--",
+                    ".",
+                    crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
                 ],
             )
             .await

@@ -31,6 +31,7 @@ use crate::upgrade;
 use crate::worker::Worker;
 
 pub mod audit;
+pub mod file_contention;
 pub mod improvements;
 mod lesson;
 mod policy_doctor;
@@ -264,6 +265,22 @@ pub enum CliCommand {
         /// what workers are actually running rather than what the config files say.
         #[arg(long)]
         live: bool,
+    },
+
+    /// Record or inspect advisory file-contention markers in this checkout.
+    ///
+    /// Markers live in `<repo>/.needle/locks/` and are never committed. They
+    /// warn another participant away from a file; they never block a write.
+    ///
+    /// Exit codes:
+    ///   0 - ok (acquired, released, listed, or every checked path is writable)
+    ///   2 - invalid request
+    ///   3 - another participant is active on a requested path
+    ///   4 - stale-modified or ambiguous marker: preserve the file, route it
+    ///   5 - markers unavailable (coverage degraded; nothing was checked)
+    Contention {
+        #[command(subcommand)]
+        command: file_contention::ContentionCommand,
     },
 
     /// Check system health and repair.
@@ -745,6 +762,7 @@ pub fn run() -> Result<()> {
             show_source,
             live,
         } => cmd_config(get, set, dump, show_source, live),
+        CliCommand::Contention { command } => file_contention::run(command),
         CliCommand::Doctor {
             command,
             repair,
@@ -6735,6 +6753,144 @@ fn doctor_check_telemetry_logs(config: &Config, needle_home: &Path, repair: bool
 /// Report the local attempt-archive handoff without ever creating or
 /// repairing spool state. The disabled branch is intentionally first: the
 /// feature's default must not touch the configured spool path at all.
+/// Phase 20 file-contention visibility (needle-0d2df6d5): harness coverage
+/// for this workspace and a census of markers in its checkout.
+///
+/// Never `Fail`: markers are advisory, so this row cannot change doctor's
+/// exit code. An unreadable marker tree is reported as degraded coverage.
+/// Rows name holder, bead, worker/session, age, and workspace — never prompt
+/// or file contents.
+fn doctor_check_file_contention(
+    adapters: &HashMap<String, dispatch::AgentAdapter>,
+    workspace_root: &Path,
+    status: &dyn crate::file_contention::HolderStatus,
+    now: DateTime<Utc>,
+) -> CheckResult {
+    use crate::config::FileContentionCoverage;
+    use crate::file_contention::assessment::classify;
+    use crate::file_contention::{Assessment, MarkerRead, MarkerStore};
+
+    const NAME: &str = "File contention";
+    let workspace_config = match crate::config::file_contention_for_workspace(workspace_root) {
+        Ok(config) => config,
+        Err(error) => {
+            return CheckResult::warn(
+                NAME,
+                format!("coverage degraded: invalid file_contention config: {error:#}"),
+            )
+            .with_fix("fix file_contention in the workspace .needle.yaml (lease_secs >= 30)");
+        }
+    };
+
+    let mut names: Vec<&String> = adapters.keys().collect();
+    names.sort();
+    let mut by_coverage: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    for name in names {
+        let coverage =
+            FileContentionCoverage::resolve(&adapters[name].capabilities, &workspace_config);
+        by_coverage
+            .entry(coverage.as_str())
+            .or_default()
+            .push(name.clone());
+    }
+    let coverage_count = |key: &str| by_coverage.get(key).map_or(0, Vec::len);
+    let coverage_line = format!(
+        "coverage: enabled={} supported_disabled={} unsupported={}",
+        coverage_count("enabled"),
+        coverage_count("supported_disabled"),
+        coverage_count("unsupported"),
+    );
+    let mut detail: Vec<String> = by_coverage
+        .iter()
+        .filter(|(coverage, _)| **coverage != "unsupported")
+        .map(|(coverage, adapters)| format!("{coverage}: {}", adapters.join(", ")))
+        .collect();
+
+    let markers = match MarkerStore::open(workspace_root).and_then(|store| {
+        let listed = store.list()?;
+        Ok((store, listed))
+    }) {
+        Ok(found) => found,
+        Err(error) => {
+            return CheckResult::warn(
+                NAME,
+                format!("{coverage_line}; coverage degraded: marker tree unreadable: {error:#}"),
+            )
+            .with_detail(detail)
+            .with_fix(format!(
+                "inspect {}/.needle/locks (permissions, stray files)",
+                workspace_root.display()
+            ));
+        }
+    };
+    let (store, listed) = markers;
+
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut overdue = 0usize;
+    for (path, read) in &listed {
+        let assessment = match classify(&store, path, Some(read), None, status, now) {
+            Ok(assessment) => assessment,
+            Err(error) => Assessment::Ambiguous {
+                reason: format!("{error:#}"),
+                holder: None,
+            },
+        };
+        let kind = match (&assessment, read) {
+            (_, MarkerRead::Corrupt { .. }) => "unreadable",
+            (Assessment::ActiveOther { .. }, _) => "active",
+            _ => assessment.kind(),
+        };
+        *counts.entry(kind).or_default() += 1;
+        let overdue_note = if matches!(
+            assessment,
+            Assessment::ActiveOther {
+                lease_overdue: true,
+                ..
+            }
+        ) {
+            overdue += 1;
+            " (live, past lease)"
+        } else {
+            ""
+        };
+        detail.push(match assessment.holder() {
+            Some(holder) => {
+                format!(
+                "{path}: {kind}{overdue_note} — bead {}, worker {}, {} {}, age {}s, workspace {}",
+                holder.bead_id.as_deref().unwrap_or("-"),
+                holder.worker_id,
+                if holder.attempt_id.is_some() { "attempt" } else { "session" },
+                holder
+                    .attempt_id
+                    .as_deref()
+                    .or(holder.session_id.as_deref())
+                    .unwrap_or("-"),
+                (now - holder.claimed_at).num_seconds().max(0),
+                workspace_root.display(),
+            )
+            }
+            None => format!("{path}: {kind} — workspace {}", workspace_root.display()),
+        });
+    }
+    let count = |key: &str| counts.get(key).copied().unwrap_or(0);
+    let message = format!(
+        "{coverage_line}; markers: active={} stale_unchanged={} stale_modified={} ambiguous={} unreadable={}",
+        count("active"),
+        count("stale_unchanged"),
+        count("stale_modified"),
+        count("ambiguous"),
+        count("unreadable"),
+    );
+    let needs_attention = count("stale_modified") + count("ambiguous") + count("unreadable");
+    if needs_attention > 0 || overdue > 0 {
+        CheckResult::warn(NAME, message)
+            .with_detail(detail)
+            .with_fix("needle contention list --repo <workspace>; preserve modified files and resume via the named bead")
+    } else {
+        CheckResult::pass(NAME, message).with_detail(detail)
+    }
+}
+
 fn doctor_check_attempt_archive(config: &Config, workspace_root: &Path) -> CheckResult {
     if !config.attempt_archive.enabled {
         return CheckResult::pass("Attempt archive", "attempt archive: disabled");
@@ -7024,6 +7180,27 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
     // Optional attempt archive spool and drain health. This check is a pure
     // read when enabled and does not even resolve the spool path when off.
     results.push(doctor_check_attempt_archive(&config, &workspace_root));
+
+    // Phase 20 file-contention coverage and marker census. Advisory only:
+    // the row is never Fail.
+    let adapters =
+        dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters())
+            .unwrap_or_else(|_| {
+                dispatch::builtin_adapters()
+                    .into_iter()
+                    .map(|adapter| (adapter.name.clone(), adapter))
+                    .collect()
+            });
+    let holder_status = crate::file_contention::LocalHolderStatus::new(
+        Some(&heartbeat_dir),
+        Duration::from_secs(config.health.heartbeat_ttl_secs),
+    );
+    results.push(doctor_check_file_contention(
+        &adapters,
+        &workspace_root,
+        &holder_status,
+        Utc::now(),
+    ));
 
     // Calculate summary.
     let fails = results
@@ -9131,6 +9308,442 @@ fn cmd_update_rules(output: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── needle contention (Phase 20, needle-f0552fec) ──
+
+    struct ContentionFixtureStatus;
+
+    impl crate::file_contention::HolderStatus for ContentionFixtureStatus {
+        fn liveness(
+            &self,
+            _: &crate::file_contention::MarkerRecord,
+        ) -> crate::file_contention::Liveness {
+            crate::file_contention::Liveness::Live
+        }
+        fn bead_state(&self, _: &str) -> Option<crate::file_contention::BeadState> {
+            None
+        }
+    }
+
+    fn contention_repo(enabled: bool) -> tempfile::TempDir {
+        let dir = crate::file_contention::git_safety::test_support::init_repo();
+        if enabled {
+            std::fs::write(
+                dir.path().join(".needle.yaml"),
+                "file_contention:\n  enabled: true\n  lease_secs: 60\n",
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    fn contention(repo: &Path, args: &[&str]) -> file_contention::ContentionCommand {
+        let repo = repo.to_string_lossy().into_owned();
+        let mut argv = vec!["needle", "contention"];
+        argv.extend_from_slice(args);
+        argv.extend_from_slice(&["--repo", &repo, "--json"]);
+        match Cli::try_parse_from(argv).unwrap().command {
+            CliCommand::Contention { command } => command,
+            other => panic!("parsed {other:?}"),
+        }
+    }
+
+    fn run_contention(
+        command: &file_contention::ContentionCommand,
+        env: &[(&str, &str)],
+    ) -> (i32, serde_json::Value) {
+        let env: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let lookup = move |name: &str| env.get(name).cloned();
+        let (code, rendered) =
+            file_contention::execute(command, &lookup, &ContentionFixtureStatus, Utc::now());
+        let value = serde_json::from_str(&rendered)
+            .unwrap_or_else(|e| panic!("non-JSON output {rendered:?}: {e}"));
+        (code, value)
+    }
+
+    const ATTEMPT_A: &[(&str, &str)] = &[
+        ("NEEDLE_BEAD_ID", "needle-a"),
+        ("NEEDLE_ATTEMPT_ID", "attempt-a"),
+        ("NEEDLE_WORKER_ID", "alpha"),
+    ];
+    const ATTEMPT_B: &[(&str, &str)] = &[
+        ("NEEDLE_BEAD_ID", "needle-b"),
+        ("NEEDLE_ATTEMPT_ID", "attempt-b"),
+        ("NEEDLE_WORKER_ID", "bravo"),
+    ];
+
+    #[test]
+    fn file_contention_parses_rename_pair_and_rejects_half_pair() {
+        let cmd = contention(
+            Path::new("/r"),
+            &["acquire", "--rename-from", "a.rs", "--rename-to", "b.rs"],
+        );
+        match cmd {
+            file_contention::ContentionCommand::Acquire {
+                rename_from,
+                rename_to,
+                identity,
+                ..
+            } => {
+                assert_eq!(rename_from, Some(PathBuf::from("a.rs")));
+                assert_eq!(rename_to, Some(PathBuf::from("b.rs")));
+                assert!(identity.json);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["needle", "contention", "acquire", "--rename-from", "a.rs"])
+                .is_err(),
+            "a rename source without a destination must not parse"
+        );
+    }
+
+    #[test]
+    fn file_contention_acquire_then_other_attempt_conflicts() {
+        let repo = contention_repo(true);
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+
+        let (code, out) = run_contention(&acquire, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["schema"], file_contention::OUTPUT_SCHEMA);
+        assert_eq!(out["result"], "acquired");
+        assert_eq!(out["paths"][0], "src/lib.rs");
+        let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+        assert!(exclude.contains("/.needle/locks/"), "{exclude}");
+
+        let (code, out) = run_contention(&acquire, ATTEMPT_B);
+        assert_eq!(code, file_contention::exit::CONFLICT, "{out}");
+        assert_eq!(out["written"], false);
+        let conflict = &out["conflicts"][0];
+        assert_eq!(conflict["assessment"], "active_other");
+        assert_eq!(conflict["holder"]["bead_id"], "needle-a");
+        assert_eq!(conflict["holder"]["worker_id"], "alpha");
+        assert_eq!(conflict["holder"]["attempt_id"], "attempt-a");
+
+        // Re-acquiring as the holder is a renewal, not a conflict.
+        let (code, out) = run_contention(&acquire, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+    }
+
+    #[test]
+    fn file_contention_disabled_workspace_writes_nothing() {
+        let repo = contention_repo(false);
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        let (code, out) = run_contention(&acquire, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["coverage"], "supported_disabled");
+        assert_eq!(out["written"], false);
+        assert!(!repo.path().join(".needle/locks").exists());
+    }
+
+    #[test]
+    fn file_contention_release_removes_only_own_markers() {
+        let repo = contention_repo(true);
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        assert_eq!(run_contention(&acquire, ATTEMPT_A).0, 0);
+
+        let release = contention(repo.path(), &["release"]);
+        let (code, out) = run_contention(&release, ATTEMPT_B);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["released"].as_array().unwrap().len(), 0);
+        assert!(repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+
+        let (_, out) = run_contention(&release, ATTEMPT_A);
+        assert_eq!(out["released"][0], "src/lib.rs");
+        assert!(!repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+    }
+
+    #[test]
+    fn file_contention_check_assesses_without_writing() {
+        let repo = contention_repo(true);
+        let check = contention(repo.path(), &["check", "--path", "src/lib.rs"]);
+        let (code, out) = run_contention(&check, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["paths"][0]["assessment"], "free");
+        assert!(!repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        assert_eq!(run_contention(&acquire, ATTEMPT_A).0, 0);
+        let (code, out) = run_contention(&check, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK);
+        assert_eq!(out["paths"][0]["assessment"], "same_attempt");
+        // No identity at all: nothing is ours, the live holder is a conflict.
+        let (code, out) = run_contention(&check, &[]);
+        assert_eq!(code, file_contention::exit::CONFLICT, "{out}");
+    }
+
+    #[test]
+    fn file_contention_interactive_session_identity_lists_as_session() {
+        let repo = contention_repo(true);
+        let session = &[("NEEDLE_SESSION_ID", "claude-session-1")];
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        let (code, out) = run_contention(&acquire, session);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+
+        let (code, out) = run_contention(&contention(repo.path(), &["list"]), &[]);
+        assert_eq!(code, file_contention::exit::OK);
+        let marker = &out["markers"][0];
+        assert_eq!(marker["path"], "src/lib.rs");
+        assert_eq!(marker["holder"]["session_id"], "claude-session-1");
+        assert_eq!(marker["holder"]["worker_id"], "interactive");
+        assert!(marker["holder"]["bead_id"].is_null());
+    }
+
+    #[test]
+    fn file_contention_rename_records_both_paths_all_or_none() {
+        let repo = contention_repo(true);
+        let hold_dest = contention(repo.path(), &["acquire", "--path", "src/new.rs"]);
+        assert_eq!(run_contention(&hold_dest, ATTEMPT_B).0, 0);
+
+        let rename = contention(
+            repo.path(),
+            &[
+                "acquire",
+                "--rename-from",
+                "src/lib.rs",
+                "--rename-to",
+                "src/new.rs",
+            ],
+        );
+        let (code, out) = run_contention(&rename, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::CONFLICT, "{out}");
+        assert!(
+            !repo.path().join(".needle/locks/src/lib.rs.lock").exists(),
+            "a conflicting rename must not record its source"
+        );
+
+        assert_eq!(
+            run_contention(&contention(repo.path(), &["release"]), ATTEMPT_B).0,
+            0
+        );
+        let (code, out) = run_contention(&rename, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["paths"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn file_contention_rejects_escaping_path_and_missing_identity() {
+        let repo = contention_repo(true);
+        let escape = contention(repo.path(), &["acquire", "--path", "../outside.rs"]);
+        let (code, out) = run_contention(&escape, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::USAGE, "{out}");
+        assert_eq!(out["result"], "error");
+
+        let anonymous = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        let (code, out) = run_contention(&anonymous, &[("NEEDLE_WORKER_ID", "alpha")]);
+        assert_eq!(code, file_contention::exit::USAGE, "{out}");
+        assert!(!repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+    }
+
+    // ── doctor file-contention row (Phase 20, needle-0d2df6d5) ──
+
+    /// Workers named `dead-*` are dead; everyone else is live.
+    struct DoctorHolderStatus;
+
+    impl crate::file_contention::HolderStatus for DoctorHolderStatus {
+        fn liveness(
+            &self,
+            record: &crate::file_contention::MarkerRecord,
+        ) -> crate::file_contention::Liveness {
+            if record.worker_id.starts_with("dead-") {
+                crate::file_contention::Liveness::Dead
+            } else {
+                crate::file_contention::Liveness::Live
+            }
+        }
+        fn bead_state(&self, _: &str) -> Option<crate::file_contention::BeadState> {
+            None
+        }
+    }
+
+    fn doctor_adapters(capable: &[&str]) -> HashMap<String, dispatch::AgentAdapter> {
+        let mut adapters: HashMap<String, dispatch::AgentAdapter> = dispatch::builtin_adapters()
+            .into_iter()
+            .map(|a| (a.name.clone(), a))
+            .collect();
+        let template = adapters.values().next().unwrap().clone();
+        for name in capable {
+            let mut adapter = template.clone();
+            adapter.name = name.to_string();
+            adapter.capabilities = vec![crate::config::FILE_CONTENTION_HOOK_CAPABILITY.to_string()];
+            adapters.insert(adapter.name.clone(), adapter);
+        }
+        adapters
+    }
+
+    fn doctor_marker(repo: &Path, path: &str, worker: &str, claimed: DateTime<Utc>) {
+        let store = crate::file_contention::MarkerStore::open(repo).unwrap();
+        let who = crate::file_contention::Participant {
+            bead_id: Some(format!("needle-{worker}")),
+            attempt_id: Some(format!("attempt-{worker}")),
+            session_id: None,
+            worker_id: worker.to_string(),
+            host: "codinghome".into(),
+            pid: 1,
+        };
+        let never = |_: &str, _: &crate::file_contention::MarkerRead| false;
+        let outcome = store
+            .acquire(
+                &who,
+                &[crate::file_contention::PathIntent {
+                    path: PathBuf::from(path),
+                    intent: crate::file_contention::WriteIntent::Modify,
+                }],
+                Duration::from_secs(60),
+                claimed,
+                &never,
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::file_contention::AcquireOutcome::Acquired(_)
+        ));
+    }
+
+    #[test]
+    fn file_contention_doctor_reports_harness_coverage() {
+        let repo = contention_repo(true);
+        let adapters = doctor_adapters(&["fixture-capable"]);
+        let builtins = dispatch::builtin_adapters().len();
+        let row =
+            doctor_check_file_contention(&adapters, repo.path(), &DoctorHolderStatus, Utc::now());
+        assert_eq!(row.status, CheckStatus::Pass, "{}", row.message);
+        assert!(
+            row.message.contains(&format!(
+                "coverage: enabled=1 supported_disabled=0 unsupported={builtins}"
+            )),
+            "{}",
+            row.message
+        );
+        assert!(row.detail.iter().any(|l| l == "enabled: fixture-capable"));
+
+        let repo = contention_repo(false);
+        let row =
+            doctor_check_file_contention(&adapters, repo.path(), &DoctorHolderStatus, Utc::now());
+        assert!(
+            row.message.contains("enabled=0 supported_disabled=1"),
+            "{}",
+            row.message
+        );
+        assert!(row.message.contains("markers: active=0 stale_unchanged=0"));
+    }
+
+    #[test]
+    fn file_contention_doctor_counts_marker_states_without_contents() {
+        let repo = contention_repo(true);
+        std::fs::write(repo.path().join("src/a.rs"), "a\n").unwrap();
+        std::fs::write(repo.path().join("src/b.rs"), "b\n").unwrap();
+        let now = Utc::now();
+        doctor_marker(repo.path(), "src/lib.rs", "alpha", now);
+        doctor_marker(repo.path(), "src/a.rs", "dead-bravo", now);
+        doctor_marker(
+            repo.path(),
+            "src/b.rs",
+            "dead-charlie",
+            now - chrono::Duration::seconds(30),
+        );
+        std::fs::write(repo.path().join("src/b.rs"), "PRIVATE_SOURCE_SENTINEL\n").unwrap();
+        std::fs::write(repo.path().join(".needle/locks/src/c.rs.lock"), "{not json").unwrap();
+
+        let row = doctor_check_file_contention(
+            &doctor_adapters(&[]),
+            repo.path(),
+            &DoctorHolderStatus,
+            now,
+        );
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(
+            row.message.contains(
+                "markers: active=1 stale_unchanged=1 stale_modified=1 ambiguous=0 unreadable=1"
+            ),
+            "{}",
+            row.message
+        );
+        let modified = row
+            .detail
+            .iter()
+            .find(|l| l.starts_with("src/b.rs: stale_modified"))
+            .unwrap_or_else(|| panic!("{:#?}", row.detail));
+        assert!(modified.contains("bead needle-dead-charlie"), "{modified}");
+        assert!(modified.contains("worker dead-charlie"));
+        assert!(modified.contains("attempt attempt-dead-charlie"));
+        assert!(modified.contains("age 30s"), "{modified}");
+        assert!(modified.contains(&repo.path().display().to_string()));
+        let all = format!("{} {}", row.message, row.detail.join("\n"));
+        assert!(
+            !all.contains("PRIVATE_SOURCE_SENTINEL"),
+            "doctor must not print file contents"
+        );
+        assert_ne!(row.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn file_contention_doctor_live_holder_past_lease_is_warning_not_stale() {
+        let repo = contention_repo(true);
+        let now = Utc::now();
+        doctor_marker(
+            repo.path(),
+            "src/lib.rs",
+            "alpha",
+            now - chrono::Duration::minutes(10),
+        );
+        let row = doctor_check_file_contention(
+            &doctor_adapters(&[]),
+            repo.path(),
+            &DoctorHolderStatus,
+            now,
+        );
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(
+            row.message.contains("active=1 stale_unchanged=0"),
+            "{}",
+            row.message
+        );
+        assert!(
+            row.detail
+                .iter()
+                .any(|l| l.contains("active (live, past lease)")),
+            "{:#?}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn file_contention_doctor_unreadable_tree_is_degraded_not_failed() {
+        let repo = contention_repo(true);
+        std::fs::create_dir_all(repo.path().join(".needle")).unwrap();
+        std::fs::write(repo.path().join(".needle/locks"), "not a directory").unwrap();
+        let row = doctor_check_file_contention(
+            &doctor_adapters(&[]),
+            repo.path(),
+            &DoctorHolderStatus,
+            Utc::now(),
+        );
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(row.message.contains("coverage degraded"), "{}", row.message);
+
+        let repo = contention_repo(false);
+        std::fs::write(
+            repo.path().join(".needle.yaml"),
+            "file_contention:\n  enabled: true\n  lease_secs: 1\n",
+        )
+        .unwrap();
+        let row = doctor_check_file_contention(
+            &doctor_adapters(&[]),
+            repo.path(),
+            &DoctorHolderStatus,
+            Utc::now(),
+        );
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(
+            row.message.contains("invalid file_contention config"),
+            "{}",
+            row.message
+        );
+    }
 
     #[test]
     fn nato_alphabet_has_26_entries() {

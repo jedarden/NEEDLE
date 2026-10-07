@@ -42,7 +42,7 @@ use crate::telemetry::{Telemetry, TelemetryEvent};
 use crate::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus, InputMethod};
 
 /// Actor both the claim identity and the probe stores agree on.
-const CONTEXT_WORKER: &str = "context-propagation-worker";
+pub(super) const CONTEXT_WORKER: &str = "context-propagation-worker";
 /// Name the probe adapter is registered under.
 const PROBE_ADAPTER: &str = "context-probe";
 /// File the probe command leaves behind so a test can prove a child
@@ -52,13 +52,13 @@ const SPAWN_SENTINEL: &str = "spawned.txt";
 /// deliberately not a real directory: nothing may read it.
 const CARRIED_WORKSPACE: &str = "/selected/target-workspace";
 /// Revision the claim identity captured when the claim landed.
-const CAPTURED_REVISION: u64 = 7;
+pub(super) const CAPTURED_REVISION: u64 = 7;
 
 /// Minimal bead store for the pre-spawn gate: answers every `claim_status`
 /// query from one fixed status and counts how often it was consulted. No
 /// other operation is reachable in these tests, so they refuse rather than
 /// pretend to succeed.
-struct ProbeStore {
+pub(super) struct ProbeStore {
     status: ClaimStatus,
     claim_queries: AtomicUsize,
 }
@@ -66,7 +66,7 @@ struct ProbeStore {
 impl ProbeStore {
     /// A store that reports `actor` still holding a live claim at the given
     /// revision and claim epoch.
-    fn claimed_by(actor: &str, revision: u64, claim_epoch: u64) -> Self {
+    pub(super) fn claimed_by(actor: &str, revision: u64, claim_epoch: u64) -> Self {
         ProbeStore {
             status: ClaimStatus {
                 status: BeadStatus::InProgress,
@@ -199,7 +199,7 @@ fn probe_adapter() -> AgentAdapter {
 }
 
 /// The prompt handed to `dispatch_with_context`; only its content matters.
-fn probe_prompt() -> BuiltPrompt {
+pub(super) fn probe_prompt() -> BuiltPrompt {
     BuiltPrompt {
         content: "context propagation probe".to_string(),
         hash: String::new(),
@@ -210,7 +210,7 @@ fn probe_prompt() -> BuiltPrompt {
 }
 
 /// The identity captured when the claim landed in the target store.
-fn captured_identity() -> ClaimIdentity {
+pub(super) fn captured_identity() -> ClaimIdentity {
     ClaimIdentity {
         actor: CONTEXT_WORKER.to_string(),
         revision: Some(CAPTURED_REVISION),

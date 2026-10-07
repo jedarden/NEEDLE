@@ -1476,6 +1476,109 @@ pub fn make_executable(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Phase 20 file-contention opt-in (needle-dcb47589) ──────────────────
+
+    #[test]
+    fn file_contention_defaults_to_disabled() {
+        let config = FileContentionConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.lease_secs, 120);
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(file_contention_for_workspace(dir.path()).unwrap(), config);
+        std::fs::write(dir.path().join(".needle.yaml"), "agent:\n  timeout: 60\n").unwrap();
+        assert_eq!(file_contention_for_workspace(dir.path()).unwrap(), config);
+    }
+
+    #[test]
+    fn file_contention_workspace_opt_in_is_read_from_the_bead_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "file_contention:\n  enabled: true\n  lease_secs: 300\n",
+        )
+        .unwrap();
+        let config = file_contention_for_workspace(dir.path()).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.lease(), std::time::Duration::from_secs(300));
+        // Not a host-only key: no non-overridable warning for it.
+        assert!(ConfigLoader::workspace_non_overridable_keys(dir.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn file_contention_rejects_unknown_keys_and_too_short_leases() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "file_contention:\n  enabled: true\n  enforce: true\n",
+        )
+        .unwrap();
+        assert!(file_contention_for_workspace(dir.path()).is_err());
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "file_contention:\n  enabled: true\n  lease_secs: 5\n",
+        )
+        .unwrap();
+        assert!(file_contention_for_workspace(dir.path()).is_err());
+    }
+
+    #[test]
+    fn file_contention_coverage_has_exactly_three_states() {
+        let on = FileContentionConfig {
+            enabled: true,
+            ..FileContentionConfig::default()
+        };
+        let off = FileContentionConfig::default();
+        let capable = vec![FILE_CONTENTION_HOOK_CAPABILITY.to_string()];
+        let unrelated = vec!["something_else/v1".to_string()];
+        assert_eq!(
+            FileContentionCoverage::resolve(&capable, &on),
+            FileContentionCoverage::Enabled
+        );
+        assert_eq!(
+            FileContentionCoverage::resolve(&capable, &off),
+            FileContentionCoverage::SupportedDisabled
+        );
+        // Without the capability the workspace opt-in changes nothing.
+        assert_eq!(
+            FileContentionCoverage::resolve(&[], &on),
+            FileContentionCoverage::Unsupported
+        );
+        assert_eq!(
+            FileContentionCoverage::resolve(&unrelated, &on),
+            FileContentionCoverage::Unsupported
+        );
+        assert!(FileContentionCoverage::Enabled.writes_markers());
+        assert!(!FileContentionCoverage::SupportedDisabled.writes_markers());
+        assert!(!FileContentionCoverage::Unsupported.writes_markers());
+        let names: Vec<_> = [
+            FileContentionCoverage::Enabled,
+            FileContentionCoverage::SupportedDisabled,
+            FileContentionCoverage::Unsupported,
+        ]
+        .iter()
+        .map(|c| c.as_str())
+        .collect();
+        assert_eq!(names, ["enabled", "supported_disabled", "unsupported"]);
+    }
+
+    #[test]
+    fn file_contention_adapter_capability_is_optional_in_adapter_yaml() {
+        let legacy = "name: legacy\nagent_cli: claude\ninvoke_template: \"claude -p\"\n";
+        let adapter: crate::dispatch::AgentAdapter = serde_yaml::from_str(legacy).unwrap();
+        assert!(
+            adapter.capabilities.is_empty(),
+            "legacy adapters advertise nothing"
+        );
+        let capable = format!("{legacy}capabilities:\n  - {FILE_CONTENTION_HOOK_CAPABILITY}\n");
+        let adapter: crate::dispatch::AgentAdapter = serde_yaml::from_str(&capable).unwrap();
+        assert_eq!(
+            adapter.capabilities,
+            vec![FILE_CONTENTION_HOOK_CAPABILITY.to_string()]
+        );
+    }
     use serial_test::serial;
 
     #[test]
@@ -7568,6 +7671,113 @@ pub struct WorkspaceOverrides {
     /// the rest of `validation` stays host-level.
     #[serde(default)]
     pub validation: Option<WorkspaceValidationOverrides>,
+    /// Phase 20 checkout-local file-contention markers (opt-in). Like
+    /// `validation.fallback_gate`, this is resolved from the BEAD's workspace
+    /// at dispatch time (`file_contention_for_workspace`), never merged into
+    /// the worker's startup config, because the markers belong to that one
+    /// checkout.
+    #[serde(default)]
+    pub file_contention: Option<FileContentionConfig>,
+}
+
+/// Capability string an adapter advertises in its `capabilities:` list when
+/// its harness can run the Phase 20 pre-write hook contract.
+pub const FILE_CONTENTION_HOOK_CAPABILITY: &str = "file_contention_hook/v1";
+
+/// Per-workspace opt-in for Phase 20 file-contention markers (`.needle.yaml`
+/// key `file_contention`). Absent means disabled: legacy behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileContentionConfig {
+    /// Write markers for capable harnesses dispatched into this workspace.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Marker lease; renewed on every write by the holding attempt.
+    #[serde(default = "FileContentionConfig::default_lease_secs")]
+    pub lease_secs: u64,
+}
+
+impl Default for FileContentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lease_secs: Self::default_lease_secs(),
+        }
+    }
+}
+
+impl FileContentionConfig {
+    /// Shortest lease accepted; anything shorter expires between tool calls.
+    pub const MIN_LEASE_SECS: u64 = 30;
+
+    fn default_lease_secs() -> u64 {
+        120
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.lease_secs < Self::MIN_LEASE_SECS {
+            anyhow::bail!(
+                "file_contention.lease_secs must be at least {} (got {})",
+                Self::MIN_LEASE_SECS,
+                self.lease_secs
+            );
+        }
+        Ok(())
+    }
+
+    pub fn lease(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.lease_secs)
+    }
+}
+
+/// Phase 20 hook coverage for one adapter dispatched into one workspace.
+///
+/// A harness without the capability is `Unsupported` and dispatches exactly as
+/// before; absence of the hook is never a health or admission failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileContentionCoverage {
+    /// Capable harness, workspace opted in: markers are written.
+    Enabled,
+    /// Capable harness, workspace not opted in: no markers.
+    SupportedDisabled,
+    /// Harness cannot run the pre-write hook: no markers, unchanged dispatch.
+    Unsupported,
+}
+
+impl FileContentionCoverage {
+    pub fn resolve(adapter_capabilities: &[String], workspace: &FileContentionConfig) -> Self {
+        let capable = adapter_capabilities
+            .iter()
+            .any(|cap| cap == FILE_CONTENTION_HOOK_CAPABILITY);
+        match (capable, workspace.enabled) {
+            (false, _) => Self::Unsupported,
+            (true, false) => Self::SupportedDisabled,
+            (true, true) => Self::Enabled,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::SupportedDisabled => "supported_disabled",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    pub fn writes_markers(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+/// Resolve the file-contention opt-in for the workspace a bead runs in.
+/// A missing `.needle.yaml` or missing key is the disabled default.
+pub fn file_contention_for_workspace(workspace_root: &Path) -> Result<FileContentionConfig> {
+    let config = ConfigLoader::load_workspace(workspace_root)?
+        .and_then(|overrides| overrides.file_contention)
+        .unwrap_or_default();
+    config.validate()?;
+    Ok(config)
 }
 
 /// Validation fields a workspace may set in its own `.needle.yaml`.

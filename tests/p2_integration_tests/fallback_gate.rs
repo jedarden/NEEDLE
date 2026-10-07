@@ -1108,6 +1108,7 @@ async fn assert_armor_no_config_dispatch_reopens_non_compiling_commit(
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
     let mut adapters = HashMap::new();
     adapters.insert(adapter.name.clone(), adapter);

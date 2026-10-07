@@ -374,6 +374,7 @@ fn claude_print_adapter() -> AgentAdapter {
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 

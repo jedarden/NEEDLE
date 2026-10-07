@@ -55,6 +55,7 @@ fn test_adapter_with_hard_timeout(
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 
@@ -82,6 +83,7 @@ fn test_adapter_with_both_timeouts(
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 
@@ -122,6 +124,7 @@ async fn hard_and_legacy_timeouts_are_absolute_under_activity() {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
 
     let telemetry = Telemetry::new("test-worker".to_string());
@@ -251,6 +254,7 @@ async fn hard_deadline_never_resets_on_activity() {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
 
     let telemetry = Telemetry::new("test-worker".to_string());
@@ -516,6 +520,7 @@ async fn hard_timeout_very_short_deadline_fires_immediately() {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
 
     let telemetry = Telemetry::new("test-worker".to_string());

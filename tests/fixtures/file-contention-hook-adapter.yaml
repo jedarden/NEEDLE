@@ -1,0 +1,21 @@
+# Fixture adapter for the file-contention hook contract (needle-7f04ec50).
+#
+# This is NOT a real harness. It stands in for a harness whose pre-write hook
+# honours docs/file-contention-hook-contract.md, so tests can prove that:
+#   - a capable adapter in an opted-in workspace receives the contract env;
+#   - the same adapter without the capability (or in a workspace that has not
+#     opted in) is dispatched exactly as before, with no contract env.
+#
+# Instead of running `needle contention acquire` before a write, the command
+# records the contract inputs it was handed into the workspace, where the
+# test reads them back.
+
+name: file-contention-hook-fixture
+agent_cli: bash
+invoke_template: |
+  env | grep -E '^NEEDLE_(FILE_CONTENTION|BEAD_ID|ATTEMPT_ID|WORKER_ID)' | sort > {workspace}/.hook-contract-env
+timeout_secs: 30
+input_method:
+  method: stdin
+capabilities:
+  - file_contention_hook/v1

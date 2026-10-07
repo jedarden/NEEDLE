@@ -365,7 +365,18 @@ async fn git_head(workspace: &Path) -> Option<String> {
 
 /// Get a list of dirty (modified) paths in the workspace.
 async fn git_dirty_paths(workspace: &Path) -> BTreeSet<String> {
-    let output = match run_git_raw(workspace, &["status", "--porcelain"]).await {
+    let output = match run_git_raw(
+        workspace,
+        &[
+            "status",
+            "--porcelain",
+            "--",
+            ".",
+            crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
+        ],
+    )
+    .await
+    {
         Some(out) => out,
         None => return BTreeSet::new(),
     };

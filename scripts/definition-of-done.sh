@@ -837,6 +837,9 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   run_check "MSRV configuration drift" bash scripts/check-msrv-drift.sh
   run_check "MSRV drift checker tests" bash tests/msrv-drift/run.sh
 
+  # Phase 20: file-contention markers are runtime state, never repository content.
+  run_check "file-contention markers untracked" bash scripts/check-no-contention-markers.sh
+
   # Same for the CI modes: --gate and --target are what keep a rejected change
   # from paying to compile a test suite. Pure bash, milliseconds.
   run_check "dod mode tests" bash tests/dod-modes/run.sh

@@ -336,9 +336,20 @@ async fn check_commit(
         return Ok(None); // No new commit.
     }
 
-    let changed = git_output(workspace, &["diff", "--name-only", &pre_sha, &head])
-        .await
-        .unwrap_or_default();
+    let changed = git_output(
+        workspace,
+        &[
+            "diff",
+            "--name-only",
+            &pre_sha,
+            &head,
+            "--",
+            ".",
+            crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
+        ],
+    )
+    .await
+    .unwrap_or_default();
     let substantial = changed
         .lines()
         .any(|f| !TRIVIAL_PATH_PREFIXES.iter().any(|p| f.starts_with(p)));

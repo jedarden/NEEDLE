@@ -762,6 +762,11 @@ pub struct AgentAdapter {
     /// Harness version for velocity-aware claim scoring.
     #[serde(default)]
     pub harness_version: Option<String>,
+    /// Opt-in harness capabilities this adapter advertises, e.g.
+    /// `file_contention_hook/v1` (plan Phase 20). Empty for legacy adapters,
+    /// which dispatch exactly as before.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 fn default_input_method() -> InputMethod {
@@ -975,6 +980,7 @@ fn builtin_claude_sonnet() -> AgentAdapter {
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1006,6 +1012,7 @@ fn builtin_claude() -> AgentAdapter {
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1034,6 +1041,7 @@ fn builtin_claude_opus() -> AgentAdapter {
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1069,6 +1077,7 @@ fn builtin_opencode() -> AgentAdapter {
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1100,6 +1109,7 @@ fn builtin_codex() -> AgentAdapter {
         output_transform: Some("needle-transform-codex".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1143,6 +1153,7 @@ fn builtin_aider() -> AgentAdapter {
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1166,6 +1177,7 @@ fn builtin_generic() -> AgentAdapter {
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -2413,6 +2425,13 @@ impl Dispatcher {
                         // credential supplied by the worker's parent.
                         command.env_remove("NEEDLE_BEAD_FENCING_TOKEN");
                         command.env_remove("NEEDLE_BEAD_REVISION");
+                    }
+                    // File-contention coverage is per dispatch. A contract the
+                    // worker inherited from an enclosing dispatch names another
+                    // attempt's repo and holder; it must never reach a child
+                    // this dispatch did not opt in itself.
+                    for key in inherited_file_contention_to_strip(&child_env) {
+                        command.env_remove(key);
                     }
                     if let Some(prompt_stdin) = prompt_stdin {
                         command.stdin(std::process::Stdio::from(prompt_stdin));
@@ -4086,6 +4105,16 @@ pub fn print_test_result(result: &AgentTestResult) {
     }
 }
 
+/// Dispatch-scoped file-contention variables the child must not inherit:
+/// every one this dispatch did not set itself (Phase 20).
+fn inherited_file_contention_to_strip(child_env: &HashMap<String, String>) -> Vec<&'static str> {
+    crate::file_contention::env::DISPATCH_SCOPED
+        .iter()
+        .copied()
+        .filter(|key| !child_env.contains_key(*key))
+        .collect()
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -4093,6 +4122,217 @@ pub fn print_test_result(result: &AgentTestResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── File-contention hook contract (Phase 20, needle-7f04ec50) ──
+
+    const FILE_CONTENTION_FIXTURE: &str =
+        include_str!("../../tests/fixtures/file-contention-hook-adapter.yaml");
+    const FILE_CONTENTION_CONTRACT_DOC: &str =
+        include_str!("../../docs/file-contention-hook-contract.md");
+
+    fn file_contention_fixture_adapter() -> AgentAdapter {
+        serde_yaml::from_str(FILE_CONTENTION_FIXTURE).expect("fixture adapter parses")
+    }
+
+    /// Dispatch `adapter` for real (claim verified by a probe store) after
+    /// the worker-side preparation, and return the contract env the child saw.
+    async fn file_contention_dispatch(
+        mut adapter: AgentAdapter,
+        repo: &Path,
+    ) -> (crate::file_contention::session::Preparation, String) {
+        use super::context_propagation::{
+            captured_identity, probe_prompt, ProbeStore, CAPTURED_REVISION, CONTEXT_WORKER,
+        };
+        use crate::file_contention::session::{prepare, DispatchIdentity, Preparation};
+
+        let preparation = prepare(
+            &adapter.capabilities,
+            repo,
+            &DispatchIdentity {
+                bead_id: "needle-hook",
+                attempt_id: "attempt-hook",
+                worker_id: CONTEXT_WORKER,
+                host: "codinghome",
+                holder_pid: std::process::id(),
+            },
+        );
+        if let Preparation::Active { env, .. } = &preparation {
+            adapter.environment.extend(env.iter().cloned());
+        }
+        let store = Arc::new(ProbeStore::claimed_by(CONTEXT_WORKER, CAPTURED_REVISION, 2));
+        let mut adapters = HashMap::new();
+        adapters.insert(adapter.name.clone(), adapter.clone());
+        let telemetry = Telemetry::with_sink(
+            CONTEXT_WORKER.to_string(),
+            crate::telemetry::test_utils::MemorySink::new().0,
+        );
+        let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 60)
+            .with_bead_store(store.clone())
+            .with_worker_id(CONTEXT_WORKER.to_string());
+        let context = DispatchContext::new(
+            crate::claim::ResolvedStoreContext::new(store, repo.to_path_buf()),
+            captured_identity(),
+        );
+        let execution = dispatcher
+            .dispatch_with_context(
+                &BeadId::from("needle-hook"),
+                &probe_prompt(),
+                &adapter,
+                repo,
+                &context,
+            )
+            .await
+            .expect("fixture dispatch runs");
+        assert_eq!(execution.exit_code, 0, "{}", execution.stderr);
+        let seen = std::fs::read_to_string(repo.join(".hook-contract-env"))
+            .expect("fixture recorded its env");
+        (preparation, seen)
+    }
+
+    #[tokio::test]
+    async fn file_contention_hook_contract_capable_fixture_receives_contract() {
+        let repo = crate::file_contention::git_safety::test_support::init_repo();
+        std::fs::write(
+            repo.path().join(".needle.yaml"),
+            "file_contention:\n  enabled: true\n  lease_secs: 90\n",
+        )
+        .unwrap();
+        let adapter = file_contention_fixture_adapter();
+        assert_eq!(
+            adapter.capabilities,
+            vec![crate::config::FILE_CONTENTION_HOOK_CAPABILITY.to_string()]
+        );
+
+        let (preparation, seen) = file_contention_dispatch(adapter, repo.path()).await;
+        assert_eq!(preparation.coverage(), "enabled");
+        for line in [
+            "NEEDLE_FILE_CONTENTION=enabled",
+            "NEEDLE_FILE_CONTENTION_CONTRACT=file_contention_hook/v1",
+            "NEEDLE_FILE_CONTENTION_LEASE_SECS=90",
+            "NEEDLE_BEAD_ID=needle-hook",
+            "NEEDLE_ATTEMPT_ID=attempt-hook",
+            "NEEDLE_WORKER_ID=context-propagation-worker",
+        ] {
+            assert!(
+                seen.lines().any(|l| l == line),
+                "missing {line} in:\n{seen}"
+            );
+        }
+        assert!(seen.contains("NEEDLE_FILE_CONTENTION_REPO="), "{seen}");
+        assert!(seen.contains(&format!(
+            "NEEDLE_FILE_CONTENTION_PID={}",
+            std::process::id()
+        )));
+    }
+
+    #[tokio::test]
+    async fn file_contention_hook_contract_unsupported_and_disabled_dispatch_unchanged() {
+        let opted_in = crate::file_contention::git_safety::test_support::init_repo();
+        std::fs::write(
+            opted_in.path().join(".needle.yaml"),
+            "file_contention:\n  enabled: true\n",
+        )
+        .unwrap();
+        let mut unsupported = file_contention_fixture_adapter();
+        unsupported.capabilities.clear();
+        let baseline_env = unsupported.environment.clone();
+        let (preparation, seen) = file_contention_dispatch(unsupported, opted_in.path()).await;
+        assert_eq!(preparation.coverage(), "unsupported");
+        assert!(
+            !seen.contains("NEEDLE_FILE_CONTENTION"),
+            "unsupported harness must get no contract:\n{seen}"
+        );
+        assert!(!opted_in.path().join(".needle").exists());
+        assert!(baseline_env.is_empty());
+
+        let not_opted_in = crate::file_contention::git_safety::test_support::init_repo();
+        let (preparation, seen) =
+            file_contention_dispatch(file_contention_fixture_adapter(), not_opted_in.path()).await;
+        assert_eq!(preparation.coverage(), "supported_disabled");
+        assert!(!seen.contains("NEEDLE_FILE_CONTENTION"), "{seen}");
+        assert!(!not_opted_in.path().join(".needle").exists());
+    }
+
+    #[test]
+    fn file_contention_hook_contract_strips_inherited_contract_only_when_not_set() {
+        use crate::file_contention::env;
+        let unset = inherited_file_contention_to_strip(&HashMap::new());
+        assert_eq!(unset, env::DISPATCH_SCOPED.to_vec());
+        assert!(
+            !unset.contains(&env::BEAD_ID),
+            "shared identity vars are not scoped"
+        );
+
+        let enabled: HashMap<String, String> = env::DISPATCH_SCOPED
+            .iter()
+            .map(|k| (k.to_string(), "x".to_string()))
+            .collect();
+        assert!(inherited_file_contention_to_strip(&enabled).is_empty());
+    }
+
+    #[test]
+    fn file_contention_hook_contract_no_builtin_claims_support() {
+        for adapter in builtin_adapters() {
+            assert!(
+                adapter.capabilities.is_empty(),
+                "built-in adapter {} must not advertise a hook it cannot run",
+                adapter.name
+            );
+        }
+    }
+
+    #[test]
+    fn file_contention_hook_contract_document_names_every_input_and_result() {
+        use crate::cli::file_contention::{exit, OUTPUT_SCHEMA};
+        use crate::file_contention::env;
+        let doc = FILE_CONTENTION_CONTRACT_DOC;
+        for name in [
+            env::COVERAGE,
+            env::CONTRACT,
+            env::REPO,
+            env::LEASE_SECS,
+            env::HOLDER_PID,
+            env::BEAD_ID,
+            env::ATTEMPT_ID,
+            env::WORKER_ID,
+            env::SESSION_ID,
+            crate::config::FILE_CONTENTION_HOOK_CAPABILITY,
+            OUTPUT_SCHEMA,
+        ] {
+            assert!(doc.contains(name), "contract doc must name {name}");
+        }
+        for code in [
+            exit::OK,
+            exit::USAGE,
+            exit::CONFLICT,
+            exit::NEEDS_ATTENTION,
+            exit::DEGRADED,
+        ] {
+            assert!(
+                doc.contains(&format!("| `{code}` |")),
+                "contract doc must define exit {code}"
+            );
+        }
+        for kind in [
+            "free",
+            "same_attempt",
+            "active_other",
+            "stale_unchanged",
+            "verified_closed",
+            "stale_modified",
+            "ambiguous",
+            "supported_disabled",
+            "unsupported",
+            "degraded",
+        ] {
+            assert!(
+                doc.contains(&format!("`{kind}`")),
+                "contract doc must define {kind}"
+            );
+        }
+        assert!(doc.contains("**optional**"));
+        assert!(doc.contains("same checkout"));
+    }
 
     fn test_adapter(name: &str, template: &str) -> AgentAdapter {
         AgentAdapter {
@@ -4113,6 +4353,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         }
     }
 
@@ -5241,6 +5482,7 @@ output_transform: "needle-transform-custom"
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
         assert_eq!(legacy.timeout_limits(99), (12, 12));
         assert_eq!(legacy.wall_clock_timeout_secs(99), 12);
