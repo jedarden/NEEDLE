@@ -440,6 +440,7 @@ impl Fixture {
             // process's CPU quota; in a CI pod that defers the worker until the
             // harness timeout expires (needle-581f3e67).
             .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
+            .env("NEEDLE_STRANDS__CI_WATCH__ENABLED", "false")
             .env("NEEDLE_INNER", "1")
             .env("ANALYSIS_LOG", &self.analysis_log)
             .args([
@@ -485,6 +486,7 @@ impl Fixture {
             // process's CPU quota; in a CI pod that defers the worker until the
             // harness timeout expires (needle-581f3e67).
             .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
+            .env("NEEDLE_STRANDS__CI_WATCH__ENABLED", "false")
             .env("NEEDLE_INNER", "1")
             .args([
                 "run",
