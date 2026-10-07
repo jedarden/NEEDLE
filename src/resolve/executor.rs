@@ -1495,13 +1495,38 @@ impl GuardedApplier<'_> {
         // window, and adds expiring quarantine labels at the configured
         // ceiling. bead-rs's atomic Quarantine action cannot stand in for it:
         // that action retains the in-progress claim and has no expiry label.
-        let penalty = self.outcome.penalize_errored_release(store, bead).await?;
-        let labels = self
+        let penalty = match self.outcome.penalize_errored_release(store, bead).await {
+            Ok(penalty) => penalty,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "resolve: released bead but failure accounting was unavailable"
+                );
+                return Ok(AppliedDecision::Released(cause));
+            }
+        };
+        let labels = match self
             .op(store.labels(&bead.id), "labels after failure accounting")
-            .await?;
+            .await
+        {
+            Ok(labels) => labels,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "resolve: released bead but failure labels could not be confirmed"
+                );
+                return Ok(AppliedDecision::Released(cause));
+            }
+        };
         let count_label = format!("failure-count:{}", penalty.failure_count);
         if penalty.failure_count == 0 || !labels.iter().any(|label| label == &count_label) {
-            anyhow::bail!("released resolution did not retain its failure count");
+            tracing::warn!(
+                bead_id = %bead.id,
+                "resolve: released bead but failure count was not retained"
+            );
+            return Ok(AppliedDecision::Released(cause));
         }
         if penalty.quarantined
             && (!labels.iter().any(|label| label == "quarantined")
@@ -1509,7 +1534,11 @@ impl GuardedApplier<'_> {
                     .iter()
                     .any(|label| label.starts_with("quarantine-until:")))
         {
-            anyhow::bail!("released resolution did not retain quarantine markers");
+            tracing::warn!(
+                bead_id = %bead.id,
+                "resolve: released bead but quarantine markers were not retained"
+            );
+            return Ok(AppliedDecision::Released(cause));
         }
         Ok(AppliedDecision::Released(if penalty.quarantined {
             ReleaseCause::Quarantined
