@@ -12,8 +12,8 @@
 //!    from the bead's workspace, with `{model}` rendered.
 //! 2. **Exit status** — a zero exit is reported as success with captured
 //!    stdout; a non-zero exit is reported verbatim.
-//! 3. **Failures** — a CLI named by the template but missing from PATH
-//!    surfaces as exit 127 with "command not found" on stderr.
+//! 3. **Failures** — a CLI named by the template but missing from its
+//!    per-test fixture directory surfaces as exit 127 on stderr.
 //! 4. **Routing** — model→adapter routing rules resolve the README's
 //!    non-Claude model families (qwen, gpt, sonnet) to the OpenCode, Codex,
 //!    and Aider adapters, the routed adapter dispatches its own CLI with the
@@ -33,9 +33,9 @@
 //!    process group, including background children the agent CLI spawned
 //!    itself, instead of only the shell leader.
 //!
-//! Every test writes its fake CLIs and invocation log into its own temporary
-//! directory. The adapter template names that executable by its absolute path,
-//! so fake executable lookup does not depend on process-global `PATH` state.
+//! Every test writes its fake CLIs, absent executable paths, and invocation
+//! log into its own temporary directory. Adapter templates name those paths
+//! explicitly, so fixture lookup does not depend on inherited `PATH` state.
 
 use std::collections::HashMap;
 use std::fs;
@@ -206,6 +206,10 @@ const LOG_ENV: &str = "NEEDLE_FAKE_AGENT_LOG";
 
 /// Env var a fake CLI reads to decide its exit code (failure-path control).
 const EXIT_ENV: &str = "NEEDLE_FAKE_AGENT_EXIT";
+/// Env var a fake CLI reads to select a timeout or structured-result fixture.
+const MODE_ENV: &str = "NEEDLE_FAKE_AGENT_MODE";
+/// Env var recorded by the fake CLI to test adapter environment propagation.
+const PROBE_ENV: &str = "NEEDLE_FAKE_AGENT_PROBE";
 
 /// One fake bin directory plus the invocation log its CLIs append to.
 struct FakeCli {
@@ -341,6 +345,10 @@ exit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
     fn executable(&self, name: &str) -> PathBuf {
         self.bin_dir.path().join(name)
     }
+
+    fn missing_executable(&self, name: &str) -> PathBuf {
+        self.bin_dir.path().join(format!("missing-{name}"))
+    }
 }
 
 /// The documented Claude print adapter is normally installed as a user YAML
@@ -396,11 +404,33 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn configure_fake_environment(adapter: &mut AgentAdapter, fake: &FakeCli) {
+    adapter
+        .environment
+        .insert(LOG_ENV.to_string(), fake.log.display().to_string());
+    adapter.environment.insert(
+        "HOME".to_string(),
+        fake.bin_dir.path().display().to_string(),
+    );
+    // The child inherits the worker's environment. Pin every fixture control
+    // variable so ambient CI or caller configuration cannot change this fake
+    // CLI's behavior.
+    adapter
+        .environment
+        .insert(EXIT_ENV.to_string(), "0".to_string());
+    adapter
+        .environment
+        .insert(MODE_ENV.to_string(), "success".to_string());
+    adapter
+        .environment
+        .insert(PROBE_ENV.to_string(), String::new());
+}
+
 fn use_fixture_executable(adapter: &mut AgentAdapter, fake: &FakeCli) {
+    configure_fake_environment(adapter, fake);
     let command = format!("&& {}", adapter.agent_cli);
     let executable = fake.executable(&adapter.agent_cli);
-    // Missing-executable cases intentionally exercise shell lookup and have
-    // no fixture file to name explicitly.
+    // Missing-executable cases use `use_missing_fixture_executable` instead.
     if !executable.is_file() {
         return;
     }
@@ -411,6 +441,25 @@ fn use_fixture_executable(adapter: &mut AgentAdapter, fake: &FakeCli) {
         adapter.name
     );
     adapter.invoke_template = adapter.invoke_template.replacen(&command, &replacement, 1);
+}
+
+/// Point an adapter at an absent executable under this test's private fixture
+/// directory. This exercises the shell's 127 path without relying on a
+/// process-global PATH lookup that another environment could satisfy.
+fn use_missing_fixture_executable(adapter: &mut AgentAdapter, fake: &FakeCli) -> String {
+    let configured_cli = adapter.agent_cli.clone();
+    let missing = fake.missing_executable(&configured_cli);
+    let command = format!("&& {configured_cli}");
+    let replacement = format!("&& {}", shell_quote(&missing.to_string_lossy()));
+    assert!(
+        adapter.invoke_template.contains(&command),
+        "{} template must invoke its configured CLI after `&&`",
+        adapter.name
+    );
+    adapter.invoke_template = adapter.invoke_template.replacen(&command, &replacement, 1);
+    adapter.agent_cli = missing.to_string_lossy().into_owned();
+    configure_fake_environment(adapter, fake);
+    missing.to_string_lossy().into_owned()
 }
 
 fn test_prompt(bead_id: &str) -> BuiltPrompt {
@@ -613,7 +662,6 @@ fn logged_pid(lines: &[String], key: &str) -> u32 {
 // Invocation: each documented input method delivers the prompt as promised
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::serial]
 #[tokio::test]
 async fn opencode_builtin_receives_prompt_via_stdin() {
     let fake = FakeCli::new();
@@ -672,7 +720,6 @@ async fn opencode_builtin_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn claude_code_builtin_receives_prompt_via_stdin() {
     let fake = FakeCli::new();
@@ -730,7 +777,6 @@ async fn claude_code_builtin_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn claude_print_contract_receives_prompt_via_stdin() {
     let fake = FakeCli::new();
@@ -782,7 +828,6 @@ async fn claude_print_contract_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn codex_builtin_receives_prompt_as_argument() {
     let fake = FakeCli::new();
@@ -826,7 +871,6 @@ async fn codex_builtin_receives_prompt_as_argument() {
     );
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn aider_builtin_receives_prompt_via_message_flag() {
     let fake = FakeCli::new();
@@ -873,7 +917,6 @@ async fn aider_builtin_receives_prompt_via_message_flag() {
     assert_eq!(usage.cache_read, 2_100);
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn generic_builtin_delivers_prompt_via_stdin() {
     let fake = FakeCli::new();
@@ -910,7 +953,6 @@ async fn generic_builtin_delivers_prompt_via_stdin() {
 // Cross-adapter execution contract: shipped model, exact argv, and headless mode
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::serial]
 #[tokio::test]
 async fn every_documented_builtin_preserves_its_execution_contract() {
     let fake = FakeCli::new();
@@ -1056,7 +1098,6 @@ async fn every_documented_builtin_preserves_its_execution_contract() {
 // Exit status and failures
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::serial]
 #[tokio::test]
 async fn builtin_adapter_nonzero_exit_is_reported_verbatim() {
     let fake = FakeCli::new();
@@ -1082,7 +1123,6 @@ async fn builtin_adapter_nonzero_exit_is_reported_verbatim() {
     }
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapters_enforce_the_configured_timeout() {
     let fake = FakeCli::new();
@@ -1099,7 +1139,7 @@ async fn documented_adapters_enforce_the_configured_timeout() {
             adapter,
             name,
             &fake,
-            &[("NEEDLE_FAKE_AGENT_MODE", "timeout".to_string())],
+            &[(MODE_ENV, "timeout".to_string())],
             &format!("needle-matrix-{name}-timeout"),
             workspace.path(),
         )
@@ -1115,7 +1155,6 @@ async fn documented_adapters_enforce_the_configured_timeout() {
     }
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapters_enforce_the_idle_timeout() {
     let fake = FakeCli::new();
@@ -1133,7 +1172,7 @@ async fn documented_adapters_enforce_the_idle_timeout() {
             adapter,
             name,
             &fake,
-            &[("NEEDLE_FAKE_AGENT_MODE", "timeout".to_string())],
+            &[(MODE_ENV, "timeout".to_string())],
             &format!("needle-matrix-{name}-idle"),
             workspace.path(),
         )
@@ -1150,7 +1189,6 @@ async fn documented_adapters_enforce_the_idle_timeout() {
     }
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapter_timeout_kills_the_whole_process_group() {
     let fake = FakeCli::new();
@@ -1164,7 +1202,7 @@ async fn documented_adapter_timeout_kills_the_whole_process_group() {
             adapter,
             name,
             &fake,
-            &[("NEEDLE_FAKE_AGENT_MODE", "hang-group".to_string())],
+            &[(MODE_ENV, "hang-group".to_string())],
             &format!("needle-matrix-{name}-group-kill"),
             workspace.path(),
         )
@@ -1204,7 +1242,6 @@ async fn documented_adapter_timeout_kills_the_whole_process_group() {
 // Environment passing and output capture
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapters_pass_environment_and_claim_credentials() {
     let fake = FakeCli::new();
@@ -1216,7 +1253,7 @@ async fn documented_adapters_pass_environment_and_claim_credentials() {
             documented_adapter(name),
             name,
             &fake,
-            &[("NEEDLE_FAKE_AGENT_PROBE", probe.clone())],
+            &[(PROBE_ENV, probe.clone())],
             &format!("needle-matrix-{name}-env"),
             workspace.path(),
         )
@@ -1260,7 +1297,6 @@ async fn documented_adapters_pass_environment_and_claim_credentials() {
     }
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn unclaimed_analysis_strips_claim_credentials_from_documented_adapters() {
     let fake = FakeCli::new();
@@ -1283,7 +1319,7 @@ async fn unclaimed_analysis_strips_claim_credentials_from_documented_adapters() 
             adapter,
             name,
             &fake,
-            &[("NEEDLE_FAKE_AGENT_PROBE", probe.clone())],
+            &[(PROBE_ENV, probe.clone())],
             &format!("needle-matrix-{name}-unclaimed"),
             workspace.path(),
         )
@@ -1311,7 +1347,6 @@ async fn unclaimed_analysis_strips_claim_credentials_from_documented_adapters() 
     }
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapters_classify_exit_codes_and_structured_results() {
     let fake = FakeCli::new();
@@ -1365,7 +1400,7 @@ async fn documented_adapters_classify_exit_codes_and_structured_results() {
             documented_adapter(name),
             name,
             &fake,
-            &[("NEEDLE_FAKE_AGENT_MODE", "api-error".to_string())],
+            &[(MODE_ENV, "api-error".to_string())],
             &bead_id,
             workspace.path(),
         )
@@ -1384,11 +1419,10 @@ async fn documented_adapters_classify_exit_codes_and_structured_results() {
     }
 }
 
-#[serial_test::serial]
 #[tokio::test]
-async fn missing_agent_cli_reports_command_not_found() {
-    // No PATH mutation: the template's CLI is renamed to a binary that cannot
-    // exist, so this test never races sibling tests reading the real PATH.
+async fn missing_agent_cli_reports_missing_executable() {
+    // The command is an absent absolute path under this test's fixture dir,
+    // so the result cannot depend on a sibling process or inherited PATH.
     let fake = FakeCli::new();
     let workspace = unique_workspace();
 
@@ -1397,13 +1431,7 @@ async fn missing_agent_cli_reports_command_not_found() {
         .find(|a| a.name == "opencode")
         .expect("opencode builtin")
         .clone();
-    adapter
-        .environment
-        .insert(LOG_ENV.to_string(), fake.log.display().to_string());
-    adapter.agent_cli = "needle-matrix-missing-cli".to_string();
-    adapter.invoke_template = adapter
-        .invoke_template
-        .replace("opencode", "needle-matrix-missing-cli");
+    let missing_executable = use_missing_fixture_executable(&mut adapter, &fake);
 
     let mut adapters = HashMap::new();
     adapters.insert("opencode".to_string(), adapter);
@@ -1429,7 +1457,8 @@ async fn missing_agent_cli_reports_command_not_found() {
         "shell reports a missing command as 127"
     );
     assert!(
-        result.stderr.contains("command not found"),
+        result.stderr.contains(&missing_executable)
+            && result.stderr.contains("No such file or directory"),
         "stderr must name the failure: {:?}",
         result.stderr
     );
@@ -1439,7 +1468,6 @@ async fn missing_agent_cli_reports_command_not_found() {
     );
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn every_documented_builtin_reports_its_missing_executable() {
     let fake = FakeCli::new();
@@ -1454,11 +1482,7 @@ async fn every_documented_builtin_reports_its_missing_executable() {
     ] {
         let workspace = unique_workspace();
         let mut adapter = documented_adapter(name);
-        let missing_executable = format!("needle-matrix-missing-{name}");
-        let command = format!("&& {}", adapter.agent_cli);
-        let missing_command = format!("&& {missing_executable}");
-        adapter.invoke_template = adapter.invoke_template.replace(&command, &missing_command);
-        adapter.agent_cli = missing_executable.clone();
+        let missing_executable = use_missing_fixture_executable(&mut adapter, &fake);
 
         let result = dispatch_adapter(
             adapter,
@@ -1479,8 +1503,8 @@ async fn every_documented_builtin_reports_its_missing_executable() {
         );
         assert!(
             result.stderr.contains(&missing_executable)
-                && result.stderr.contains("command not found"),
-            "{name} diagnostic should name `{missing_executable}` and say command not found; got {:?}",
+                && result.stderr.contains("No such file or directory"),
+            "{name} diagnostic should identify missing `{missing_executable}`; got {:?}",
             result.stderr
         );
     }
@@ -1551,7 +1575,6 @@ fn fleet_dispatcher(fake: &FakeCli) -> Dispatcher {
         .with_worker_id(MATRIX_WORKER.to_string())
 }
 
-#[serial_test::serial]
 #[tokio::test]
 async fn readme_models_route_to_and_dispatch_the_named_adapters() {
     let fake = FakeCli::new();
@@ -1629,8 +1652,7 @@ async fn readme_models_route_to_and_dispatch_the_named_adapters() {
 
 #[test]
 fn unrouted_models_fall_back_to_the_configured_default_adapter() {
-    // Adapters are wired for registry realism, but nothing spawns and PATH is
-    // untouched, so no PATH lock is needed.
+    // Adapters are wired for registry realism, but nothing spawns.
     let fake = FakeCli::new();
     let dispatcher = fleet_dispatcher(&fake);
     let config = fleet_config();
