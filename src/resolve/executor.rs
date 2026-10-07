@@ -3054,7 +3054,7 @@ mod tests {
             "the essential transition still happened"
         );
 
-        retry_release_failure_is_reported_after_accounting().await;
+        retry_release_failure_is_reported_without_accounting().await;
     }
 
     #[tokio::test]
@@ -3084,8 +3084,8 @@ mod tests {
     #[tokio::test]
     async fn retry_race_before_release_leaves_the_new_owner_alone() {
         let (_dir, workspace) = temp_workspace();
-        // Ownership flips after the entry check and the accounting check both
-        // passed; the pre-release re-check must stop the release.
+        // Ownership flips after the entry check and guidance write. The
+        // pre-release re-check must stop both release and failure accounting.
         let store = RecordingStore::new(workspace).flips_to_foreign_owner_after_n_reads(2);
 
         let applied = apply(&executor(), &store, &retry_decision())
@@ -3095,15 +3095,15 @@ mod tests {
         assert_eq!(applied, AppliedDecision::OwnershipLost);
         assert_eq!(store.released(), 0, "never release someone else's claim");
         assert!(
-            store
+            !store
                 .labels_snapshot()
                 .iter()
-                .any(|l| l == "failure-count:1"),
-            "accounting already applied before the race window"
+                .any(|l| l.starts_with("failure-count:")),
+            "a lost claim must not accrue a failure"
         );
     }
 
-    async fn retry_release_failure_is_reported_after_accounting() {
+    async fn retry_release_failure_is_reported_without_accounting() {
         let (_dir, workspace) = temp_workspace();
         let mut store = RecordingStore::new(workspace);
         store.fail_release = true;
@@ -3112,10 +3112,10 @@ mod tests {
 
         let error = result.expect_err("release failure must surface to the caller");
         assert!(format!("{error:#}").contains("failed to release bead"));
-        assert!(store
+        assert!(!store
             .labels_snapshot()
             .iter()
-            .any(|label| label == "failure-count:1"));
+            .any(|label| label.starts_with("failure-count:")));
         assert_eq!(store.released(), 0);
     }
 
