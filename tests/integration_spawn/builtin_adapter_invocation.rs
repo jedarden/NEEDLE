@@ -33,9 +33,9 @@
 //!    process group, including background children the agent CLI spawned
 //!    itself, instead of only the shell leader.
 //!
-//! The fake CLIs resolve through `PATH`, so tests that prepend a fake bin
-//! directory serialize on a shared mutex: concurrent `set_var` from sibling
-//! tests in this binary would lose one another's directory.
+//! Every test writes its fake CLIs and invocation log into its own temporary
+//! directory. The adapter template names that executable by its absolute path,
+//! so fake executable lookup does not depend on process-global `PATH` state.
 
 use std::collections::HashMap;
 use std::fs;
@@ -46,7 +46,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
 
 use needle::adapter_usage::stream_usage;
 use needle::bead_store::{BeadStore, Filters, RepairReport};
@@ -68,9 +67,6 @@ const MATRIX_EPOCH: u64 = 4;
 /// Attempt id the matrix dispatch context carries, so the environment
 /// contract can assert `NEEDLE_ATTEMPT_ID` reaches the child.
 const MATRIX_ATTEMPT: &str = "matrix-attempt-1";
-
-/// Serializes PATH mutation among the tests in this module.
-static FAKE_PATH_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// A bead store that answers every claim with this module's worker, so the
 /// dispatcher's final pre-spawn gate verifies and the spawn proceeds.
@@ -213,7 +209,7 @@ const EXIT_ENV: &str = "NEEDLE_FAKE_AGENT_EXIT";
 
 /// One fake bin directory plus the invocation log its CLIs append to.
 struct FakeCli {
-    _bin_dir: TempDir,
+    bin_dir: TempDir,
     log: PathBuf,
 }
 
@@ -321,7 +317,7 @@ impl FakeCli {
             // not just the shell leader. The background child redirects its
             // output, so it never holds the stdout/stderr pipes open.
             let script = format!(
-                "#!/usr/bin/env bash\n{RECORD_ENV}{record}{output}\n\
+                "#!/bin/bash\n{RECORD_ENV}{record}{output}\n\
 case \"${{NEEDLE_FAKE_AGENT_MODE:-success}}\" in\n\
   timeout) sleep 10 ;;\n\
   hang-group)\n\
@@ -339,17 +335,18 @@ exit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
                 .expect("make fake CLI executable");
         }
-        FakeCli {
-            _bin_dir: bin_dir,
-            log,
-        }
+        FakeCli { bin_dir, log }
+    }
+
+    fn executable(&self, name: &str) -> PathBuf {
+        self.bin_dir.path().join(name)
     }
 }
 
 /// The documented Claude print adapter is normally installed as a user YAML
 /// file. Keep this test fixture portable: its command shape is the documented
-/// contract, while the executable resolves through the fake PATH below rather
-/// than a host-specific absolute path.
+/// contract, while dispatch replaces the command executable with a per-test
+/// fixture path.
 fn claude_print_adapter() -> AgentAdapter {
     AgentAdapter {
         name: "claude-print".to_string(),
@@ -395,30 +392,25 @@ fn documented_adapter(name: &str) -> AgentAdapter {
     adapter
 }
 
-/// Prepend `dir` to `PATH`, restoring the previous value on drop.
-struct FakePathGuard {
-    previous: Option<std::ffi::OsString>,
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-impl FakePathGuard {
-    fn prepend(dir: &Path) -> Self {
-        let previous = std::env::var_os("PATH");
-        let mut paths = vec![dir.to_path_buf()];
-        paths.extend(std::env::split_paths(
-            previous.as_deref().unwrap_or_default(),
-        ));
-        std::env::set_var("PATH", std::env::join_paths(&paths).expect("join PATH"));
-        FakePathGuard { previous }
+fn use_fixture_executable(adapter: &mut AgentAdapter, fake: &FakeCli) {
+    let command = format!("&& {}", adapter.agent_cli);
+    let executable = fake.executable(&adapter.agent_cli);
+    // Missing-executable cases intentionally exercise shell lookup and have
+    // no fixture file to name explicitly.
+    if !executable.is_file() {
+        return;
     }
-}
-
-impl Drop for FakePathGuard {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-    }
+    let replacement = format!("&& {}", shell_quote(&executable.to_string_lossy()));
+    assert!(
+        adapter.invoke_template.contains(&command),
+        "{} template must invoke its configured CLI after `&&`",
+        adapter.name
+    );
+    adapter.invoke_template = adapter.invoke_template.replacen(&command, &replacement, 1);
 }
 
 fn test_prompt(bead_id: &str) -> BuiltPrompt {
@@ -460,6 +452,7 @@ async fn dispatch_adapter(
     bead_id: &str,
     workspace: &Path,
 ) -> anyhow::Result<ExecutionResult> {
+    use_fixture_executable(&mut adapter, fake);
     adapter
         .environment
         .insert(LOG_ENV.to_string(), fake.log.display().to_string());
@@ -502,6 +495,7 @@ async fn dispatch_unclaimed(
     bead_id: &str,
     workspace: &Path,
 ) -> anyhow::Result<ExecutionResult> {
+    use_fixture_executable(&mut adapter, fake);
     adapter
         .environment
         .insert(LOG_ENV.to_string(), fake.log.display().to_string());
@@ -619,12 +613,10 @@ fn logged_pid(lines: &[String], key: &str) -> u32 {
 // Invocation: each documented input method delivers the prompt as promised
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn opencode_builtin_receives_prompt_via_stdin() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
     let workspace = unique_workspace();
 
     let result = dispatch_builtin(
@@ -680,12 +672,10 @@ async fn opencode_builtin_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn claude_code_builtin_receives_prompt_via_stdin() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
     let workspace = unique_workspace();
 
     // The built-in Claude adapter is exercised with its output transform
@@ -740,12 +730,10 @@ async fn claude_code_builtin_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn claude_print_contract_receives_prompt_via_stdin() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
     let workspace = unique_workspace();
 
     let adapter = claude_print_adapter();
@@ -794,12 +782,10 @@ async fn claude_print_contract_receives_prompt_via_stdin() {
     );
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn codex_builtin_receives_prompt_as_argument() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
     let workspace = unique_workspace();
 
     let result = dispatch_builtin("codex", &fake, &[], "needle-matrix-codex", workspace.path())
@@ -840,12 +826,10 @@ async fn codex_builtin_receives_prompt_as_argument() {
     );
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn aider_builtin_receives_prompt_via_message_flag() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
     let workspace = unique_workspace();
 
     let result = dispatch_builtin("aider", &fake, &[], "needle-matrix-aider", workspace.path())
@@ -889,12 +873,10 @@ async fn aider_builtin_receives_prompt_via_message_flag() {
     assert_eq!(usage.cache_read, 2_100);
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn generic_builtin_delivers_prompt_via_stdin() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
     let workspace = unique_workspace();
 
     // The generic template pipes {prompt_file} into the CLI's stdin.
@@ -928,12 +910,10 @@ async fn generic_builtin_delivers_prompt_via_stdin() {
 // Cross-adapter execution contract: shipped model, exact argv, and headless mode
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn every_documented_builtin_preserves_its_execution_contract() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     // `generic` is a copy-me YAML template, not one of the runnable adapters
     // advertised in the README. Keep every concrete built-in profile in this
@@ -1076,12 +1056,10 @@ async fn every_documented_builtin_preserves_its_execution_contract() {
 // Exit status and failures
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn builtin_adapter_nonzero_exit_is_reported_verbatim() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
         let workspace = unique_workspace();
@@ -1104,12 +1082,10 @@ async fn builtin_adapter_nonzero_exit_is_reported_verbatim() {
     }
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapters_enforce_the_configured_timeout() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
         let workspace = unique_workspace();
@@ -1139,12 +1115,10 @@ async fn documented_adapters_enforce_the_configured_timeout() {
     }
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapters_enforce_the_idle_timeout() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
         let workspace = unique_workspace();
@@ -1176,12 +1150,10 @@ async fn documented_adapters_enforce_the_idle_timeout() {
     }
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapter_timeout_kills_the_whole_process_group() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
         let workspace = unique_workspace();
@@ -1232,12 +1204,10 @@ async fn documented_adapter_timeout_kills_the_whole_process_group() {
 // Environment passing and output capture
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapters_pass_environment_and_claim_credentials() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
         let workspace = unique_workspace();
@@ -1290,12 +1260,10 @@ async fn documented_adapters_pass_environment_and_claim_credentials() {
     }
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn unclaimed_analysis_strips_claim_credentials_from_documented_adapters() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
         let workspace = unique_workspace();
@@ -1343,12 +1311,10 @@ async fn unclaimed_analysis_strips_claim_credentials_from_documented_adapters() 
     }
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn documented_adapters_classify_exit_codes_and_structured_results() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
         let workspace = trace_workspace();
@@ -1418,7 +1384,7 @@ async fn documented_adapters_classify_exit_codes_and_structured_results() {
     }
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn missing_agent_cli_reports_command_not_found() {
     // No PATH mutation: the template's CLI is renamed to a binary that cannot
@@ -1473,12 +1439,10 @@ async fn missing_agent_cli_reports_command_not_found() {
     );
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn every_documented_builtin_reports_its_missing_executable() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
 
     for name in [
         "claude",
@@ -1577,6 +1541,7 @@ fn fleet_dispatcher(fake: &FakeCli) -> Dispatcher {
             .unwrap_or_else(|| panic!("builtin adapter {name} missing from the registry"))
             .clone();
         adapter.output_transform = None;
+        use_fixture_executable(&mut adapter, fake);
         adapter
             .environment
             .insert(LOG_ENV.to_string(), fake.log.display().to_string());
@@ -1586,12 +1551,10 @@ fn fleet_dispatcher(fake: &FakeCli) -> Dispatcher {
         .with_worker_id(MATRIX_WORKER.to_string())
 }
 
-#[serial_test::file_serial(process_contracts)]
+#[serial_test::serial]
 #[tokio::test]
 async fn readme_models_route_to_and_dispatch_the_named_adapters() {
-    let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
-    let _path = FakePathGuard::prepend(fake._bin_dir.path());
     let dispatcher = fleet_dispatcher(&fake);
     let config = fleet_config();
 
