@@ -343,7 +343,12 @@ version = 1
 # dispatches see none, inherited contract vars are stripped unless this
 # dispatch set them, no built-in adapter claims support, and the published
 # contract document names every input, exit code, and assessment.
-max_tests = 4155
+# +4 Phase 20 doctor row (needle-0d2df6d5): per-adapter coverage states,
+# active/stale-unchanged/stale-modified/unreadable census with holder, bead,
+# worker, age and workspace but no file contents, a live holder past its
+# lease as a warning rather than stale, and an unreadable tree or invalid
+# opt-in reported as degraded without failing doctor.
+max_tests = 4159
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
