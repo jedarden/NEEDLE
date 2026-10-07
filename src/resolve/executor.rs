@@ -48,7 +48,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use crate::bead_store::{AttemptResolution, BeadStore, ClaimMutationResult, ResolutionAction};
+use crate::bead_store::{
+    AttemptResolution, BeadStore, ClaimMutationResult, RecoveryReleaseOutcome, ResolutionAction,
+};
 use crate::claim::ClaimHandle;
 use crate::config::Config;
 use crate::mitosis::MitosisEvaluator;
@@ -1199,11 +1201,25 @@ impl DecisionExecutor {
         actor: &str,
         cause: ReleaseCause,
     ) -> Result<bool> {
-        if !self.ensure_owned(store, &bead.id, actor).await? {
+        let expected = self
+            .op(store.claim_status(&bead.id), "claim_status")
+            .await?;
+        if expected.status != BeadStatus::InProgress || expected.assignee.as_deref() != Some(actor)
+        {
             return Ok(false);
         }
-        match self.op(store.release(&bead.id), "release").await {
-            Ok(_) => {
+        // The observed revision and claim epoch are checked by bead-rs in the
+        // release operation. A fresh claim by the same actor must not be
+        // released by this dispatch's compatibility cleanup.
+        match self
+            .op(
+                store.release_recovery(&bead.id, &expected),
+                "release_recovery",
+            )
+            .await
+        {
+            Ok(RecoveryReleaseOutcome::Conflict) => Ok(false),
+            Ok(RecoveryReleaseOutcome::Released) => {
                 let current = self.op(store.show(&bead.id), "show after release").await?;
                 if current.status != BeadStatus::Open {
                     anyhow::bail!(
@@ -1414,6 +1430,7 @@ mod tests {
         dependencies: Mutex<Vec<(String, String)>>,
         fail_append_notes: bool,
         fail_release: bool,
+        recovery_conflict: bool,
         fail_block: bool,
         fail_close: bool,
         noop_close: bool,
@@ -1474,6 +1491,7 @@ mod tests {
                 dependencies: Mutex::new(Vec::new()),
                 fail_append_notes: false,
                 fail_release: false,
+                recovery_conflict: false,
                 fail_block: false,
                 fail_close: false,
                 noop_close: false,
@@ -1533,6 +1551,11 @@ mod tests {
 
         fn with_noop_close(mut self) -> Self {
             self.noop_close = true;
+            self
+        }
+
+        fn with_recovery_conflict(mut self) -> Self {
+            self.recovery_conflict = true;
             self
         }
 
@@ -1737,6 +1760,20 @@ mod tests {
             claim.assignee = None;
             Ok(())
         }
+        async fn release_recovery(
+            &self,
+            id: &BeadId,
+            expected: &crate::types::ClaimStatus,
+        ) -> Result<RecoveryReleaseOutcome> {
+            if self.recovery_conflict {
+                return Ok(RecoveryReleaseOutcome::Conflict);
+            }
+            if self.claim_status(id).await? != *expected {
+                return Ok(RecoveryReleaseOutcome::Conflict);
+            }
+            self.release(id).await?;
+            Ok(RecoveryReleaseOutcome::Released)
+        }
         async fn block(&self, _id: &BeadId) -> Result<()> {
             if self.fail_block {
                 anyhow::bail!("block failed (injected)");
@@ -1931,6 +1968,7 @@ mod tests {
 
         complete_verified_success_resets_failure_accounting().await;
         compatibility_close_must_change_authoritative_state().await;
+        compatibility_release_refuses_a_replaced_claim().await;
         advertised_atomic_resolution_closes_once_and_replay_is_not_completion().await;
         stale_revision_refuses_atomic_resolution().await;
         crate::resolve::reducer::test_contracts::complete_requires_authoritative_work_and_gate_acceptance();
@@ -1957,6 +1995,20 @@ mod tests {
         assert_eq!(
             store.show(&store.bead().id).await.unwrap().status,
             BeadStatus::Open
+        );
+    }
+
+    async fn compatibility_release_refuses_a_replaced_claim() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace).with_recovery_conflict();
+        let applied = apply(&executor(), &store, &retry_decision())
+            .await
+            .expect("a changed claim should be left to its current owner");
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.released(), 0);
+        assert_eq!(
+            store.show(&store.bead().id).await.unwrap().status,
+            BeadStatus::InProgress
         );
     }
 
