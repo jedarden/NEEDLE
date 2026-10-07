@@ -762,6 +762,11 @@ pub struct AgentAdapter {
     /// Harness version for velocity-aware claim scoring.
     #[serde(default)]
     pub harness_version: Option<String>,
+    /// Opt-in harness capabilities this adapter advertises, e.g.
+    /// `file_contention_hook/v1` (plan Phase 20). Empty for legacy adapters,
+    /// which dispatch exactly as before.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 fn default_input_method() -> InputMethod {
@@ -975,6 +980,7 @@ fn builtin_claude_sonnet() -> AgentAdapter {
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1006,6 +1012,7 @@ fn builtin_claude() -> AgentAdapter {
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1034,6 +1041,7 @@ fn builtin_claude_opus() -> AgentAdapter {
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1069,6 +1077,7 @@ fn builtin_opencode() -> AgentAdapter {
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1100,6 +1109,7 @@ fn builtin_codex() -> AgentAdapter {
         output_transform: Some("needle-transform-codex".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1143,6 +1153,7 @@ fn builtin_aider() -> AgentAdapter {
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -1166,6 +1177,7 @@ fn builtin_generic() -> AgentAdapter {
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -4113,6 +4125,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         }
     }
 
@@ -5241,6 +5254,7 @@ output_transform: "needle-transform-custom"
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
         assert_eq!(legacy.timeout_limits(99), (12, 12));
         assert_eq!(legacy.wall_clock_timeout_secs(99), 12);

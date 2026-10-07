@@ -14544,6 +14544,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -14595,6 +14596,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -14639,6 +14641,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -14683,6 +14686,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -14766,6 +14770,7 @@ mod tests {
                 output_transform: None,
                 harness: None,
                 harness_version: None,
+                capabilities: Vec::new(),
             };
 
             let result = worker.apply_routing_rules(&adapter);
@@ -14815,6 +14820,7 @@ mod tests {
                 output_transform: None,
                 harness: None,
                 harness_version: None,
+                capabilities: Vec::new(),
             };
 
             let result = worker.apply_routing_rules(&adapter);
@@ -14887,6 +14893,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -14954,6 +14961,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -15030,6 +15038,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -15109,6 +15118,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -15192,6 +15202,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -15278,6 +15289,7 @@ mod tests {
             output_transform: None,
             harness: None,
             harness_version: None,
+            capabilities: Vec::new(),
         };
 
         let result = worker.apply_routing_rules(&adapter);

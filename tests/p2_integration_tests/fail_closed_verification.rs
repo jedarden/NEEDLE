@@ -251,6 +251,7 @@ fn probe_adapter() -> AgentAdapter {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 

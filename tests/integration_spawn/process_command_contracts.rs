@@ -231,6 +231,7 @@ fn process_contract_adapter(name: &str, template: &str) -> AgentAdapter {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 

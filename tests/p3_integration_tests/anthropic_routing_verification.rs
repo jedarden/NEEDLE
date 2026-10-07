@@ -83,6 +83,7 @@ fn make_mock_adapters() -> HashMap<String, AgentAdapter> {
             output_transform: Some("needle-transform-claude".to_string()),
             harness: Some("needle".to_string()),
             harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            capabilities: Vec::new(),
         },
     );
 
@@ -107,6 +108,7 @@ fn make_mock_adapters() -> HashMap<String, AgentAdapter> {
             output_transform: None,
             harness: Some("needle".to_string()),
             harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            capabilities: Vec::new(),
         },
     );
 

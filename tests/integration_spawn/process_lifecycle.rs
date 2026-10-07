@@ -866,6 +866,7 @@ fn blocking_adapter(
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 
@@ -888,6 +889,7 @@ fn immediate_adapter(name: &str, output: &str) -> AgentAdapter {
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 

@@ -84,6 +84,7 @@ fn stub_adapter(command: &str, provider: Option<&str>, model: Option<&str>) -> A
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     }
 }
 

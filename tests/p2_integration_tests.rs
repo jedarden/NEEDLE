@@ -2003,6 +2003,7 @@ fn create_mitosis_dispatcher(
         output_transform: None,
         harness: None,
         harness_version: None,
+        capabilities: Vec::new(),
     };
     adapters.insert("mitosis-bash".to_string(), adapter);
     let telemetry = Telemetry::new("mitosis-test".to_string());
