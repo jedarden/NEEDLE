@@ -332,7 +332,13 @@ version = 1
 # identity in list, all-or-none rename, and escaping-path/missing-identity
 # rejection. Identity arrives through an injected lookup (no global env); the
 # real-git fixture is git_safety::test_support, under its existing exception.
-max_tests = 4145
+# +5 Phase 20 worker lifecycle contracts (needle-04798783): unsupported and
+# supported_disabled dispatch stays byte-identical with no marker tree, enabled
+# dispatch passes the hook contract and attempt identity, hook-written markers
+# are released by do_log for this attempt only, shutdown release drops markers
+# without claim context, and an invalid opt-in reports degraded instead of
+# advertising protection. In-process Worker via make_worker (Explore pinned).
+max_tests = 4150
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -9,6 +9,7 @@
 pub mod assessment;
 pub mod env;
 pub mod git_safety;
+pub mod session;
 pub mod store;
 
 pub use assessment::{

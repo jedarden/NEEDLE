@@ -954,6 +954,10 @@ pub struct Worker {
     last_effort: Option<EffortData>,
     /// HEAD SHA captured just before agent dispatch; used to detect new commits.
     pre_dispatch_head: Option<String>,
+    /// File-contention markers owned by the current attempt (Phase 20).
+    /// `Some` only when coverage resolved to `enabled` for this dispatch;
+    /// released on every terminal path (do_log, shutdown release).
+    file_contention: Option<crate::file_contention::session::ContentionSession>,
     /// Timestamp when dispatch started for the current bead.
     /// Used by the post-dispatch audit to identify beads created during the dispatch window.
     dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1540,6 +1544,7 @@ impl Worker {
             exec_started_at: None,
             last_effort: None,
             pre_dispatch_head: None,
+            file_contention: None,
             current_workspace: default_workspace,
             booting_emitted,
             last_waterfall_restarts: 0,
@@ -4478,6 +4483,7 @@ impl Worker {
             .attempt_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("execution started without an attempt identity"))?;
+        let adapter = self.begin_file_contention(adapter, &bead, &attempt_id);
 
         // Record the adapter's declared profile before the workspace borrow
         // below pins `self` for the manifest hash.
@@ -7275,6 +7281,10 @@ impl Worker {
         // Check daily budget thresholds.
         self.check_budget()?;
 
+        // Every terminal outcome passes through here: drop the attempt's
+        // file-contention markers before its identity is cleared.
+        self.end_file_contention();
+
         // Clear per-cycle state.
         self.last_effort = None;
         self.beads_processed += 1;
@@ -8872,6 +8882,9 @@ impl Worker {
     /// in-progress beads are returned to the open state and can be claimed by
     /// another worker.
     async fn release_current_bead(&mut self, shutdown_reason: &str) {
+        // Markers are independent of the claim: drop them even when the claim
+        // itself cannot be released below.
+        self.end_file_contention();
         let Some(bead) = self.current_bead.as_ref() else {
             return;
         };
@@ -9032,6 +9045,102 @@ impl Worker {
     /// collisions when workers from different adapter pools share a NATO name.
     fn qualified_id(&self) -> String {
         self.qualified_id.clone()
+    }
+
+    /// Resolve file-contention coverage for this dispatch (needle-04798783).
+    ///
+    /// Only `enabled` coverage changes the adapter: it gains the hook-contract
+    /// environment and the attempt starts owning markers. Every other state
+    /// returns the adapter untouched, so dispatch is byte-for-byte what it was
+    /// without Phase 20 and no marker tree is created.
+    fn begin_file_contention(
+        &mut self,
+        mut adapter: dispatch::AgentAdapter,
+        bead: &Bead,
+        attempt_id: &str,
+    ) -> dispatch::AgentAdapter {
+        use crate::file_contention::session::{self, DispatchIdentity, Preparation};
+
+        // A session left over from an attempt that never reached do_log.
+        self.end_file_contention();
+        let workspace = if is_workspace_unset(&bead.workspace) {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        let worker_id = self.qualified_id();
+        let host = gethostname::gethostname().to_string_lossy().into_owned();
+        let preparation = session::prepare(
+            &adapter.capabilities,
+            &workspace,
+            &DispatchIdentity {
+                bead_id: bead.id.as_ref(),
+                attempt_id,
+                worker_id: &worker_id,
+                host: &host,
+                holder_pid: std::process::id(),
+            },
+        );
+        let coverage = preparation.coverage();
+        let reason = match &preparation {
+            Preparation::Inactive { reason, .. } => reason.clone(),
+            Preparation::Active { .. } => None,
+        };
+        // Unsupported is the default for every legacy adapter: stay silent.
+        if coverage != crate::config::FileContentionCoverage::Unsupported.as_str() {
+            if let Some(reason) = &reason {
+                tracing::warn!(bead_id = %bead.id, coverage, reason = %reason, "file contention degraded");
+            }
+            let _ = self.telemetry.emit(
+                EventKind::FileContentionCoverage {
+                    bead_id: bead.id.clone(),
+                    adapter: adapter.name.clone(),
+                    coverage: coverage.to_string(),
+                    reason,
+                },
+                Utc::now(),
+            );
+        }
+        if let Preparation::Active { session, env } = preparation {
+            adapter.environment.extend(env);
+            self.file_contention = Some(session);
+        }
+        adapter
+    }
+
+    /// Release the current attempt's file-contention markers, if any.
+    fn end_file_contention(&mut self) {
+        let Some(session) = self.file_contention.take() else {
+            return;
+        };
+        let bead_id = session.participant().bead_id.clone().unwrap_or_default();
+        match session.release(self.pre_dispatch_head.as_deref()) {
+            Ok(release) => {
+                if !release.committed_markers.is_empty() {
+                    tracing::error!(
+                        bead_id = %bead_id,
+                        markers = ?release.committed_markers,
+                        "attempt commits contain file-contention markers; they must not be pushed"
+                    );
+                }
+                if !release.released.is_empty() || !release.committed_markers.is_empty() {
+                    let _ = self.telemetry.emit(
+                        EventKind::FileContentionReleased {
+                            bead_id: BeadId::from(bead_id),
+                            released: release.released,
+                            committed_markers: release.committed_markers,
+                        },
+                        Utc::now(),
+                    );
+                }
+            }
+            Err(err) => tracing::warn!(
+                bead_id = %bead_id,
+                repo = %session.repo().display(),
+                error = %err,
+                "failed to release file-contention markers; they expire with their lease"
+            ),
+        }
     }
 
     /// Update the worker's registry entry after state changes (e.g., config reload).
@@ -13709,6 +13818,277 @@ mod tests {
             "attempt IDs are UUIDv7 so ledger rows sort by dispatch start"
         );
         assert_eq!(observed, attempt_id);
+    }
+
+    // ── File-contention worker lifecycle (Phase 20, needle-04798783) ──
+
+    struct FileContentionFixture {
+        worker: Worker,
+        repo: tempfile::TempDir,
+        bead: Bead,
+        events: Arc<Mutex<Vec<TelemetryEvent>>>,
+    }
+
+    /// A booted worker, a real git checkout as the bead's workspace (opted
+    /// in when `optin` is set), and a recording telemetry sink.
+    async fn file_contention_fixture(optin: Option<&str>) -> FileContentionFixture {
+        let repo = crate::file_contention::git_safety::test_support::init_repo();
+        if let Some(yaml) = optin {
+            std::fs::write(repo.path().join(".needle.yaml"), yaml).unwrap();
+        }
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().await.unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        worker.telemetry = Telemetry::with_sink(
+            "file-contention-test".to_string(),
+            RecordingTelemetrySink(events.clone()),
+        );
+        let mut bead = make_test_bead("needle-fc");
+        bead.workspace = repo.path().to_path_buf();
+        worker.current_bead = Some(bead.clone());
+        worker.attempt_id = Some("attempt-fc".to_string());
+        FileContentionFixture {
+            worker,
+            repo,
+            bead,
+            events,
+        }
+    }
+
+    fn capable(mut adapter: dispatch::AgentAdapter) -> dispatch::AgentAdapter {
+        adapter.capabilities = vec![crate::config::FILE_CONTENTION_HOOK_CAPABILITY.to_string()];
+        adapter
+    }
+
+    const FILE_CONTENTION_ON: &str = "file_contention:\n  enabled: true\n";
+
+    async fn events_of(fx: &FileContentionFixture, kind: &str) -> Vec<serde_json::Value> {
+        fx.worker
+            .telemetry
+            .force_flush_async(Duration::from_secs(1))
+            .await
+            .unwrap();
+        fx.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.event_type == kind)
+            .map(|e| e.data.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn file_contention_unsupported_and_disabled_leave_dispatch_unchanged() {
+        // Unsupported adapter in an opted-in workspace.
+        let mut fx = file_contention_fixture(Some(FILE_CONTENTION_ON)).await;
+        let adapter = fx.worker.resolve_adapter().unwrap();
+        let before = adapter.environment.clone();
+        let bead = fx.bead.clone();
+        let after = fx
+            .worker
+            .begin_file_contention(adapter, &bead, "attempt-fc");
+        assert_eq!(after.environment, before);
+        assert!(fx.worker.file_contention.is_none());
+        assert!(!fx.repo.path().join(".needle").exists());
+        assert!(events_of(&fx, "file_contention.coverage").await.is_empty());
+
+        // Capable adapter in a workspace that has not opted in.
+        let mut fx = file_contention_fixture(None).await;
+        let adapter = capable(fx.worker.resolve_adapter().unwrap());
+        let before = adapter.environment.clone();
+        let bead = fx.bead.clone();
+        let after = fx
+            .worker
+            .begin_file_contention(adapter, &bead, "attempt-fc");
+        assert_eq!(after.environment, before);
+        assert!(fx.worker.file_contention.is_none());
+        assert!(!fx.repo.path().join(".needle").exists());
+        let exclude =
+            std::fs::read_to_string(fx.repo.path().join(".git/info/exclude")).unwrap_or_default();
+        assert!(
+            !exclude.contains(".needle/locks"),
+            "disabled must not touch git config"
+        );
+        let coverage = events_of(&fx, "file_contention.coverage").await;
+        assert_eq!(coverage.len(), 1);
+        assert_eq!(coverage[0]["coverage"], "supported_disabled");
+    }
+
+    #[tokio::test]
+    async fn file_contention_enabled_passes_hook_contract_and_identity() {
+        let mut fx = file_contention_fixture(Some(FILE_CONTENTION_ON)).await;
+        let adapter = capable(fx.worker.resolve_adapter().unwrap());
+        let bead = fx.bead.clone();
+        let after = fx
+            .worker
+            .begin_file_contention(adapter, &bead, "attempt-fc");
+
+        let env = &after.environment;
+        let repo = fx.repo.path().canonicalize().unwrap();
+        assert_eq!(env["NEEDLE_FILE_CONTENTION"], "enabled");
+        assert_eq!(
+            env["NEEDLE_FILE_CONTENTION_CONTRACT"],
+            crate::config::FILE_CONTENTION_HOOK_CAPABILITY
+        );
+        assert_eq!(
+            Path::new(&env["NEEDLE_FILE_CONTENTION_REPO"])
+                .canonicalize()
+                .unwrap(),
+            repo
+        );
+        assert_eq!(env["NEEDLE_FILE_CONTENTION_LEASE_SECS"], "120");
+        assert_eq!(env["NEEDLE_BEAD_ID"], "needle-fc");
+        assert_eq!(env["NEEDLE_ATTEMPT_ID"], "attempt-fc");
+        assert_eq!(env["NEEDLE_WORKER_ID"], fx.worker.qualified_id());
+        assert_eq!(
+            env["NEEDLE_FILE_CONTENTION_PID"],
+            std::process::id().to_string()
+        );
+        let exclude = std::fs::read_to_string(fx.repo.path().join(".git/info/exclude")).unwrap();
+        assert!(exclude.contains("/.needle/locks/"), "{exclude}");
+        assert!(fx.worker.file_contention.is_some());
+        // Markers are acquired lazily by the harness hook, never up front.
+        assert!(!fx
+            .repo
+            .path()
+            .join(".needle/locks/src/lib.rs.lock")
+            .exists());
+        let coverage = events_of(&fx, "file_contention.coverage").await;
+        assert_eq!(coverage[0]["coverage"], "enabled");
+    }
+
+    #[tokio::test]
+    async fn file_contention_hook_markers_are_released_by_do_log_only_for_this_attempt() {
+        let mut fx = file_contention_fixture(Some(FILE_CONTENTION_ON)).await;
+        let adapter = capable(fx.worker.resolve_adapter().unwrap());
+        let bead = fx.bead.clone();
+        let after = fx
+            .worker
+            .begin_file_contention(adapter, &bead, "attempt-fc");
+
+        // The harness hook runs the CLI with exactly the env dispatch passes.
+        let hook_env = after.environment.clone();
+        let lookup = move |name: &str| hook_env.get(name).cloned();
+        let acquire = |paths: &[&str]| crate::cli::file_contention::ContentionCommand::Acquire {
+            paths: paths.iter().map(PathBuf::from).collect(),
+            intent: crate::cli::file_contention::IntentArg::Modify,
+            rename_from: None,
+            rename_to: None,
+            identity: crate::cli::file_contention::IdentityArgs {
+                json: true,
+                ..Default::default()
+            },
+        };
+        let status = crate::file_contention::LocalHolderStatus::new(None, Duration::from_secs(60));
+        let (code, out) = crate::cli::file_contention::execute(
+            &acquire(&["src/lib.rs"]),
+            &lookup,
+            &status,
+            Utc::now(),
+        );
+        assert_eq!(code, 0, "{out}");
+
+        // A second, unrelated attempt holds another file in the same checkout.
+        let other = crate::file_contention::Participant {
+            bead_id: Some("needle-other".into()),
+            attempt_id: Some("attempt-other".into()),
+            session_id: None,
+            worker_id: "other-worker".into(),
+            host: "codinghome".into(),
+            pid: 1,
+        };
+        std::fs::write(fx.repo.path().join("README.md"), "x\n").unwrap();
+        let store = crate::file_contention::MarkerStore::open(fx.repo.path()).unwrap();
+        let never = |_: &str, _: &crate::file_contention::MarkerRead| false;
+        store
+            .acquire(
+                &other,
+                &[crate::file_contention::PathIntent {
+                    path: PathBuf::from("README.md"),
+                    intent: crate::file_contention::WriteIntent::Modify,
+                }],
+                Duration::from_secs(60),
+                Utc::now(),
+                &never,
+            )
+            .unwrap();
+
+        fx.worker.state = WorkerState::Logging;
+        fx.worker.do_log().unwrap();
+
+        assert!(fx.worker.file_contention.is_none());
+        assert!(!fx
+            .repo
+            .path()
+            .join(".needle/locks/src/lib.rs.lock")
+            .exists());
+        assert!(
+            fx.repo.path().join(".needle/locks/README.md.lock").exists(),
+            "another attempt's marker must survive this attempt's release"
+        );
+        let released = events_of(&fx, "file_contention.released").await;
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0]["released"][0], "src/lib.rs");
+        assert_eq!(
+            released[0]["committed_markers"].as_array().unwrap().len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn file_contention_shutdown_release_drops_markers_without_claim_context() {
+        let mut fx = file_contention_fixture(Some(FILE_CONTENTION_ON)).await;
+        let adapter = capable(fx.worker.resolve_adapter().unwrap());
+        let bead = fx.bead.clone();
+        fx.worker
+            .begin_file_contention(adapter, &bead, "attempt-fc");
+        let session = fx.worker.file_contention.clone().unwrap();
+        let store = crate::file_contention::MarkerStore::open(session.repo()).unwrap();
+        let never = |_: &str, _: &crate::file_contention::MarkerRead| false;
+        store
+            .acquire(
+                session.participant(),
+                &[crate::file_contention::PathIntent {
+                    path: PathBuf::from("src/lib.rs"),
+                    intent: crate::file_contention::WriteIntent::Modify,
+                }],
+                Duration::from_secs(60),
+                Utc::now(),
+                &never,
+            )
+            .unwrap();
+
+        // No target store or claim identity: the claim release is skipped,
+        // the markers are not.
+        fx.worker.release_current_bead("shutdown").await;
+        assert!(fx.worker.file_contention.is_none());
+        assert!(!fx
+            .repo
+            .path()
+            .join(".needle/locks/src/lib.rs.lock")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn file_contention_invalid_optin_is_degraded_not_protected() {
+        let mut fx =
+            file_contention_fixture(Some("file_contention:\n  enabled: true\n  lease_secs: 5\n"))
+                .await;
+        let adapter = capable(fx.worker.resolve_adapter().unwrap());
+        let before = adapter.environment.clone();
+        let bead = fx.bead.clone();
+        let after = fx
+            .worker
+            .begin_file_contention(adapter, &bead, "attempt-fc");
+        assert_eq!(
+            after.environment, before,
+            "degraded coverage must not advertise markers"
+        );
+        assert!(fx.worker.file_contention.is_none());
+        let coverage = events_of(&fx, "file_contention.coverage").await;
+        assert_eq!(coverage[0]["coverage"], "degraded");
+        assert!(coverage[0]["reason"].as_str().unwrap().contains("lease"));
     }
 
     #[tokio::test]

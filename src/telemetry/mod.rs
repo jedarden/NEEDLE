@@ -781,6 +781,22 @@ pub enum EventKind {
         open_bead_count: usize,
         threshold: usize,
     },
+    /// File-contention coverage resolved for one dispatch (Phase 20):
+    /// `enabled`, `supported_disabled`, `unsupported`, or `degraded` when the
+    /// workspace opted in but markers could not be made safe.
+    FileContentionCoverage {
+        bead_id: BeadId,
+        adapter: String,
+        coverage: String,
+        reason: Option<String>,
+    },
+    /// Markers owned by a finished attempt were released. A non-empty
+    /// `committed_markers` means the attempt's commits carry marker files.
+    FileContentionReleased {
+        bead_id: BeadId,
+        released: Vec<String>,
+        committed_markers: Vec<String>,
+    },
     /// Alert bead was deduplicated - an existing bead was updated instead of creating a new one.
     AlertDeduplicated {
         fingerprint: String,
@@ -2015,6 +2031,8 @@ impl EventKind {
             EventKind::AuditFinding { .. } => "audit.finding",
             EventKind::AuditCompleted { .. } => "audit.completed",
             EventKind::PluckOrderingDegraded { .. } => "strand.pluck.ordering_degraded",
+            EventKind::FileContentionCoverage { .. } => "file_contention.coverage",
+            EventKind::FileContentionReleased { .. } => "file_contention.released",
             EventKind::MendCycleBroken { .. } => "mend.cycle_broken",
             EventKind::AuditBeadClosedAsVerification { .. } => "audit.bead_closed_as_verification",
             EventKind::AuditBeadDeferredOverBudget { .. } => "audit.bead_deferred_over_budget",
@@ -2408,6 +2426,8 @@ impl EventKind {
             EventKind::UpgradeCheckCompleted { .. } => None,
             EventKind::UpgradeCheckFailed { .. } => None,
             EventKind::PluckOrderingDegraded { .. } => None,
+            EventKind::FileContentionCoverage { bead_id, .. }
+            | EventKind::FileContentionReleased { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MendCycleBroken { .. } => None,
             EventKind::QuarantineExpired { bead_id } => Some(bead_id.clone()),
             EventKind::AttemptResolved(f) => Some(f.bead_id.clone()),
@@ -4381,6 +4401,26 @@ impl EventKind {
                 "open_bead_count": open_bead_count,
                 "threshold": threshold,
             }),
+            EventKind::FileContentionCoverage {
+                bead_id,
+                adapter,
+                coverage,
+                reason,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "adapter": adapter,
+                "coverage": coverage,
+                "reason": reason,
+            }),
+            EventKind::FileContentionReleased {
+                bead_id,
+                released,
+                committed_markers,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "released": released,
+                "committed_markers": committed_markers,
+            }),
             EventKind::MendCycleBroken {
                 blocked_id,
                 blocker_id,
@@ -4822,6 +4862,8 @@ impl EventKind {
             | EventKind::SpawnPathModifiedInPlace { .. }
             | EventKind::Log { .. }
             | EventKind::PluckOrderingDegraded { .. }
+            | EventKind::FileContentionCoverage { .. }
+            | EventKind::FileContentionReleased { .. }
             | EventKind::GatePathMissing { .. }
             | EventKind::GateNoVerifier { .. }
             | EventKind::MendCycleBroken { .. }
