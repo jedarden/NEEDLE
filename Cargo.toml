@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "needle"
-version = "0.6.28"
+version = "0.6.29"
 edition = "2021"
 # MSRV = the rust-toolchain.toml pin (major.minor), which every needle-ci lane
 # builds with. scripts/check-msrv-drift.sh fails the definition-of-done when
