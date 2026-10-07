@@ -41,6 +41,7 @@ use crate::types::WorkerState;
 pub struct ResourceProbe {
     loadavg_path: PathBuf,
     meminfo_path: PathBuf,
+    stat_path: PathBuf,
 }
 
 impl ResourceProbe {
@@ -49,6 +50,7 @@ impl ResourceProbe {
         ResourceProbe {
             loadavg_path: PathBuf::from("/proc/loadavg"),
             meminfo_path: PathBuf::from("/proc/meminfo"),
+            stat_path: PathBuf::from("/proc/stat"),
         }
     }
 
@@ -57,6 +59,7 @@ impl ResourceProbe {
         ResourceProbe {
             loadavg_path: dir.join("loadavg"),
             meminfo_path: dir.join("meminfo"),
+            stat_path: dir.join("stat"),
         }
     }
 
@@ -87,7 +90,7 @@ impl ResourceProbe {
 pub struct ResourceSnapshot {
     /// 1-minute load average.
     pub load_1min: Option<f64>,
-    /// Usable core count (`available_parallelism`).
+    /// Online host CPU count, matching the scope of `/proc/loadavg`.
     pub cores: usize,
     /// Available memory in MB.
     pub available_mb: Option<u64>,
@@ -194,9 +197,7 @@ impl AdmissionDecision {
 /// cannot be read (a mock file a fixture deleted mid-run, a transient `/proc`
 /// read failure) must not by itself block a worker forever.
 pub fn read_resource_snapshot(probe: &ResourceProbe) -> ResourceSnapshot {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let cores = host_cpu_count(probe);
 
     let load_1min = std::fs::read_to_string(probe.loadavg_path())
         .ok()
@@ -224,6 +225,33 @@ pub fn read_resource_snapshot(probe: &ResourceProbe) -> ResourceSnapshot {
         cores,
         available_mb,
     }
+}
+
+/// `/proc/loadavg` includes work outside the worker's cgroup. Dividing that
+/// host-wide load by `available_parallelism()` (which respects CPU quotas)
+/// incorrectly attributes other services' load to the fleet. Count the online
+/// host CPUs from the same procfs scope instead; cgroup limits still enforce
+/// the fleet's own CPU allocation independently.
+fn host_cpu_count(probe: &ResourceProbe) -> usize {
+    std::fs::read_to_string(&probe.stat_path)
+        .ok()
+        .and_then(|stat| {
+            let count = stat
+                .lines()
+                .filter_map(|line| line.split_whitespace().next())
+                .filter(|name| {
+                    name.strip_prefix("cpu").is_some_and(|suffix| {
+                        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                })
+                .count();
+            (count > 0).then_some(count)
+        })
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
 }
 
 /// Decide whether launch is admitted under the current host snapshot.
@@ -815,9 +843,7 @@ impl RateLimiter {
             if let Some(load_str) = loadavg.split_whitespace().next() {
                 if let Ok(load) = load_str.parse::<f64>() {
                     // Normalize by number of CPUs.
-                    let num_cpus = std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(1);
+                    let num_cpus = host_cpu_count(&ResourceProbe::system());
                     let normalized = load / num_cpus as f64;
                     if normalized > cpu_load_warn {
                         tracing::warn!(
@@ -910,9 +936,7 @@ impl RateLimiter {
             if let Some(load_str) = loadavg.split_whitespace().next() {
                 if let Ok(load) = load_str.parse::<f64>() {
                     // Normalize by number of CPUs.
-                    let num_cpus = std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(1);
+                    let num_cpus = host_cpu_count(&ResourceProbe::system());
                     let normalized = load / num_cpus as f64;
                     if normalized > cpu_load_warn {
                         // Emit structured telemetry event.
@@ -1024,9 +1048,7 @@ impl RateLimiter {
             if let Ok(loadavg) = std::fs::read_to_string("/proc/loadavg") {
                 if let Some(load_str) = loadavg.split_whitespace().next() {
                     if let Ok(load) = load_str.parse::<f64>() {
-                        let num_cpus = std::thread::available_parallelism()
-                            .map(|n| n.get())
-                            .unwrap_or(1);
+                        let num_cpus = host_cpu_count(&ResourceProbe::system());
                         let normalized = load / num_cpus as f64;
                         if normalized > cpu_load_warn {
                             saturated = true;
@@ -1541,6 +1563,67 @@ mod tests {
             block.reason
         );
         assert_eq!(block.resource.to_string(), "cpu");
+    }
+
+    #[test]
+    fn admission_normalizes_host_load_against_host_cpus_not_fleet_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        write_probe_files(dir.path(), "14.00 13.00 12.00 1/123 45678", "4194304");
+        let mut stat = String::from("cpu 1 2 3 4\n");
+        for cpu in 0..20 {
+            stat.push_str(&format!("cpu{cpu} 1 2 3 4\n"));
+        }
+        stat.push_str("intr 123\ncpu_invalid 1 2 3\n");
+        std::fs::write(dir.path().join("stat"), stat).unwrap();
+
+        let probe = ResourceProbe::from_dir(dir.path());
+        let snapshot = read_resource_snapshot(&probe);
+        assert_eq!(snapshot.cores, 20);
+        assert!(check_launch_admission(AdmissionThresholds::new(0.8, 512), snapshot).is_admitted());
+        assert!(check_launch_admission(
+            AdmissionThresholds::new(0.8, 512),
+            ResourceSnapshot {
+                cores: 14,
+                ..snapshot
+            }
+        )
+        .block()
+        .is_some());
+
+        // Actual host saturation and low memory must still deny admission.
+        write_probe_files(dir.path(), "17.00 13.00 12.00 1/123 45678", "4194304");
+        assert!(check_launch_admission(
+            AdmissionThresholds::new(0.8, 512),
+            read_resource_snapshot(&probe)
+        )
+        .block()
+        .is_some());
+        write_probe_files(dir.path(), "14.00 13.00 12.00 1/123 45678", "131072");
+        assert_eq!(
+            check_launch_admission(
+                AdmissionThresholds::new(0.8, 512),
+                read_resource_snapshot(&probe)
+            )
+            .block()
+            .unwrap()
+            .resource,
+            AdmissionResource::Memory { available_mb: 128 }
+        );
+    }
+
+    #[test]
+    fn host_cpu_count_falls_back_when_stat_is_missing_or_has_no_cpu_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = ResourceProbe::from_dir(dir.path());
+        let fallback = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        assert_eq!(host_cpu_count(&probe), fallback);
+        std::fs::write(dir.path().join("stat"), "cpu 1 2 3 4\nintr 123\n").unwrap();
+        assert_eq!(host_cpu_count(&probe), fallback);
+        // Numbering need not be contiguous when CPUs are offline.
+        std::fs::write(dir.path().join("stat"), "cpu 1 2\ncpu0 1 2\ncpu7 1 2\n").unwrap();
+        assert_eq!(host_cpu_count(&probe), 2);
     }
 
     #[test]

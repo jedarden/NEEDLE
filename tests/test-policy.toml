@@ -300,7 +300,9 @@ version = 1
 # +4 pending-proposal eligibility and distinct-outcome accounting contracts
 # (needle-db86e7d7, needle-14d6a271); pure transforms need no subprocess.
 # +2 committed-state streaming and stderr-flood regressions (needle-c128a520).
-max_tests = 4095
+# +2 host-scope CPU admission and procfs fallback regressions
+# (needle-021d78bd).
+max_tests = 4097
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
