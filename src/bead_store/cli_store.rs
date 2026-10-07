@@ -1071,6 +1071,26 @@ impl BeadStore for CliBeadStore {
         })
     }
 
+    async fn is_blocked(&self, id: &BeadId) -> Result<bool> {
+        let values = HashMap::from([("id", id.to_string())]);
+        let raw = self.run_operation("show", &values).await?;
+        let value: serde_json::Value = serde_json::from_str(raw.trim())
+            .with_context(|| format!("show response for {id} was not JSON"))?;
+        let object = value
+            .as_array()
+            .and_then(|items| items.first())
+            .unwrap_or(&value);
+        let status = object
+            .get("status")
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("show response for {id} omitted status"))?;
+        let manual = object
+            .get("manual_blocked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Ok(manual || matches!(status, "blocked" | "deferred"))
+    }
+
     async fn show_with_claim_history(&self, id: &BeadId) -> Result<(Bead, Option<u32>)> {
         let values = HashMap::from([("id", id.to_string())]);
         let stdout = self.run_operation("show", &values).await?;
@@ -2427,6 +2447,43 @@ mod process_runner_tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    async fn blocked_query_reads_bead_rs_manual_overlay() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(
+            b"[{\"id\":\"nd-1\",\"status\":\"in_progress\",\"manual_blocked\":true,\"assignee\":\"worker-a\"}]"
+                .to_vec(),
+        ));
+        runner.push_output(ProcessOutput::success(
+            b"[{\"id\":\"nd-1\",\"status\":\"open\",\"manual_blocked\":true,\"assignee\":null}]"
+                .to_vec(),
+        ));
+        runner.push_output(ProcessOutput::success(
+            b"[{\"id\":\"nd-1\",\"status\":\"open\",\"manual_blocked\":false,\"assignee\":null}]"
+                .to_vec(),
+        ));
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner);
+        let id = BeadId::from("nd-1");
+        assert!(store.is_blocked(&id).await.unwrap());
+        assert!(store.is_blocked(&id).await.unwrap());
+        assert!(!store.is_blocked(&id).await.unwrap());
+    }
+
     #[tokio::test]
     async fn close_reason_reads_the_bead_rs_query_projection() {
         let directory = tempfile::tempdir().unwrap();
@@ -2762,6 +2819,7 @@ mod process_runner_tests {
             assert!(limit > 0, "inventory --limit must be nonzero");
             assert_eq!(limit.to_string(), EXPLICIT_QUERY_LIMIT);
         }
+        blocked_query_reads_bead_rs_manual_overlay().await;
     }
 
     #[tokio::test]

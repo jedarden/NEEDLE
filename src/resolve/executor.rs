@@ -150,6 +150,11 @@ pub enum ReleaseCause {
     /// A lifecycle mutation failed mid-application and the safety release
     /// fired. The decision was not applied.
     MutationFailed,
+    /// A blocked bead retained its in-progress base status, so its claim was
+    /// released after the block was confirmed.
+    BlockApplied,
+    /// The released attempt reached NEEDLE's expiring quarantine ceiling.
+    Quarantined,
 }
 
 impl ReleaseCause {
@@ -161,6 +166,8 @@ impl ReleaseCause {
             ReleaseCause::Unverifiable => "unverifiable",
             ReleaseCause::SplitCovered => "split_covered",
             ReleaseCause::MutationFailed => "mutation_failed",
+            ReleaseCause::BlockApplied => "block_applied",
+            ReleaseCause::Quarantined => "quarantined",
         }
     }
 }
@@ -178,17 +185,20 @@ pub struct DecisionExecutor {
     /// Whether `complete` must pass shipped-work verification before the
     /// executor closes. Same switch as the dispatch path's gate.
     enforce_shipped_work: bool,
+    quarantine_after_failures: u32,
 }
 
 impl DecisionExecutor {
     /// Create an executor from the worker's resolved configuration.
     pub fn new(config: Config, telemetry: Telemetry) -> Self {
         let enforce_shipped_work = config.worker.enforce_shipped_work;
+        let quarantine_after_failures = config.outcome.quarantine_after_failures;
         DecisionExecutor {
             outcome: OutcomeHandler::new(config, telemetry.clone()),
             telemetry,
             mitosis: None,
             enforce_shipped_work,
+            quarantine_after_failures,
         }
     }
 
@@ -240,6 +250,56 @@ impl DecisionExecutor {
         fallback: Option<&predispatch::PreDispatch>,
         observation: Option<&ResolutionObservation<'_>>,
     ) -> Result<AppliedDecision> {
+        GuardedApplier {
+            executor: self,
+            retained_claim: observation.and_then(|observation| observation.claim_handle),
+        }
+        .apply_observed(store, bead, decision, actor, fallback, observation)
+        .await
+    }
+}
+
+/// One resolution invocation's claim identity. Keeping this on the invocation
+/// means every compatibility re-check and safety release uses the claim that
+/// dispatched this attempt, even if another claim has the same actor name.
+struct GuardedApplier<'a> {
+    executor: &'a DecisionExecutor,
+    retained_claim: Option<&'a ClaimHandle>,
+}
+
+impl std::ops::Deref for GuardedApplier<'_> {
+    type Target = DecisionExecutor;
+
+    fn deref(&self) -> &Self::Target {
+        self.executor
+    }
+}
+
+impl GuardedApplier<'_> {
+    fn resolution_policy(&self, bead: &Bead, allow_unshipped_completion: bool) -> ResolutionPolicy {
+        let failures = bead
+            .labels
+            .iter()
+            .filter_map(|label| label.strip_prefix("failure-count:"))
+            .filter_map(|count| count.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        ResolutionPolicy {
+            failure_ceiling_reached: self.quarantine_after_failures > 0
+                && failures.saturating_add(1) >= self.quarantine_after_failures,
+            allow_unshipped_completion,
+        }
+    }
+
+    async fn apply_observed(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        decision: &ResolveDecision,
+        actor: &str,
+        fallback: Option<&predispatch::PreDispatch>,
+        observation: Option<&ResolutionObservation<'_>>,
+    ) -> Result<AppliedDecision> {
         // Defensive re-check of the resolver's own validation. The contract
         // says only validated decisions reach this point; refusing here keeps
         // a malformed decision from driving any mutation.
@@ -272,7 +332,7 @@ impl DecisionExecutor {
                 decision: Some(decision),
                 exit_code: observation.exit_code,
                 interrupted: observation.interrupted,
-                policy: ResolutionPolicy::default(),
+                policy: self.resolution_policy(bead, false),
             });
             match proposal {
                 ResolutionProposal::OwnershipLost => return Ok(AppliedDecision::OwnershipLost),
@@ -416,7 +476,7 @@ impl DecisionExecutor {
                         }
                         AppliedDecision::Released(_) => current.status == BeadStatus::Open,
                         AppliedDecision::Blocked | AppliedDecision::Split { .. } => {
-                            matches!(current.status, BeadStatus::Blocked | BeadStatus::Deferred)
+                            self.blocked_postcondition(store, bead, &current).await?
                         }
                         AppliedDecision::Replayed | AppliedDecision::OwnershipLost => true,
                     };
@@ -527,14 +587,30 @@ impl DecisionExecutor {
                     .await;
             }
         };
+        if request.action == ResolutionAction::Block {
+            let applied = self
+                .finish_blocked(store, bead, actor, request.applied)
+                .await?;
+            if matches!(
+                applied,
+                AppliedDecision::OwnershipLost | AppliedDecision::Released(_)
+            ) {
+                return Ok(applied);
+            }
+            self.op(store.flush(), "flush after atomic resolution")
+                .await?;
+            return if receipt.is_replay {
+                Ok(AppliedDecision::Replayed)
+            } else {
+                Ok(applied)
+            };
+        }
         let current = self
             .op(store.show(&bead.id), "show after atomic resolution")
             .await?;
         let expected = match request.action {
             ResolutionAction::Release => current.status == BeadStatus::Open,
-            ResolutionAction::Block => {
-                matches!(current.status, BeadStatus::Blocked | BeadStatus::Deferred)
-            }
+            ResolutionAction::Block => unreachable!("block was reconciled above"),
             ResolutionAction::Close => current.status.is_done(),
             ResolutionAction::Quarantine => current.status == BeadStatus::Deferred,
         };
@@ -549,21 +625,34 @@ impl DecisionExecutor {
                 )
                 .await;
         }
-        self.op(store.flush(), "flush after atomic resolution")
-            .await?;
         if receipt.is_replay {
+            self.op(store.flush(), "flush after atomic resolution")
+                .await?;
             return Ok(AppliedDecision::Replayed);
         }
+        let applied =
+            if request.action == ResolutionAction::Release && request.outcome == "work_failure" {
+                self.penalize_released_failure(store, bead, ReleaseCause::Retry)
+                    .await?
+            } else {
+                request.applied
+            };
+        self.op(store.flush(), "flush after atomic resolution")
+            .await?;
         if matches!(request.action, ResolutionAction::Release) {
             let _ = self.telemetry.emit(
                 EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
-                    reason: "retry".to_string(),
+                    reason: match &applied {
+                        AppliedDecision::Released(cause) => cause.as_str(),
+                        _ => "retry",
+                    }
+                    .to_string(),
                 },
                 Utc::now(),
             );
         }
-        Ok(request.applied)
+        Ok(applied)
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -739,10 +828,7 @@ impl DecisionExecutor {
                 }),
                 exit_code: observation.exit_code,
                 interrupted: observation.interrupted,
-                policy: ResolutionPolicy {
-                    allow_unshipped_completion: !self.enforce_shipped_work,
-                    ..ResolutionPolicy::default()
-                },
+                policy: self.resolution_policy(&current, !self.enforce_shipped_work),
             }) {
                 ResolutionProposal::Complete => {}
                 ResolutionProposal::OwnershipLost => return Ok(AppliedDecision::OwnershipLost),
@@ -977,26 +1063,19 @@ impl DecisionExecutor {
         if !self.ensure_owned(store, &bead.id, actor).await? {
             return Ok(AppliedDecision::OwnershipLost);
         }
-        // Failure accounting rides the outcome handler's implementation: the
-        // failure-count label, the degraded-window marker, and the fleet-wide
-        // retry cooldown all stay in one place.
-        let count = self
-            .outcome
-            .increment_failure_count(store, bead)
-            .await
-            .unwrap_or(0);
-        tracing::info!(
-            bead_id = %bead.id,
-            failure_count = count,
-            strategy = %concise(strategy, 120),
-            "resolve retry: guidance recorded, failure accounting incremented — releasing"
-        );
-
         match self
             .release_owned(store, bead, actor, ReleaseCause::Retry)
             .await
         {
-            Ok(true) => Ok(AppliedDecision::Released(ReleaseCause::Retry)),
+            Ok(true) => {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    strategy = %concise(strategy, 120),
+                    "resolve retry: guidance recorded and claim released"
+                );
+                self.penalize_released_failure(store, bead, ReleaseCause::Retry)
+                    .await
+            }
             Ok(false) => Ok(AppliedDecision::OwnershipLost),
             Err(error) => Err(error),
         }
@@ -1050,7 +1129,8 @@ impl DecisionExecutor {
                     blocker_type = %concise(blocker_type, 80),
                     "resolve blocked: bead moved to the backend's blocked state"
                 );
-                Ok(AppliedDecision::Blocked)
+                self.finish_blocked(store, bead, actor, AppliedDecision::Blocked)
+                    .await
             }
             Err(error) => {
                 self.mutation_failure(store, bead, actor, "block", error)
@@ -1131,7 +1211,15 @@ impl DecisionExecutor {
                     return Ok(AppliedDecision::OwnershipLost);
                 }
                 match self.op(store.block(&bead.id), "block").await {
-                    Ok(_) => Ok(AppliedDecision::Split { created, deduped }),
+                    Ok(_) => {
+                        self.finish_blocked(
+                            store,
+                            bead,
+                            actor,
+                            AppliedDecision::Split { created, deduped },
+                        )
+                        .await
+                    }
                     Err(error) => {
                         self.mutation_failure(store, bead, actor, "block after split", error)
                             .await
@@ -1166,6 +1254,72 @@ impl DecisionExecutor {
         }
     }
 
+    /// bead-rs represents a block as an overlay on the base status. A block
+    /// applied to an in-progress bead therefore still holds this dispatch's
+    /// claim until we release it. Other backends may transition directly to
+    /// blocked/deferred and need no additional release.
+    async fn finish_blocked(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        actor: &str,
+        applied: AppliedDecision,
+    ) -> Result<AppliedDecision> {
+        if !self.op(store.is_blocked(&bead.id), "is_blocked").await? {
+            return self
+                .mutation_failure(
+                    store,
+                    bead,
+                    actor,
+                    "block postcondition",
+                    anyhow::anyhow!("block operation did not block the bead"),
+                )
+                .await;
+        }
+        let claim = self
+            .op(store.claim_status(&bead.id), "claim_status after block")
+            .await?;
+        if claim.status == BeadStatus::InProgress {
+            if !self.matches_retained_claim(&bead.id, actor, &claim) {
+                return Ok(AppliedDecision::OwnershipLost);
+            }
+            match self
+                .release_owned(store, bead, actor, ReleaseCause::BlockApplied)
+                .await?
+            {
+                true => {}
+                false => return Ok(AppliedDecision::OwnershipLost),
+            }
+        }
+        let current = self.op(store.show(&bead.id), "show after block").await?;
+        if !self.blocked_postcondition(store, bead, &current).await? {
+            return self
+                .mutation_failure(
+                    store,
+                    bead,
+                    actor,
+                    "block postcondition",
+                    anyhow::anyhow!("blocked bead still has a claim or is no longer blocked"),
+                )
+                .await;
+        }
+        Ok(applied)
+    }
+
+    async fn blocked_postcondition(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        current: &Bead,
+    ) -> Result<bool> {
+        let no_claim = match current.status {
+            BeadStatus::Open => current.assignee.is_none(),
+            BeadStatus::Blocked | BeadStatus::Deferred => true,
+            BeadStatus::InProgress | BeadStatus::Done | BeadStatus::Closed => false,
+        };
+        Ok(no_claim && self.op(store.is_blocked(&bead.id), "is_blocked").await?)
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // ownership + safety plumbing
     // ──────────────────────────────────────────────────────────────────────
@@ -1180,8 +1334,7 @@ impl DecisionExecutor {
         actor: &str,
     ) -> Result<bool> {
         let status = self.op(store.claim_status(bead_id), "claim_status").await?;
-        let owned =
-            status.status == BeadStatus::InProgress && status.assignee.as_deref() == Some(actor);
+        let owned = self.matches_retained_claim(bead_id, actor, &status);
         if !owned {
             tracing::warn!(
                 bead_id = %bead_id,
@@ -1209,6 +1362,33 @@ impl DecisionExecutor {
         Ok(owned)
     }
 
+    fn matches_retained_claim(
+        &self,
+        bead_id: &crate::types::BeadId,
+        actor: &str,
+        live: &crate::types::ClaimStatus,
+    ) -> bool {
+        if live.status != BeadStatus::InProgress || live.assignee.as_deref() != Some(actor) {
+            return false;
+        }
+        let Some(retained) = self.retained_claim else {
+            return true; // Legacy apply has no dispatch claim handle.
+        };
+        if retained.bead_id != *bead_id || retained.assignee != actor {
+            return false;
+        }
+        match (retained.claim_epoch, live.claim_epoch) {
+            // A claim epoch survives our own note/label updates, unlike the
+            // revision, and changes when the same actor claims the bead again.
+            (Some(expected), Some(actual)) => expected == actual,
+            // Where only a revision exists, a change fails closed. A legacy
+            // backend with neither value relies on the worker's one-claim
+            // invariant because it exposes no identity to compare.
+            (None, None) => retained.current_revision == live.revision,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
+    }
+
     /// Release the bead if — and only if — it is still ours.
     ///
     /// Returns `Ok(true)` when the release was performed, `Ok(false)` when
@@ -1225,13 +1405,12 @@ impl DecisionExecutor {
         let expected = self
             .op(store.claim_status(&bead.id), "claim_status")
             .await?;
-        if expected.status != BeadStatus::InProgress || expected.assignee.as_deref() != Some(actor)
-        {
+        if !self.matches_retained_claim(&bead.id, actor, &expected) {
             return Ok(false);
         }
-        // The observed revision and claim epoch are checked by bead-rs in the
-        // release operation. A fresh claim by the same actor must not be
-        // released by this dispatch's compatibility cleanup.
+        // The live revision is needed after this invocation's own writes, but
+        // only after its claim epoch has matched the retained dispatch handle.
+        // bead-rs checks both values in the conditional release operation.
         match self
             .op(
                 store.release_recovery(&bead.id, &expected),
@@ -1281,8 +1460,8 @@ impl DecisionExecutor {
         }
     }
 
-    /// Release with a failure-count increment: the work was judged and
-    /// rejected, so the normal retry/quarantine ladder applies.
+    /// Release judged work and apply the normal retry/quarantine ladder once
+    /// the release is confirmed. A lost claim must not accrue a failure.
     async fn reject_release(
         &self,
         store: &dyn BeadStore,
@@ -1290,25 +1469,53 @@ impl DecisionExecutor {
         actor: &str,
         _reason: &str,
     ) -> Result<AppliedDecision> {
-        // Failure accounting is itself a lifecycle mutation. Re-check before
-        // touching labels so a dispatch that lost its claim while the gate or
-        // shipped-work check ran cannot penalize a new owner.
         if !self.ensure_owned(store, &bead.id, actor).await? {
             return Ok(AppliedDecision::OwnershipLost);
         }
-        let _ = self
-            .outcome
-            .increment_failure_count(store, bead)
-            .await
-            .unwrap_or(0);
         match self
             .release_owned(store, bead, actor, ReleaseCause::Rejected)
             .await
         {
-            Ok(true) => Ok(AppliedDecision::Released(ReleaseCause::Rejected)),
+            Ok(true) => {
+                self.penalize_released_failure(store, bead, ReleaseCause::Rejected)
+                    .await
+            }
             Ok(false) => Ok(AppliedDecision::OwnershipLost),
             Err(error) => Err(error),
         }
+    }
+
+    async fn penalize_released_failure(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        cause: ReleaseCause,
+    ) -> Result<AppliedDecision> {
+        // This existing policy counts once, installs a fleet-wide retry
+        // window, and adds expiring quarantine labels at the configured
+        // ceiling. bead-rs's atomic Quarantine action cannot stand in for it:
+        // that action retains the in-progress claim and has no expiry label.
+        let penalty = self.outcome.penalize_errored_release(store, bead).await?;
+        let labels = self
+            .op(store.labels(&bead.id), "labels after failure accounting")
+            .await?;
+        let count_label = format!("failure-count:{}", penalty.failure_count);
+        if penalty.failure_count == 0 || !labels.iter().any(|label| label == &count_label) {
+            anyhow::bail!("released resolution did not retain its failure count");
+        }
+        if penalty.quarantined
+            && (!labels.iter().any(|label| label == "quarantined")
+                || !labels
+                    .iter()
+                    .any(|label| label.starts_with("quarantine-until:")))
+        {
+            anyhow::bail!("released resolution did not retain quarantine markers");
+        }
+        Ok(AppliedDecision::Released(if penalty.quarantined {
+            ReleaseCause::Quarantined
+        } else {
+            cause
+        }))
     }
 
     /// The safety net behind an infrastructure mutation failure: attempt an
@@ -1446,6 +1653,10 @@ mod tests {
         /// worker's *complete* decision wins the race and closes the bead
         /// mid-flight.
         closed_by_winner_after_read: Option<usize>,
+        /// A different attempt by the same worker re-claims the bead on this
+        /// claim-status read. Status and assignee stay identical; epoch moves.
+        same_actor_reclaim_after_read: Option<usize>,
+        claim_identity_supported: bool,
         claim_reads: AtomicUsize,
         notes: Mutex<Vec<String>>,
         releases: AtomicUsize,
@@ -1463,6 +1674,7 @@ mod tests {
         fail_block: bool,
         fail_close: bool,
         noop_close: bool,
+        manual_block_retains_claim: bool,
         atomic_resolution_supported: bool,
         atomic_replay: bool,
         atomic_receipt_state: Option<&'static str>,
@@ -1499,6 +1711,9 @@ mod tests {
     struct ClaimState {
         status: BeadStatus,
         assignee: Option<String>,
+        revision: u64,
+        claim_epoch: u64,
+        manual_blocked: bool,
     }
 
     impl RecordingStore {
@@ -1507,9 +1722,14 @@ mod tests {
                 claim: StateMutex::new(ClaimState {
                     status: BeadStatus::InProgress,
                     assignee: Some("worker-a".to_string()),
+                    revision: 7,
+                    claim_epoch: 3,
+                    manual_blocked: false,
                 }),
                 flip_assignee_after: None,
                 closed_by_winner_after_read: None,
+                same_actor_reclaim_after_read: None,
+                claim_identity_supported: false,
                 claim_reads: AtomicUsize::new(0),
                 notes: Mutex::new(Vec::new()),
                 releases: AtomicUsize::new(0),
@@ -1525,6 +1745,7 @@ mod tests {
                 fail_block: false,
                 fail_close: false,
                 noop_close: false,
+                manual_block_retains_claim: false,
                 atomic_resolution_supported: false,
                 atomic_replay: false,
                 atomic_receipt_state: None,
@@ -1593,6 +1814,21 @@ mod tests {
         fn with_atomic_resolution(mut self, replay: bool) -> Self {
             self.atomic_resolution_supported = true;
             self.atomic_replay = replay;
+            self
+        }
+
+        fn with_fenced_claim_without_atomic(mut self) -> Self {
+            self.claim_identity_supported = true;
+            self
+        }
+
+        fn with_manual_block_overlay(mut self) -> Self {
+            self.manual_block_retains_claim = true;
+            self
+        }
+
+        fn reclaims_by_same_actor_after_n_reads(mut self, n: usize) -> Self {
+            self.same_actor_reclaim_after_read = Some(n);
             self
         }
 
@@ -1725,6 +1961,11 @@ mod tests {
             bead.assignee = claim.assignee.clone();
             Ok(bead)
         }
+        async fn is_blocked(&self, _id: &BeadId) -> Result<bool> {
+            let claim = self.claim.lock().unwrap();
+            Ok(claim.manual_blocked
+                || matches!(claim.status, BeadStatus::Blocked | BeadStatus::Deferred))
+        }
         async fn notes(&self, _id: &BeadId) -> Result<Option<String>> {
             Ok(Some(self.stored_notes.clone()))
         }
@@ -1739,12 +1980,19 @@ mod tests {
                 claim.status = BeadStatus::Done;
                 claim.assignee = None;
             }
+            if Some(n) == self.same_actor_reclaim_after_read {
+                let mut claim = self.claim.lock().unwrap();
+                claim.revision += 2; // release followed by a new claim
+                claim.claim_epoch += 1;
+            }
             let claim = self.claim.lock().unwrap();
             Ok(crate::types::ClaimStatus {
                 status: claim.status.clone(),
                 assignee: claim.assignee.clone(),
-                revision: self.atomic_resolution_supported.then_some(7),
-                claim_epoch: self.atomic_resolution_supported.then_some(3),
+                revision: (self.atomic_resolution_supported || self.claim_identity_supported)
+                    .then_some(claim.revision),
+                claim_epoch: (self.atomic_resolution_supported || self.claim_identity_supported)
+                    .then_some(claim.claim_epoch),
             })
         }
         async fn resolve_lifecycle_claim(
@@ -1761,13 +2009,17 @@ mod tests {
             assert_eq!(resolution.bead_id, handle.bead_id);
             self.atomic_calls.fetch_add(1, Ordering::SeqCst);
             let mut claim = self.claim.lock().unwrap();
-            claim.status = match action {
-                ResolutionAction::Close => BeadStatus::Done,
-                ResolutionAction::Release => BeadStatus::Open,
-                ResolutionAction::Block => BeadStatus::Blocked,
-                ResolutionAction::Quarantine => BeadStatus::Deferred,
-            };
-            claim.assignee = None;
+            if action == ResolutionAction::Block && self.manual_block_retains_claim {
+                claim.manual_blocked = true;
+            } else {
+                claim.status = match action {
+                    ResolutionAction::Close => BeadStatus::Done,
+                    ResolutionAction::Release => BeadStatus::Open,
+                    ResolutionAction::Block => BeadStatus::Blocked,
+                    ResolutionAction::Quarantine => BeadStatus::Deferred,
+                };
+                claim.assignee = None;
+            }
             Ok((
                 ClaimMutationResult::Applied,
                 Some(crate::bead_store::ResolveReceipt {
@@ -1820,7 +2072,11 @@ mod tests {
             }
             self.blocks.fetch_add(1, Ordering::SeqCst);
             let mut claim = self.claim.lock().unwrap();
-            claim.status = BeadStatus::Deferred;
+            if self.manual_block_retains_claim {
+                claim.manual_blocked = true;
+            } else {
+                claim.status = BeadStatus::Deferred;
+            }
             Ok(())
         }
         async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
@@ -1935,6 +2191,12 @@ mod tests {
         DecisionExecutor::new(Config::default(), Telemetry::new("test".to_string()))
     }
 
+    fn executor_with_quarantine_after(failures: u32) -> DecisionExecutor {
+        let mut config = Config::default();
+        config.outcome.quarantine_after_failures = failures;
+        DecisionExecutor::new(config, Telemetry::new("test".to_string()))
+    }
+
     fn temp_workspace() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
@@ -2009,6 +2271,9 @@ mod tests {
         complete_verified_success_resets_failure_accounting().await;
         compatibility_close_must_change_authoritative_state().await;
         compatibility_release_refuses_a_replaced_claim().await;
+        compatibility_reclaim_by_same_actor_before_mutation_is_ownership_lost().await;
+        compatibility_reclaim_by_same_actor_before_release_is_not_released().await;
+        invalid_observed_decision_does_not_release_a_newer_same_actor_claim().await;
         advertised_atomic_resolution_closes_once_and_replay_is_not_completion().await;
         atomic_close_receipt_must_confirm_a_closed_state().await;
         abnormal_process_exits_release_before_completion_checks().await;
@@ -2052,6 +2317,129 @@ mod tests {
             store.show(&store.bead().id).await.unwrap().status,
             BeadStatus::InProgress
         );
+    }
+
+    async fn compatibility_reclaim_by_same_actor_before_mutation_is_ownership_lost() {
+        for (decision, exit_code) in [
+            (retry_decision(), 1),
+            (blocked_decision(), 1),
+            (split_decision(PARENT_ID, &["child"]), 1),
+            (complete_decision(), 0),
+        ] {
+            let (_dir, workspace) = temp_workspace();
+            let store = RecordingStore::new(workspace)
+                .with_fenced_claim_without_atomic()
+                .reclaims_by_same_actor_after_n_reads(1)
+                .with_stored_notes("did the work");
+            let bead = store.bead();
+            let handle = protected_handle(&bead, 7);
+            let evidence =
+                crate::resolve::evidence::capture(&bead.workspace, &bead, exit_code, "", "", false)
+                    .await;
+            let observation = ResolutionObservation {
+                evidence: &evidence,
+                exit_code,
+                interrupted: false,
+                attempt_id: "attempt-1",
+                claim_handle: Some(&handle),
+            };
+
+            let applied = executor()
+                .apply_observed(
+                    &store,
+                    &bead,
+                    &decision,
+                    "worker-a",
+                    None,
+                    Some(&observation),
+                )
+                .await
+                .unwrap();
+            assert_eq!(applied, AppliedDecision::OwnershipLost, "{decision:?}");
+            assert_eq!(store.released(), 0, "{decision:?}");
+            assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "{decision:?}");
+            assert!(store.closes_snapshot().is_empty(), "{decision:?}");
+            assert!(store.notes_snapshot().is_empty(), "{decision:?}");
+            assert!(store.children_snapshot().is_empty(), "{decision:?}");
+            assert_eq!(store.claim.lock().unwrap().claim_epoch, 4);
+        }
+    }
+
+    async fn compatibility_reclaim_by_same_actor_before_release_is_not_released() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_fenced_claim_without_atomic()
+            .reclaims_by_same_actor_after_n_reads(3);
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-1",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &retry_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.released(), 0);
+        assert_eq!(
+            store.show(&bead.id).await.unwrap().status,
+            BeadStatus::InProgress
+        );
+        assert_eq!(store.claim.lock().unwrap().claim_epoch, 4);
+    }
+
+    async fn invalid_observed_decision_does_not_release_a_newer_same_actor_claim() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_fenced_claim_without_atomic()
+            .reclaims_by_same_actor_after_n_reads(0);
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-1",
+            claim_handle: Some(&handle),
+        };
+        let invalid = ResolveDecision::Retry {
+            evidence: String::new(),
+            strategy: String::new(),
+        };
+
+        assert!(executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &invalid,
+                "worker-a",
+                None,
+                Some(&observation)
+            )
+            .await
+            .is_err());
+        assert_eq!(store.released(), 0);
+        assert_eq!(
+            store.show(&bead.id).await.unwrap().status,
+            BeadStatus::InProgress
+        );
+        assert_eq!(store.claim.lock().unwrap().claim_epoch, 4);
     }
 
     fn protected_handle(bead: &Bead, revision: u64) -> ClaimHandle {
@@ -2236,6 +2624,80 @@ mod tests {
         }
     }
 
+    async fn atomic_manual_block_overlay_releases_the_claim() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_atomic_resolution(false)
+            .with_manual_block_overlay();
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-1",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &blocked_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied, AppliedDecision::Blocked);
+        assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.released(), 1);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Open);
+        assert!(current.assignee.is_none());
+        assert!(store.is_blocked(&bead.id).await.unwrap());
+    }
+
+    async fn compatibility_manual_block_overlay_releases_the_claim() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_fenced_claim_without_atomic()
+            .with_manual_block_overlay();
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-1",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &blocked_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied, AppliedDecision::Blocked);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 1);
+        assert_eq!(store.released(), 1);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Open);
+        assert!(current.assignee.is_none());
+        assert!(store.is_blocked(&bead.id).await.unwrap());
+    }
+
     async fn stale_revision_refuses_atomic_resolution() {
         let (_dir, workspace) = temp_workspace();
         let store = RecordingStore::new(workspace)
@@ -2292,6 +2754,79 @@ mod tests {
                 .any(|l| l == "failure-count:1"),
             "a false close increments the failure count"
         );
+        judged_retry_and_false_close_reach_expiring_quarantine().await;
+    }
+
+    async fn judged_retry_and_false_close_reach_expiring_quarantine() {
+        for decision in [retry_decision(), complete_decision()] {
+            let (_dir, workspace) = temp_workspace();
+            let store = RecordingStore::new(workspace);
+            let applied = apply(&executor_with_quarantine_after(1), &store, &decision)
+                .await
+                .expect("judged failure should release and quarantine");
+            assert_eq!(
+                applied,
+                AppliedDecision::Released(ReleaseCause::Quarantined),
+                "{decision:?}"
+            );
+            assert_eq!(store.released(), 1, "{decision:?}");
+            assert_eq!(
+                store.show(&store.bead().id).await.unwrap().status,
+                BeadStatus::Open
+            );
+            let labels = store.labels_snapshot();
+            assert!(labels.iter().any(|label| label == "failure-count:1"));
+            assert!(labels.iter().any(|label| label == "quarantined"));
+            assert!(labels
+                .iter()
+                .any(|label| label.starts_with("quarantine-until:")));
+        }
+    }
+
+    async fn atomic_retry_quarantines_once_and_replay_does_not_recount() {
+        for replay in [false, true] {
+            let (_dir, workspace) = temp_workspace();
+            let store = RecordingStore::new(workspace).with_atomic_resolution(replay);
+            let bead = store.bead();
+            let handle = protected_handle(&bead, 7);
+            let evidence =
+                crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+            let observation = ResolutionObservation {
+                evidence: &evidence,
+                exit_code: 1,
+                interrupted: false,
+                attempt_id: "attempt-1",
+                claim_handle: Some(&handle),
+            };
+            let applied = executor_with_quarantine_after(1)
+                .apply_observed(
+                    &store,
+                    &bead,
+                    &retry_decision(),
+                    "worker-a",
+                    None,
+                    Some(&observation),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                applied,
+                if replay {
+                    AppliedDecision::Replayed
+                } else {
+                    AppliedDecision::Released(ReleaseCause::Quarantined)
+                }
+            );
+            let labels = store.labels_snapshot();
+            assert_eq!(
+                labels
+                    .iter()
+                    .filter(|label| label.starts_with("failure-count:"))
+                    .count(),
+                usize::from(!replay)
+            );
+            assert_eq!(labels.iter().any(|label| label == "quarantined"), !replay);
+        }
     }
 
     #[tokio::test]
@@ -2489,6 +3024,9 @@ mod tests {
         );
         assert_eq!(store.released(), 1, "bead released for retry");
         advertised_atomic_retry_and_block_have_one_lifecycle_effect().await;
+        atomic_manual_block_overlay_releases_the_claim().await;
+        compatibility_manual_block_overlay_releases_the_claim().await;
+        atomic_retry_quarantines_once_and_replay_does_not_recount().await;
     }
 
     #[tokio::test]
@@ -2737,6 +3275,52 @@ mod tests {
             "parent blocked pending children"
         );
         assert_eq!(store.released(), 0);
+        split_manual_block_overlay_releases_parent_claim().await;
+    }
+
+    async fn split_manual_block_overlay_releases_parent_claim() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        let store = RecordingStore::new(workspace)
+            .with_fenced_claim_without_atomic()
+            .with_manual_block_overlay();
+        let executor = executor_with_mitosis(lock_dir.path());
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-1",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor
+            .apply_observed(
+                &store,
+                &bead,
+                &split_decision(PARENT_ID, &["Add the parser"]),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            applied,
+            AppliedDecision::Split {
+                created: 1,
+                deduped: 0,
+            }
+        );
+        assert_eq!(store.released(), 1);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Open);
+        assert!(current.assignee.is_none());
+        assert!(store.is_blocked(&bead.id).await.unwrap());
+        assert_eq!(store.children_snapshot(), vec!["Add the parser"]);
     }
 
     #[tokio::test]

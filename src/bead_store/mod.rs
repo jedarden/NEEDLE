@@ -1633,6 +1633,16 @@ pub trait BeadStore: Send + Sync {
     /// Fetch a single bead by ID.
     async fn show(&self, id: &BeadId) -> Result<Bead>;
 
+    /// Whether the backend currently excludes this bead through an explicit
+    /// block. bead-rs keeps the base status as `open` after a blocked claim is
+    /// released, so its implementation must read the manual-block overlay.
+    async fn is_blocked(&self, id: &BeadId) -> Result<bool> {
+        Ok(matches!(
+            self.show(id).await?.status,
+            BeadStatus::Blocked | BeadStatus::Deferred
+        ))
+    }
+
     /// Fetch a bead together with the number of claim-related history entries
     /// the backend exposed for it.
     ///
