@@ -317,7 +317,7 @@ impl FakeCli {
             // not just the shell leader. The background child redirects its
             // output, so it never holds the stdout/stderr pipes open.
             let script = format!(
-                "#!/bin/bash\n{RECORD_ENV}{record}{output}\n\
+                "#!/usr/bin/env bash\n{RECORD_ENV}{record}{output}\n\
 case \"${{NEEDLE_FAKE_AGENT_MODE:-success}}\" in\n\
   timeout) sleep 10 ;;\n\
   hang-group)\n\
