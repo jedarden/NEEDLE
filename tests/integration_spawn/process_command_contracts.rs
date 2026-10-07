@@ -578,7 +578,7 @@ async fn command_gate_child_is_killed_when_timeout_drops_the_future() {
 }
 
 struct TestStore {
-    bead: Bead,
+    bead: Mutex<Bead>,
     notes: Option<String>,
     actions: Mutex<Vec<String>>,
 }
@@ -586,7 +586,7 @@ struct TestStore {
 impl TestStore {
     fn new(bead: Bead) -> Self {
         Self {
-            bead,
+            bead: Mutex::new(bead),
             notes: None,
             actions: Mutex::new(Vec::new()),
         }
@@ -614,13 +614,14 @@ impl BeadStore for TestStore {
 
     async fn show(&self, _id: &BeadId) -> Result<Bead> {
         self.actions.lock().unwrap().push("show".to_string());
-        Ok(self.bead.clone())
+        Ok(self.bead.lock().unwrap().clone())
     }
 
     async fn claim_status(&self, _id: &BeadId) -> Result<ClaimStatus> {
+        let bead = self.bead.lock().unwrap();
         Ok(ClaimStatus {
-            status: self.bead.status.clone(),
-            assignee: self.bead.assignee.clone(),
+            status: bead.status.clone(),
+            assignee: bead.assignee.clone(),
             revision: None,
             claim_epoch: None,
         })
@@ -644,15 +645,20 @@ impl BeadStore for TestStore {
 
     async fn release(&self, id: &BeadId) -> Result<()> {
         self.actions.lock().unwrap().push(format!("release:{id}"));
+        let mut bead = self.bead.lock().unwrap();
+        bead.status = BeadStatus::Open;
+        bead.assignee = None;
         Ok(())
     }
 
     async fn block(&self, id: &BeadId) -> Result<()> {
         self.actions.lock().unwrap().push(format!("block:{id}"));
+        self.bead.lock().unwrap().status = BeadStatus::Blocked;
         Ok(())
     }
 
     async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+        self.bead.lock().unwrap().assignee = None;
         Ok(())
     }
 
@@ -665,11 +671,13 @@ impl BeadStore for TestStore {
             .lock()
             .unwrap()
             .push(format!("close:{id}:{reason}"));
+        self.bead.lock().unwrap().status = BeadStatus::Done;
         Ok(())
     }
 
     async fn reopen(&self, id: &BeadId) -> Result<()> {
         self.actions.lock().unwrap().push(format!("reopen:{id}"));
+        self.bead.lock().unwrap().status = BeadStatus::Open;
         Ok(())
     }
 
@@ -682,7 +690,7 @@ impl BeadStore for TestStore {
     }
 
     async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
-        Ok(self.bead.labels.clone())
+        Ok(self.bead.lock().unwrap().labels.clone())
     }
 
     async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
