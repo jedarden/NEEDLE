@@ -307,7 +307,12 @@ version = 1
 # preservation. The process boundary is the defect being guarded.
 # +2 execution-checkpoint append-once and rejection contracts
 # (needle-9295ead6); private filesystem publication helpers need the unit tier.
-max_tests = 4102
+# +13 Phase 20 file-contention marker store contracts (needle-ae8ff2a3): path
+# normalization and escape rejection, record schema and baseline, renewal,
+# all-or-none conflicts, owner-only release/renew, corrupt-marker listing,
+# registry contention, and checkout independence. They exercise private store
+# internals against a tempdir and need no subprocess, so the unit tier is home.
+max_tests = 4115
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
