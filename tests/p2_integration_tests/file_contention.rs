@@ -107,7 +107,12 @@ fn contention(co: &Checkout, who: &Who, args: &[&str]) -> (i32, Value) {
 }
 
 fn contention_in(co: &Checkout, repo: &Path, who: &Who, args: &[&str]) -> (i32, Value) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_needle"));
+    // Cargo embeds an absolute path for direct runs; a nextest archive
+    // relocates the binary and publishes its runtime path instead.
+    let needle_binary = std::env::var_os("NEXTEST_BIN_EXE_needle")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_needle")));
+    let mut command = Command::new(needle_binary);
     command
         .env_clear()
         .env("HOME", &co.home)

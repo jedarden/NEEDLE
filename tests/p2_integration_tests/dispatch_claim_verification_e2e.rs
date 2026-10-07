@@ -617,25 +617,41 @@ if [ "$mode" != "success" ] || [ "${1:-}" = "show" ]; then
   printf '%s\n' "$*" >> "$query_log"
 fi
 
-# The claim-race fixture synchronizes after each worker has read the same
-# ready candidate, before either result is returned to NEEDLE. No claim lock
-# is held here, so slow process startup cannot consume the flock timeout.
-if [ -n "${NEEDLE_FIXTURE_READY_BARRIER:-}" ] &&
-   [ "${1:-}" = "list" ] && [ "${2:-}" = "--ready" ]; then
-  ready_result=$("$native" "$@")
-  : > "$NEEDLE_FIXTURE_READY_BARRIER/$NEEDLE_FIXTURE_READY_PARTICIPANT"
-  remaining=300
-  while [ ! -f "$NEEDLE_FIXTURE_READY_BARRIER/first" ] ||
-        [ ! -f "$NEEDLE_FIXTURE_READY_BARRIER/second" ]; do
+# Opt-in call trace for diagnosing the claim race (needle-8a617ae2): one line
+# per phase with wall-clock milliseconds, pid, participant, and argv.
+trace() {
+  if [ -n "${NEEDLE_FIXTURE_TRACE:-}" ]; then
+    printf '%s %s %s %s | %s\n' "$(date +%s%3N)" "$$" \
+      "${NEEDLE_FIXTURE_READY_PARTICIPANT:--}" "$1" "$2" >> "$NEEDLE_FIXTURE_TRACE"
+  fi
+}
+trace start "$*"
+trap 'trace "exit=$?" "$*"' EXIT
+
+# The claim-race fixture makes both workers hold the same ready candidate
+# before either claims it. The rendezvous is each worker's first `show` of the
+# candidate, which NEEDLE issues after `list --ready` returns and before the
+# claim. It must not sit inside `list --ready`: NEEDLE runs `ready` (like
+# `claim`) under the workspace-exclusive .beads/needle-sync.lock, so a worker
+# parked there blocks its peer from ever reaching the barrier, and the race
+# was decided by 30s timeouts instead (needle-8a617ae2). `show` is not
+# lock-guarded. If the peer never arrives (a much slower boot), the wait ends
+# below NEEDLE's 30s CLI timeout and the call proceeds unsynchronized, which
+# the test allows: only one worker then enters the claim path.
+if [ -n "${NEEDLE_FIXTURE_CANDIDATE_BARRIER:-}" ] && [ "${1:-}" = "show" ] &&
+   [ ! -f "$NEEDLE_FIXTURE_CANDIDATE_BARRIER/$NEEDLE_FIXTURE_READY_PARTICIPANT" ]; then
+  : > "$NEEDLE_FIXTURE_CANDIDATE_BARRIER/$NEEDLE_FIXTURE_READY_PARTICIPANT"
+  remaining=250
+  while [ ! -f "$NEEDLE_FIXTURE_CANDIDATE_BARRIER/first" ] ||
+        [ ! -f "$NEEDLE_FIXTURE_CANDIDATE_BARRIER/second" ]; do
     if [ "$remaining" -le 0 ]; then
-      printf '%s\n' 'fixture ready-candidate barrier timed out' >&2
-      exit 124
+      trace barrier-expired "$*"
+      break
     fi
     remaining=$((remaining - 1))
     sleep 0.1
   done
-  printf '%s\n' "$ready_result"
-  exit 0
+  trace barrier-released "$*"
 fi
 
 if [ "$mode" = "unavailable-cli" ]; then
@@ -1139,25 +1155,71 @@ fn subprocess_agent_timeout_carries_the_attempt_identity_and_releases() {
     );
 }
 
+/// Everything needed to explain a claim-race outcome after the fact: each
+/// worker's exit status and output tail, every telemetry event in order
+/// (type and the few fields that locate it), and the fixture CLI query log.
+fn race_diagnostics(fixture: &Fixture, outputs: [(&str, &std::process::Output); 2]) -> String {
+    fn tail(bytes: &[u8]) -> String {
+        let text = String::from_utf8_lossy(bytes);
+        let lines: Vec<&str> = text.lines().collect();
+        lines[lines.len().saturating_sub(40)..].join("\n")
+    }
+    let mut out = String::from("--- race diagnostics ---\n");
+    for (name, output) in outputs {
+        out.push_str(&format!(
+            "[{name}] status={}\n[{name}] stderr tail:\n{}\n[{name}] stdout tail:\n{}\n",
+            output.status,
+            tail(&output.stderr),
+            tail(&output.stdout)
+        ));
+    }
+    out.push_str("telemetry (session seq type bead data):\n");
+    for event in fixture.telemetry() {
+        let mut data = event["data"].to_string();
+        data.truncate(200);
+        out.push_str(&format!(
+            "  {} {} {} {} {}\n",
+            event["session_id"].as_str().unwrap_or("-"),
+            event["sequence"],
+            event["event_type"].as_str().unwrap_or("-"),
+            event["bead_id"].as_str().unwrap_or("-"),
+            data
+        ));
+    }
+    out.push_str("fixture CLI trace (ms pid participant phase | argv):\n");
+    out.push_str(
+        &fs::read_to_string(fixture.root.path().join("fixture-cli-trace.log")).unwrap_or_default(),
+    );
+    out.push_str("fixture query log:\n");
+    for line in fixture.query_log(&fixture.home_workspace) {
+        out.push_str(&format!("  {line}\n"));
+    }
+    out
+}
+
 #[test]
 fn subprocess_concurrent_workers_dispatch_once_with_distinct_claim_identities() {
     let fixture = Fixture::new(FixtureLayout::Local);
 
-    // Each worker first reads the same ready bead. The fixture CLI holds
-    // those results until both reads have completed, then the production
-    // claim path races without a test-owned lock or timing window. A worker
-    // may still recheck the bead after its peer claims it and skip claim_one.
-    let barrier = fixture.root.path().join("ready-candidate-barrier");
-    fs::create_dir(&barrier).expect("create ready-candidate barrier");
+    // Each worker reads the same ready bead. The fixture CLI holds each
+    // worker's first `show` of that candidate until both have reached it,
+    // outside NEEDLE's workspace sync lock, then the production claim path
+    // races without a test-owned lock or timing window. A worker may still
+    // recheck the bead after its peer claims it and skip claim_one.
+    let barrier = fixture.root.path().join("candidate-barrier");
+    fs::create_dir(&barrier).expect("create candidate barrier");
 
     let mut first_command = fixture.command(FixtureMode::Success);
     let mut second_command = fixture.command(FixtureMode::Success);
     first_command
-        .env("NEEDLE_FIXTURE_READY_BARRIER", &barrier)
+        .env("NEEDLE_FIXTURE_CANDIDATE_BARRIER", &barrier)
         .env("NEEDLE_FIXTURE_READY_PARTICIPANT", "first");
     second_command
-        .env("NEEDLE_FIXTURE_READY_BARRIER", &barrier)
+        .env("NEEDLE_FIXTURE_CANDIDATE_BARRIER", &barrier)
         .env("NEEDLE_FIXTURE_READY_PARTICIPANT", "second");
+    let trace = fixture.root.path().join("fixture-cli-trace.log");
+    first_command.env("NEEDLE_FIXTURE_TRACE", &trace);
+    second_command.env("NEEDLE_FIXTURE_TRACE", &trace);
     let first = first_command.spawn().expect("spawn first racing worker");
     let second = second_command.spawn().expect("spawn second racing worker");
 
@@ -1193,15 +1255,19 @@ fn subprocess_concurrent_workers_dispatch_once_with_distinct_claim_identities() 
                 .expect("a claim attempt must carry its identity")
         })
         .collect();
+    // A failure here has been intermittent in CI with an empty claim list and
+    // both workers exiting 0 (needle-8a617ae2); the dump carries what the
+    // filtered claim events cannot.
+    let diagnostics = race_diagnostics(&fixture, [("first", &out_a), ("second", &out_b)]);
     assert!(
         (1..=2).contains(&attempted.len()),
-        "one or both workers must enter the claim path: {claim_events:?}"
+        "one or both workers must enter the claim path: {claim_events:?}\n{diagnostics}"
     );
     let unique_attempts: std::collections::HashSet<&str> = attempted.iter().copied().collect();
     assert_eq!(
         unique_attempts.len(),
         attempted.len(),
-        "workers that enter the claim path must mint distinct identities: {claim_events:?}"
+        "workers that enter the claim path must mint distinct identities: {claim_events:?}\n{diagnostics}"
     );
 
     // The atomic backend claim let exactly one worker dispatch an agent.
