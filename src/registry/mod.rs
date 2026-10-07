@@ -5,14 +5,16 @@
 //! that.
 //!
 //! File: `~/.needle/state/workers.json`
-//! Access: flock-protected read-modify-write (atomic updates).
+//! Access: flock-protected read-modify-write (atomic updates).  The lock is a
+//! stable sidecar (`workers.json.lock`) because replacing `workers.json` also
+//! replaces the inode that an inode lock would protect.
 //!
 //! Depends on: `config`, `types`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -368,11 +370,7 @@ impl Registry {
             let dead_count = total_count - live_count;
             tracing::debug!(dead_count, "filtered dead worker entries from registry");
 
-            let cleaned_reg = RegistryFile {
-                workers: live_workers.clone(),
-                updated_at: Utc::now(),
-            };
-            if let Err(e) = self.write_cleaned(cleaned_reg) {
+            if let Err(e) = self.write_cleaned() {
                 tracing::warn!(
                     error = %e,
                     "failed to persist dead PID cleanup; will re-filter next read"
@@ -385,18 +383,13 @@ impl Registry {
 
     /// Write a cleaned registry file (used by list() to persist dead PID filtering).
     ///
-    /// No file locking: read() already released its shared lock before returning.
-    /// The atomic rename ensures concurrent writers don't corrupt the file —
-    /// one write wins cleanly.
-    fn write_cleaned(&self, reg: RegistryFile) -> Result<()> {
-        let tmp_path = self.path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(&reg).context("failed to serialize registry")?;
-        std::fs::write(&tmp_path, &json)
-            .with_context(|| format!("failed to write temp registry: {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &self.path).with_context(|| {
-            format!("failed to rename temp registry to: {}", self.path.display())
-        })?;
-        Ok(())
+    /// Persist dead-PID cleanup under the same read-modify-write lock as all
+    /// other registry mutations.  Re-reading while holding the lock matters:
+    /// a worker may register between `list()`'s snapshot and this cleanup.
+    fn write_cleaned(&self) -> Result<()> {
+        self.modify(|reg| {
+            reg.workers.retain(|worker| is_pid_alive(worker.pid));
+        })
     }
 
     fn live_config_path(&self) -> PathBuf {
@@ -492,31 +485,99 @@ impl Registry {
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
-    /// Read the registry file, returning a default if it doesn't exist.
-    fn read(&self) -> Result<RegistryFile> {
-        if !self.path.exists() {
-            return Ok(RegistryFile::default());
+    /// Stable lock path for the registry.  Never lock `workers.json` itself:
+    /// atomic replacement gives the next writer a different inode and makes
+    /// an inode lock ineffective for serialization.
+    fn lock_path(&self) -> PathBuf {
+        let name = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "workers.json".to_string());
+        self.path.with_file_name(format!("{name}.lock"))
+    }
+
+    fn open_lock(&self) -> Result<std::fs::File> {
+        if let Some(parent) = self.lock_path().parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create registry directory: {}", parent.display())
+            })?;
         }
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.lock_path())
+            .with_context(|| {
+                format!(
+                    "failed to open registry lock: {}",
+                    self.lock_path().display()
+                )
+            })
+    }
 
-        let file = std::fs::File::open(&self.path)
-            .with_context(|| format!("failed to open registry: {}", self.path.display()))?;
-
-        // Shared lock for reading (use fs2 trait method explicitly for MSRV compat).
-        FileExt::lock_shared(&file)
-            .with_context(|| format!("failed to acquire shared lock: {}", self.path.display()))?;
-
-        let content = std::fs::read_to_string(&self.path)
-            .with_context(|| format!("failed to read registry: {}", self.path.display()))?;
-
-        FileExt::unlock(&file)
-            .with_context(|| format!("failed to release lock: {}", self.path.display()))?;
+    /// Read the registry while the caller holds the stable lock.
+    fn read_locked(&self) -> Result<RegistryFile> {
+        let content = match std::fs::read_to_string(&self.path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RegistryFile::default());
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read registry: {}", self.path.display()));
+            }
+        };
 
         if content.trim().is_empty() {
-            return Ok(RegistryFile::default());
+            bail!("registry file is empty: {}", self.path.display());
         }
 
         serde_json::from_str(&content)
             .with_context(|| format!("failed to parse registry JSON: {}", self.path.display()))
+    }
+
+    /// Replace the registry atomically using a unique temporary file in the
+    /// same directory.  A shared fixed-name temporary file lets concurrent
+    /// writers overwrite each other's staged contents before either rename.
+    fn write_atomically(&self, reg: &RegistryFile) -> Result<()> {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let mut temp = tempfile::Builder::new()
+            .prefix(".workers.json.")
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .with_context(|| {
+                format!(
+                    "failed to create temporary registry in: {}",
+                    parent.display()
+                )
+            })?;
+        serde_json::to_writer_pretty(temp.as_file_mut(), reg)
+            .context("failed to serialize registry")?;
+        temp.as_file_mut()
+            .sync_all()
+            .context("failed to flush temporary registry")?;
+        temp.persist(&self.path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to rename temporary registry to {}: {}",
+                self.path.display(),
+                error
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Read the registry file, returning a default if it doesn't exist.
+    fn read(&self) -> Result<RegistryFile> {
+        let lock = self.open_lock()?;
+        FileExt::lock_shared(&lock).with_context(|| {
+            format!(
+                "failed to acquire shared registry lock: {}",
+                self.lock_path().display()
+            )
+        })?;
+        self.read_locked()
     }
 
     /// Perform a flock-protected read-modify-write operation.
@@ -531,46 +592,21 @@ impl Registry {
             })?;
         }
 
-        // Open or create the file.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.path)
-            .with_context(|| format!("failed to open registry: {}", self.path.display()))?;
-
-        // Exclusive lock for writing (use fs2 trait method explicitly for MSRV compat).
-        FileExt::lock_exclusive(&file).with_context(|| {
-            format!("failed to acquire exclusive lock: {}", self.path.display())
+        let lock = self.open_lock()?;
+        FileExt::lock_exclusive(&lock).with_context(|| {
+            format!(
+                "failed to acquire exclusive registry lock: {}",
+                self.lock_path().display()
+            )
         })?;
 
-        // Read current contents.
-        let content = std::fs::read_to_string(&self.path).unwrap_or_default();
-        let mut reg: RegistryFile = if content.trim().is_empty() {
-            RegistryFile::default()
-        } else {
-            serde_json::from_str(&content).unwrap_or_default()
-        };
+        let mut reg = self.read_locked()?;
 
         // Apply the mutation.
         mutator(&mut reg);
         reg.updated_at = Utc::now();
 
-        // Write back atomically: write to temp file, then rename.
-        let tmp_path = self.path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(&reg).context("failed to serialize registry")?;
-        std::fs::write(&tmp_path, &json)
-            .with_context(|| format!("failed to write temp registry: {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &self.path).with_context(|| {
-            format!("failed to rename temp registry to: {}", self.path.display())
-        })?;
-
-        // Release lock (use fs2 trait method explicitly for MSRV compat).
-        FileExt::unlock(&file)
-            .with_context(|| format!("failed to release lock: {}", self.path.display()))?;
-
-        Ok(())
+        self.write_atomically(&reg)
     }
 }
 
@@ -583,6 +619,11 @@ mod tests {
     use super::*;
     use crate::test_fixtures::fixture_root;
     use crate::types::WorkerState;
+    use std::time::{Duration, Instant};
+
+    const CHILD_DIR_ENV: &str = "NEEDLE_REGISTRY_TEST_DIR";
+    const CHILD_ID_ENV: &str = "NEEDLE_REGISTRY_TEST_ID";
+    const CHILD_COUNT_ENV: &str = "NEEDLE_REGISTRY_TEST_COUNT";
 
     fn make_entry(id: &str) -> WorkerEntry {
         WorkerEntry {
@@ -841,6 +882,100 @@ mod tests {
 
         let workers = reg.list().unwrap();
         assert_eq!(workers.len(), 10);
+    }
+
+    /// Child-process body for `concurrent_process_registration_preserves_all`.
+    ///
+    /// The filesystem barrier makes every child reach the write together,
+    /// rather than relying on a scheduler-dependent sleep to expose the race.
+    #[test]
+    fn concurrent_process_registration_worker() {
+        let Some(dir) = std::env::var_os(CHILD_DIR_ENV) else {
+            return;
+        };
+        let id = std::env::var(CHILD_ID_ENV).unwrap();
+        let expected = std::env::var(CHILD_COUNT_ENV)
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let dir = PathBuf::from(dir);
+        std::fs::write(dir.join(format!("ready-{id}")), b"ready").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let ready = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("ready-"))
+                .count();
+            if ready == expected {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "concurrent registry test barrier timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        Registry::new(&dir)
+            .register(make_entry(&id))
+            .expect("child registration should succeed");
+    }
+
+    #[test]
+    fn concurrent_process_registration_preserves_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = 12usize;
+        let executable = std::env::current_exe().unwrap();
+        let mut children = Vec::with_capacity(count);
+
+        for index in 0..count {
+            children.push(
+                std::process::Command::new(&executable)
+                    .args([
+                        "--exact",
+                        "registry::tests::concurrent_process_registration_worker",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD_DIR_ENV, dir.path())
+                    .env(CHILD_ID_ENV, format!("process-worker-{index}"))
+                    .env(CHILD_COUNT_ENV, count.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+
+        for (index, mut child) in children.into_iter().enumerate() {
+            let status = child.wait().unwrap();
+            assert!(status.success(), "registry child {index} failed: {status}");
+        }
+
+        let workers = Registry::new(dir.path()).list_all().unwrap();
+        let ids: std::collections::HashSet<_> = workers.iter().map(|worker| &worker.id).collect();
+        assert_eq!(workers.len(), count, "all child registrations must survive");
+        assert_eq!(ids.len(), count, "child registrations must have unique IDs");
+    }
+
+    #[test]
+    fn malformed_registry_is_rejected_without_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        reg.register(make_entry("existing")).unwrap();
+
+        let corrupt = b"{\"workers\":[";
+        std::fs::write(reg.path(), corrupt).unwrap();
+        let before = std::fs::read(reg.path()).unwrap();
+
+        let error = reg.register(make_entry("new")).unwrap_err();
+        assert!(error.to_string().contains("failed to parse registry JSON"));
+        assert_eq!(std::fs::read(reg.path()).unwrap(), before);
+        assert!(
+            reg.list_all().is_err(),
+            "corrupt input must remain unreadable"
+        );
     }
 
     #[test]

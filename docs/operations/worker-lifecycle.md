@@ -16,6 +16,26 @@ is:
 The commands below operate on the local host and the state selected by the
 current `HOME`. They do not coordinate workers on another host.
 
+## Worker registry rollout safety
+
+`state/workers.json` is informational, but it is shared by every worker on the
+host. Current binaries serialize reads, updates, and dead-PID cleanup through
+the stable `state/workers.json.lock` sidecar and replace the JSON atomically
+with a unique same-directory temporary file. A missing registry is treated as
+empty; an existing empty or malformed registry is an error and is never
+silently replaced with an empty one. If `needle status` reports a registry
+read error, preserve the file for diagnosis and do not try to repair it by
+truncating or deleting it.
+
+During rollout, do not restart or resume workers that still hold active
+claims. Install the new binary alongside the old one, leave existing workers
+untouched, and let them exit naturally. Do not start new workers against the
+same state directory until the old writers have drained: pre-fix workers lock
+the replaceable `workers.json` inode and do not know about the sidecar lock.
+After `needle list` confirms that the old PIDs are gone, start the new binary
+and verify `needle status --by-worker`; the new stable-lock protocol then
+serializes the whole registry population without interrupting active claims.
+
 ## Observe before changing anything
 
 Use `list` to reconcile tmux sessions with the operating-system process table:

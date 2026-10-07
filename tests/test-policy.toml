@@ -302,7 +302,10 @@ version = 1
 # +2 committed-state streaming and stderr-flood regressions (needle-c128a520).
 # +2 host-scope CPU admission and procfs fallback regressions
 # (needle-021d78bd).
-max_tests = 4097
+# +3 worker-registry durability regressions (needle-ad879f6e): a barriered
+# multi-process registration race, its child body, and malformed-input
+# preservation. The process boundary is the defect being guarded.
+max_tests = 4100
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -864,6 +867,20 @@ kind = "sleep"
 max_occurrences = 1
 owner = "component:rate-limit"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/registry/mod.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-ad879f6e"
+reason = "The registry regression must exercise concurrent independent processes, which cannot be reproduced with in-process threads alone."
+
+[[unit_exception]]
+path = "src/registry/mod.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "needle-ad879f6e"
+reason = "The process-race barrier polls readiness across child processes; an injected clock cannot coordinate separate test executables."
 
 [[unit_exception]]
 path = "src/spawn_path/mod.rs"
