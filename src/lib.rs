@@ -32,6 +32,7 @@ mod deferral;
 pub mod dispatch;
 pub mod drift;
 pub mod evidence_routing;
+pub mod execution_checkpoint;
 pub mod experiments;
 pub mod fingerprint;
 pub mod gate_health;

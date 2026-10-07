@@ -305,7 +305,9 @@ version = 1
 # +3 worker-registry durability regressions (needle-ad879f6e): a barriered
 # multi-process registration race, its child body, and malformed-input
 # preservation. The process boundary is the defect being guarded.
-max_tests = 4100
+# +2 execution-checkpoint append-once and rejection contracts
+# (needle-9295ead6); private filesystem publication helpers need the unit tier.
+max_tests = 4102
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

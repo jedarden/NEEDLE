@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 195 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 196 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
@@ -123,6 +123,7 @@ Running, maintaining, and operating NEEDLE fleets.
 | **[Checkpoint Cleanup Strategy](checkpoint-cleanup-strategy.md)** | Cleanup policies for old checkpoints |
 | **[Checkpoint Commit Workflow](checkpoint-commit-workflow.md)** | Git integration for checkpoint commits |
 | **[Checkpoint Publishing](checkpoint-publishing.md)** | Publishing checkpoints to remote stores |
+| **[Execution Checkpoints](execution-checkpoints.md)** | Bounded attempt observations and append-once persistence API |
 
 ### Health & Diagnostics
 
@@ -303,7 +304,7 @@ See [Investigations & Post-Mortems](#investigations--post-mortems) for:
 
 ## File Count Summary
 
-- **Total markdown files:** 195
+- **Total markdown files:** 196
 - **ADRs:** 30
 - **Research documents:** 18
 - **Operational notes:** 33

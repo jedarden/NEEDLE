@@ -9,11 +9,16 @@
 #![forbid(unsafe_code)]
 
 pub mod adapters;
+pub mod execution_checkpoint;
 pub mod factory_types;
 pub mod kernel;
 pub mod source;
 
 pub use adapters::{LegacyAttemptEvent, LegacyObservation, LegacyOutcome};
+pub use execution_checkpoint::{
+    validate_checkpoint, CheckpointEvidence, CheckpointValidationError, ExecutionCheckpoint,
+    RecoveryAttribution,
+};
 pub use factory_types::{
     Attempt, AttemptId, BeadId, ConfirmedState, ContentHash, ContextManifest, Digest, Evaluation,
     EvaluationStatus, EvidenceBundle, EvidenceGap, EvidenceId, EvidenceRef, FactoryInput,
