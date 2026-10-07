@@ -42,6 +42,7 @@ NEEDLE's design principles, component architecture, and implementation phases.
 | **[Bead-forge to Bead-rs Rehydration Playbook](plan/bead-forge-to-bead-rs-rehydration-playbook.md)** | Migration playbook from bead-forge to bead-rs |
 | **[Agent Event Schema](agent-event-schema.md)** | Structured events emitted during agent execution |
 | **[Capabilities Negotiation](capabilities-negotiation.md)** | Backend capability verification contract |
+| **[File-Contention Hook Contract](file-contention-hook-contract.md)** | Optional pre-write marker protocol for agents sharing one checkout (`file_contention_hook/v1`) |
 
 ### Design Documents
 

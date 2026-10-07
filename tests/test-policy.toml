@@ -338,7 +338,12 @@ version = 1
 # are released by do_log for this attempt only, shutdown release drops markers
 # without claim context, and an invalid opt-in reports degraded instead of
 # advertising protection. In-process Worker via make_worker (Explore pinned).
-max_tests = 4150
+# +5 Phase 20 hook contract (needle-7f04ec50): the capable fixture adapter
+# receives the contract through a real dispatch, unsupported/disabled
+# dispatches see none, inherited contract vars are stripped unless this
+# dispatch set them, no built-in adapter claims support, and the published
+# contract document names every input, exit code, and assessment.
+max_tests = 4155
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

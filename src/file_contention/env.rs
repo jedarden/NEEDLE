@@ -20,5 +20,12 @@ pub const ATTEMPT_ID: &str = "NEEDLE_ATTEMPT_ID";
 pub const SESSION_ID: &str = "NEEDLE_SESSION_ID";
 /// Worker identity.
 pub const WORKER_ID: &str = "NEEDLE_WORKER_ID";
-/// Holder pid recorded for liveness (the agent process).
+/// Holder pid recorded for liveness: the dispatching worker, which outlives
+/// the short-lived shells a harness runs hooks in.
 pub const HOLDER_PID: &str = "NEEDLE_FILE_CONTENTION_PID";
+
+/// Variables that exist only because THIS dispatch resolved `enabled`
+/// coverage. The dispatcher strips any inherited copy a dispatch did not set
+/// itself. Identity variables (`NEEDLE_BEAD_ID`, ...) are shared with other
+/// NEEDLE features and are not in this list.
+pub const DISPATCH_SCOPED: &[&str] = &[COVERAGE, CONTRACT, REPO, LEASE_SECS, HOLDER_PID];
