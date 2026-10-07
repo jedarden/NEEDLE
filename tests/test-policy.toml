@@ -316,7 +316,13 @@ version = 1
 # default, bead-workspace resolution, unknown-key/short-lease rejection, the
 # three coverage states, and optional adapter capability parsing. Pure config
 # parsing; no subprocess.
-max_tests = 4120
+# +11 Phase 20 marker assessment contracts (needle-3f3c6825): free/same-attempt,
+# live holder past lease (warning, not authority loss), unknown liveness vs
+# lease, timestamp-only vs content change, created/deleted, verified-closed,
+# ambiguous/contradictory, superseded attempt, atomic reclaim that never takes
+# an active or modified marker, and local process liveness. Fixture-driven
+# against a tempdir; no subprocess.
+max_tests = 4131
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
