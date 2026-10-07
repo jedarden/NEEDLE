@@ -366,7 +366,8 @@ max_tests = 4159
 # +1 N-T25 deadline checkpoint integration contract (needle-212f3568):
 # adapter-specific prompt deadlines and terminal resolved-row accounting.
 # +1 fake-Forgejo CI watcher deduplication scenario (needle-7434c5cb).
-push = 678
+# +6 p2 file-contention integration fixture (needle-4386d7bd).
+push = 684
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -569,7 +570,13 @@ tier = "push"
 # with a real verdict in both directions.
 # +1 fake-Forgejo CI red filing, fingerprint deduplication, and green no-op
 # scenario with an isolated HOME (needle-7434c5cb).
-max_tests = 130
+# +6 Phase 20 file-contention release evidence (needle-4386d7bd): two workers
+# contending with disjoint writes coexisting, interactive session with
+# all-or-none rename/multi-path, stale-unchanged takeover vs stale-modified
+# preservation, dispatch coverage plus terminal cleanup, independent
+# checkouts, and markers untracked under normal and forced add. Real binary
+# with env_clear and an isolated HOME.
+max_tests = 136
 owner = "component:pluck-mend-explore"
 
 [[harness]]
