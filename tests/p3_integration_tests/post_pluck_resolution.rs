@@ -15,7 +15,7 @@ use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::config::{Config, MitosisConfig, PromptConfig, ResolveConfig};
 use needle::mitosis::MitosisEvaluator;
 use needle::prompt::PromptBuilder;
-use needle::resolve::executor::{AppliedDecision, DecisionExecutor};
+use needle::resolve::executor::{AppliedDecision, DecisionExecutor, ResolutionObservation};
 use needle::resolve::{ResolveContext, ResolveDecision, Resolver};
 use needle::telemetry::{EventKind, Sink, Telemetry, TelemetryEvent};
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
@@ -357,6 +357,28 @@ fn executor(telemetry: Telemetry) -> DecisionExecutor {
     DecisionExecutor::new(config, telemetry)
 }
 
+async fn apply_observed_resolution(
+    executor: &DecisionExecutor,
+    store: &dyn BeadStore,
+    bead: &Bead,
+    decision: &ResolveDecision,
+    actor: &str,
+    exit_code: i32,
+) -> Result<AppliedDecision> {
+    let evidence =
+        needle::resolve::evidence::capture(&bead.workspace, bead, exit_code, "", "", false).await;
+    let observation = ResolutionObservation {
+        evidence: &evidence,
+        exit_code,
+        interrupted: false,
+        attempt_id: "post-pluck-test-attempt",
+        claim_handle: None,
+    };
+    executor
+        .apply_observed(store, bead, decision, actor, None, Some(&observation))
+        .await
+}
+
 fn complete() -> ResolveDecision {
     ResolveDecision::Complete {
         evidence: "tests passed".to_string(),
@@ -427,10 +449,16 @@ async fn post_pluck_complete_resolution_closes_the_claimed_bead() {
     let store = ScenarioStore::new(roots.workspace());
     let bead = store.bead();
     let (telemetry, _) = telemetry();
-    let applied = executor(telemetry)
-        .apply(&store, &bead, &complete(), "worker-a", None)
-        .await
-        .expect("complete decision should apply");
+    let applied = apply_observed_resolution(
+        &executor(telemetry),
+        &store,
+        &bead,
+        &complete(),
+        "worker-a",
+        0,
+    )
+    .await
+    .expect("complete decision should apply");
     assert_eq!(applied, AppliedDecision::Completed);
     assert_eq!(store.bead().status, BeadStatus::Done);
     assert!(store.bead().assignee.is_none());
@@ -442,10 +470,10 @@ async fn post_pluck_retry_resolution_releases_for_retry() {
     let store = ScenarioStore::new(roots.workspace());
     let bead = store.bead();
     let (telemetry, _) = telemetry();
-    let applied = executor(telemetry)
-        .apply(&store, &bead, &retry(), "worker-a", None)
-        .await
-        .expect("retry decision should apply");
+    let applied =
+        apply_observed_resolution(&executor(telemetry), &store, &bead, &retry(), "worker-a", 1)
+            .await
+            .expect("retry decision should apply");
     assert!(matches!(applied, AppliedDecision::Released(_)));
     assert_eq!(store.bead().status, BeadStatus::Open);
     assert!(store.bead().assignee.is_none());
@@ -458,10 +486,16 @@ async fn post_pluck_blocked_resolution_blocks_the_bead() {
     let store = ScenarioStore::new(roots.workspace());
     let bead = store.bead();
     let (telemetry, _) = telemetry();
-    let applied = executor(telemetry)
-        .apply(&store, &bead, &blocked(), "worker-a", None)
-        .await
-        .expect("blocked decision should apply");
+    let applied = apply_observed_resolution(
+        &executor(telemetry),
+        &store,
+        &bead,
+        &blocked(),
+        "worker-a",
+        1,
+    )
+    .await
+    .expect("blocked decision should apply");
     assert_eq!(applied, AppliedDecision::Blocked);
     assert_eq!(store.bead().status, BeadStatus::Blocked);
     assert!(!store.notes().is_empty());
@@ -478,11 +512,11 @@ async fn post_pluck_split_resolution_creates_children_and_blocks_parent() {
         telemetry.clone(),
         roots.home.path().join("mitosis-locks"),
     );
-    let applied = executor(telemetry)
-        .with_mitosis(mitosis)
-        .apply(&store, &bead, &split(&bead.id), "worker-a", None)
-        .await
-        .expect("split decision should apply");
+    let executor = executor(telemetry).with_mitosis(mitosis);
+    let applied =
+        apply_observed_resolution(&executor, &store, &bead, &split(&bead.id), "worker-a", 1)
+            .await
+            .expect("split decision should apply");
     assert!(matches!(applied, AppliedDecision::Split { created: 2, .. }));
     assert_eq!(store.bead().status, BeadStatus::Blocked);
     assert_eq!(store.children().len(), 2);
@@ -516,10 +550,10 @@ async fn post_pluck_ownership_race_does_not_mutate_the_new_owner() {
     let store = ScenarioStore::new(roots.workspace()).with_ownership_race();
     let bead = store.bead();
     let (telemetry, _) = telemetry();
-    let applied = executor(telemetry)
-        .apply(&store, &bead, &retry(), "worker-a", None)
-        .await
-        .expect("ownership loss is a successful no-op");
+    let applied =
+        apply_observed_resolution(&executor(telemetry), &store, &bead, &retry(), "worker-a", 1)
+            .await
+            .expect("ownership loss is a successful no-op");
     assert_eq!(applied, AppliedDecision::OwnershipLost);
     assert_eq!(store.bead().status, BeadStatus::InProgress);
     assert_eq!(store.bead().assignee.as_deref(), Some("worker-b"));
@@ -543,10 +577,16 @@ async fn tradegraph_exit_zero_still_in_progress_runs_resolution() {
     let bead = store.bead();
     assert_eq!(bead.status, BeadStatus::InProgress);
     let (telemetry, _) = telemetry();
-    let applied = executor(telemetry)
-        .apply(&store, &bead, &decision, "worker-a", None)
-        .await
-        .expect("valid Resolve result should close the still-in-progress bead");
+    let applied = apply_observed_resolution(
+        &executor(telemetry),
+        &store,
+        &bead,
+        &decision,
+        "worker-a",
+        0,
+    )
+    .await
+    .expect("valid Resolve result should close the still-in-progress bead");
     assert_eq!(applied, AppliedDecision::Completed);
     assert_eq!(store.bead().status, BeadStatus::Done);
 }

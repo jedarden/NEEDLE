@@ -213,7 +213,12 @@ impl DecisionExecutor {
         self
     }
 
-    /// Apply a validated decision to the bead owned by `actor`.
+    /// Legacy, fail-closed entry point for callers without process evidence.
+    ///
+    /// It refuses without mutation; callers that own the claim handle must
+    /// perform any cleanup through their guarded dispatch path. Apply a
+    /// lifecycle decision through [`Self::apply_observed`], which requires the
+    /// captured process observation and evidence bundle.
     ///
     /// `Ok` means the bead reached a terminal state for this decision:
     /// closed, blocked, split, released (including after a judged rejection
@@ -235,6 +240,9 @@ impl DecisionExecutor {
         actor: &str,
         fallback: Option<&predispatch::PreDispatch>,
     ) -> Result<AppliedDecision> {
+        // Legacy callers have no process observation or retained fencing
+        // handle. The observed entry point refuses without mutation; lifecycle
+        // mutations require apply_observed with a captured bundle.
         self.apply_observed(store, bead, decision, actor, fallback, None)
             .await
     }
@@ -250,12 +258,18 @@ impl DecisionExecutor {
         fallback: Option<&predispatch::PreDispatch>,
         observation: Option<&ResolutionObservation<'_>>,
     ) -> Result<AppliedDecision> {
-        GuardedApplier {
+        let applier = GuardedApplier {
             executor: self,
             retained_claim: observation.and_then(|observation| observation.claim_handle),
+        };
+        if observation.is_none() {
+            return Err(anyhow::anyhow!(
+                "resolution admission failed: process observation and an evidence bundle are required"
+            ));
         }
-        .apply_observed(store, bead, decision, actor, fallback, observation)
-        .await
+        applier
+            .apply_observed(store, bead, decision, actor, fallback, observation)
+            .await
     }
 }
 
@@ -451,12 +465,8 @@ impl GuardedApplier<'_> {
                 self.apply_blocked(store, bead, actor, evidence, blocker_type, description)
                     .await
             }
-            ResolveDecision::Split {
-                evidence,
-                parent_bead_id,
-                child_titles,
-            } => {
-                self.apply_split(store, bead, actor, evidence, parent_bead_id, child_titles)
+            ResolveDecision::Split { .. } => {
+                self.apply_split(store, bead, actor, decision, observation)
                     .await
             }
         };
@@ -1152,10 +1162,18 @@ impl GuardedApplier<'_> {
         store: &dyn BeadStore,
         bead: &Bead,
         actor: &str,
-        evidence: &str,
-        parent_bead_id: &str,
-        child_titles: &[String],
+        decision: &ResolveDecision,
+        observation: Option<&ResolutionObservation<'_>>,
     ) -> Result<AppliedDecision> {
+        let ResolveDecision::Split {
+            evidence,
+            parent_bead_id,
+            child_titles,
+        } = decision
+        else {
+            unreachable!("apply_split is called only for split decisions")
+        };
+
         if !self.ensure_owned(store, &bead.id, actor).await? {
             return Ok(AppliedDecision::OwnershipLost);
         }
@@ -1210,19 +1228,48 @@ impl GuardedApplier<'_> {
                 if !self.ensure_owned(store, &bead.id, actor).await? {
                     return Ok(AppliedDecision::OwnershipLost);
                 }
-                match self.op(store.block(&bead.id), "block").await {
-                    Ok(_) => {
-                        self.finish_blocked(
-                            store,
-                            bead,
-                            actor,
-                            AppliedDecision::Split { created, deduped },
-                        )
-                        .await
-                    }
-                    Err(error) => {
-                        self.mutation_failure(store, bead, actor, "block after split", error)
+                let atomic = store
+                    .negotiated_capabilities()
+                    .and_then(|capabilities| {
+                        capabilities
+                            .get("atomic_resolution")
+                            .and_then(serde_json::Value::as_bool)
+                    })
+                    .unwrap_or(false);
+                if atomic {
+                    self.apply_atomic_simple(
+                        store,
+                        bead,
+                        actor,
+                        observation,
+                        AtomicSimple {
+                            action: ResolutionAction::Block,
+                            outcome: "decomposed",
+                            reason: format!(
+                                "resolve split: {} ({} children created, {} deduped)",
+                                concise(evidence, MAX_NOTE_CHARS),
+                                created,
+                                deduped
+                            ),
+                            applied: AppliedDecision::Split { created, deduped },
+                        },
+                    )
+                    .await
+                } else {
+                    match self.op(store.block(&bead.id), "block").await {
+                        Ok(_) => {
+                            self.finish_blocked(
+                                store,
+                                bead,
+                                actor,
+                                AppliedDecision::Split { created, deduped },
+                            )
                             .await
+                        }
+                        Err(error) => {
+                            self.mutation_failure(store, bead, actor, "block after split", error)
+                                .await
+                        }
                     }
                 }
             }
@@ -2268,9 +2315,15 @@ mod tests {
         decision: &ResolveDecision,
     ) -> Result<AppliedDecision> {
         let bead = store.bead();
-        executor
-            .apply(store, &bead, decision, "worker-a", None)
-            .await
+        // These unit fixtures cover the compatibility mutation sequence in
+        // isolation. Production callers cannot bypass process evidence:
+        // `DecisionExecutor::apply` forwards `None` and fails safely.
+        GuardedApplier {
+            executor,
+            retained_claim: None,
+        }
+        .apply_observed(store, &bead, decision, "worker-a", None, None)
+        .await
     }
 
     // ── complete ─────────────────────────────────────────────────────────
@@ -2307,11 +2360,31 @@ mod tests {
         atomic_close_receipt_must_confirm_a_closed_state().await;
         abnormal_process_exits_release_before_completion_checks().await;
         stale_revision_refuses_atomic_resolution().await;
+        missing_observation_fails_safely().await;
         crate::resolve::reducer::test_contracts::complete_requires_authoritative_work_and_gate_acceptance();
         crate::resolve::reducer::test_contracts::stale_fence_crash_and_split_mismatch_fail_quiet();
         assert_eq!(
             gate_resolution::verdict(false, None),
             GateVerdict::Unavailable
+        );
+    }
+
+    async fn missing_observation_fails_safely() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace).with_stored_notes("did the work");
+        let bead = store.bead();
+
+        let error = executor()
+            .apply(&store, &bead, &complete_decision(), "worker-a", None)
+            .await
+            .expect_err("an unobserved resolution must be refused");
+
+        assert!(format!("{error:#}").contains("resolution admission failed"));
+        assert!(store.closes_snapshot().is_empty());
+        assert_eq!(store.released(), 0, "no handle means no safe release");
+        assert_eq!(
+            store.show(&bead.id).await.unwrap().status,
+            BeadStatus::InProgress
         );
     }
 
@@ -3304,7 +3377,57 @@ mod tests {
             "parent blocked pending children"
         );
         assert_eq!(store.released(), 0);
+        advertised_atomic_split_blocks_parent_after_composite_creation().await;
         split_manual_block_overlay_releases_parent_claim().await;
+    }
+
+    async fn advertised_atomic_split_blocks_parent_after_composite_creation() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        let store = RecordingStore::new(workspace).with_atomic_resolution(false);
+        let executor = executor_with_mitosis(lock_dir.path());
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-split",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor
+            .apply_observed(
+                &store,
+                &bead,
+                &split_decision(PARENT_ID, &["Add the parser", "Add the serializer"]),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("split composite applies");
+
+        assert_eq!(
+            applied,
+            AppliedDecision::Split {
+                created: 2,
+                deduped: 0,
+            }
+        );
+        assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.blocks.load(Ordering::SeqCst),
+            0,
+            "the atomic resolve action applies the parent block"
+        );
+        assert_eq!(store.children_snapshot().len(), 2);
+        assert_eq!(
+            store.show(&bead.id).await.unwrap().status,
+            BeadStatus::Blocked
+        );
     }
 
     async fn split_manual_block_overlay_releases_parent_claim() {
@@ -3430,19 +3553,13 @@ mod tests {
         // proposals; only the uncovered one may be created.
         let store = RecordingStore::new(workspace).with_existing_child(existing_parser_child());
 
-        let applied = {
-            let bead = store.bead();
-            executor_with_mitosis(lock_dir.path())
-                .apply(
-                    &store,
-                    &bead,
-                    &split_decision("needle-exec", &["Add the parser", "Add the serializer"]),
-                    "worker-a",
-                    None,
-                )
-                .await
-                .expect("split with partial dedup applies")
-        };
+        let applied = apply(
+            &executor_with_mitosis(lock_dir.path()),
+            &store,
+            &split_decision("needle-exec", &["Add the parser", "Add the serializer"]),
+        )
+        .await
+        .expect("split with partial dedup applies");
 
         match applied {
             AppliedDecision::Split { created, deduped } => {
@@ -3927,9 +4044,7 @@ mod tests {
         // now applies. The bead is Deferred (and unowned in the real store);
         // exactly one decision may mutate it: the complete must lose without
         // closing or releasing anything.
-        let stale_bead = store.bead();
-        let applied = executor
-            .apply(&store, &stale_bead, &complete_decision(), "worker-a", None)
+        let applied = apply(&executor, &store, &complete_decision())
             .await
             .expect("a lost race is a normal outcome, not an error");
 
@@ -4001,9 +4116,7 @@ mod tests {
         // A stale retry dispatch applies against the post-split store: it
         // must lose at the entry ownership check without recording guidance,
         // incrementing failure accounting, or releasing.
-        let stale_bead = store.bead();
-        let applied = executor
-            .apply(&store, &stale_bead, &retry_decision(), "worker-a", None)
+        let applied = apply(&executor, &store, &retry_decision())
             .await
             .expect("a lost race is a normal outcome, not an error");
 

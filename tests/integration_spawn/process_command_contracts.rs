@@ -3523,14 +3523,24 @@ async fn resolution_process_contracts_complete_rejects_failed_and_missing_gates(
             Config::default(),
             Telemetry::new("resolution-gate-rejection".to_string()),
         );
+        let evidence =
+            needle::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = needle::resolve::executor::ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "gate-rejection-attempt",
+            claim_handle: None,
+        };
 
         let applied = executor
-            .apply(
+            .apply_observed(
                 &store,
                 &bead,
                 &resolution_process_contracts_complete(),
                 "test-worker",
                 None,
+                Some(&observation),
             )
             .await
             .expect("judged gate rejection should release");
@@ -3562,14 +3572,24 @@ async fn resolution_process_contracts_unverifiable_shipped_work_is_not_penalized
         Config::default(),
         Telemetry::new("resolution-unverifiable".to_string()),
     );
+    let evidence =
+        needle::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+    let observation = needle::resolve::executor::ResolutionObservation {
+        evidence: &evidence,
+        exit_code: 1,
+        interrupted: false,
+        attempt_id: "unverifiable-work-attempt",
+        claim_handle: None,
+    };
 
     let applied = executor
-        .apply(
+        .apply_observed(
             &store,
             &bead,
             &resolution_process_contracts_complete(),
             "test-worker",
             Some(&fallback),
+            Some(&observation),
         )
         .await
         .expect("unverifiable shipped work should release");
