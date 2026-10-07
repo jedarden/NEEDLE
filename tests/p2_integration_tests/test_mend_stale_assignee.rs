@@ -180,6 +180,7 @@ fn make_fresh_heartbeat(
         heartbeat_file: None,
         // This fixture models the legacy heartbeat shape.
         activity: None,
+        claim_identity: None,
     }
 }
 

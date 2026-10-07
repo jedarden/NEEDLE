@@ -139,6 +139,7 @@ mod tests {
             model: String::new(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         }
     }
 

@@ -546,6 +546,7 @@ mod tests {
             heartbeat_file: None,
             // Peer fixtures remain compatible with adapters without activity.
             activity: None,
+            claim_identity: None,
         }
     }
 

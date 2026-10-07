@@ -301,6 +301,7 @@ proptest! {
             heartbeat_file: None,
             // Property fixtures cover the absent-activity compatibility case.
             activity: None,
+            claim_identity: None,
             is_idle: false,
             current_task: None,
             model: "claude".to_string(),
@@ -332,6 +333,7 @@ proptest! {
             heartbeat_file: None,
             // Property fixtures cover the absent-activity compatibility case.
             activity: None,
+            claim_identity: None,
             is_idle: false,
             current_task: None,
             model: "claude".to_string(),

@@ -3362,6 +3362,7 @@ mod tests {
             heartbeat_file: None,
             // This fixture models an adapter that does not report activity.
             activity: None,
+            claim_identity: None,
         }
     }
 
@@ -5822,6 +5823,7 @@ mod tests {
             heartbeat_file: None,
             // This fixture models an adapter that does not report activity.
             activity: None,
+            claim_identity: None,
         };
         write_heartbeat(hb_dir.path(), &fresh_hb);
 
@@ -5896,6 +5898,7 @@ mod tests {
             heartbeat_file: None,
             // This fixture models an adapter that does not report activity.
             activity: None,
+            claim_identity: None,
         };
         write_heartbeat(hb_dir.path(), &hb);
 

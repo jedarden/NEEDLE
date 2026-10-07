@@ -11477,6 +11477,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
             heartbeat_file: None,
             // This fixture models an adapter that does not report activity.
             activity: None,
+            claim_identity: None,
         };
         std::fs::write(
             tmp.path().join("test-w.json"),
@@ -11513,6 +11514,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
             heartbeat_file: None,
             // This fixture models an adapter that does not report activity.
             activity: None,
+            claim_identity: None,
         };
         let hb_path = tmp.path().join("test-rm.json");
         std::fs::write(&hb_path, serde_json::to_string(&hb).unwrap()).unwrap();
