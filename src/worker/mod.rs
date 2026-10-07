@@ -41,7 +41,7 @@ use crate::commit_hook;
 use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
 use crate::cost::{self, BudgetCheck, EffortData};
 use crate::dispatch::{self, DispatchContext, Dispatcher};
-use crate::health::HealthMonitor;
+use crate::health::{HealthMonitor, HeartbeatClaimIdentity};
 use crate::mitosis::MitosisEvaluator;
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
@@ -94,6 +94,22 @@ async fn accept_claim_renewal(
         true
     } else {
         false
+    }
+}
+
+fn heartbeat_claim_identity(
+    handle: &ClaimHandle,
+    worker_session_id: &str,
+    attempt_id: &str,
+) -> HeartbeatClaimIdentity {
+    HeartbeatClaimIdentity {
+        worker_session_id: worker_session_id.to_string(),
+        attempt_id: attempt_id.to_string(),
+        bead_id: handle.bead_id.clone(),
+        workspace_identity: handle.target_workspace_identity.clone(),
+        assignee: handle.assignee.clone(),
+        claim_epoch: handle.claim_epoch,
+        lease_expires_at: handle.lease_expires_at,
     }
 }
 
@@ -3054,6 +3070,9 @@ impl Worker {
 
     /// Restore the home workspace store if it was swapped for a remote bead.
     fn restore_home_store(&mut self) {
+        // Drop ownership evidence before the retained handle/store context is
+        // replaced for the next selection cycle.
+        self.health.clear_claim_identity();
         if let Some(cancel) = self.claim_renewal_cancel.take() {
             let _ = cancel.send(true);
         }
@@ -3130,11 +3149,20 @@ impl Worker {
         let target_workspace = target.workspace().display().to_string();
         let telemetry = self.telemetry.clone();
         let lost = self.claim_ownership_lost.clone();
+        let worker_session_id = self.telemetry.session_id().to_string();
+        let attempt_id = self.attempt_id.clone();
+        let heartbeat_reporter = self.attempt_id.as_ref().map(|attempt_id| {
+            self.health
+                .claim_identity_reporter(worker_session_id.clone(), attempt_id.clone())
+        });
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(async move {
             loop {
                 let before = handle.lock().await.clone();
                 let Some(expires) = before.lease_expires_at else {
+                    if let Some(reporter) = heartbeat_reporter.as_ref() {
+                        reporter.clear_if_current();
+                    }
                     lost.store(true, Ordering::Release);
                     break;
                 };
@@ -3158,7 +3186,21 @@ impl Worker {
                 .await;
                 let ownership_kept = match result {
                     Ok(Ok(crate::claim::ClaimRenewal::Renewed(next))) => {
-                        accept_claim_renewal(&handle, &expected, next).await
+                        let renewed_for_heartbeat = next.clone();
+                        let accepted = accept_claim_renewal(&handle, &expected, next).await;
+                        if accepted {
+                            if let (Some(reporter), Some(attempt_id)) =
+                                (heartbeat_reporter.as_ref(), attempt_id.as_deref())
+                            {
+                                let identity = heartbeat_claim_identity(
+                                    &renewed_for_heartbeat,
+                                    &worker_session_id,
+                                    attempt_id,
+                                );
+                                reporter.update_retained_handle(identity);
+                            }
+                        }
+                        accepted
                     }
                     Ok(Ok(crate::claim::ClaimRenewal::LostOwnership))
                     | Ok(Ok(crate::claim::ClaimRenewal::Unsupported)) => false,
@@ -3177,6 +3219,9 @@ impl Worker {
                     }
                 };
                 if !ownership_kept {
+                    if let Some(reporter) = heartbeat_reporter.as_ref() {
+                        reporter.clear_if_current();
+                    }
                     lost.store(true, Ordering::Release);
                     let _ = telemetry.emit_try_lock(
                         EventKind::ClaimVerifyError {
@@ -4767,6 +4812,25 @@ impl Worker {
                         bead.id,
                         claim_identity.actor
                     );
+                }
+
+                // Publish only after the live target store has confirmed this
+                // attempt's claim. The heartbeat receives one credential-free
+                // snapshot of the exact retained handle.
+                if let (Some(handle), Some(attempt_id)) =
+                    (self.claim_handle.clone(), self.attempt_id.clone())
+                {
+                    let retained = handle.lock().await;
+                    let identity = heartbeat_claim_identity(
+                        &retained,
+                        self.telemetry.session_id(),
+                        &attempt_id,
+                    );
+                    let reporter = self.health.claim_identity_reporter(
+                        self.telemetry.session_id().to_string(),
+                        attempt_id,
+                    );
+                    let _ = reporter.publish_verified(identity);
                 }
 
                 // Carry the exact store selected before claim together with
@@ -7295,6 +7359,10 @@ impl Worker {
             self.beads_completed += 1;
         }
         self.last_cycle_closed = false;
+        // The next heartbeat must not continue to prove ownership after this
+        // dispatch has reached its terminal outcome, even while the worker's
+        // local fields are being reset for the next state.
+        self.health.clear_claim_identity();
         self.current_bead = None;
         self.attempt_id = None;
         self.attempt_provenance = AttemptProvenance::default();

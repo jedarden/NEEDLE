@@ -122,6 +122,35 @@ pub struct HeartbeatData {
     /// binding, dedup, and payload rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<AdapterActivity>,
+    /// Claim-time ownership evidence for the active dispatch, when this worker
+    /// has verified its retained handle. Missing from older heartbeat files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_identity: Option<HeartbeatClaimIdentity>,
+}
+
+/// Credential-free identity of the claim retained by one worker attempt.
+///
+/// `claim_epoch` and `lease_expires_at` are absent when the configured bead
+/// backend does not expose them. The fencing credential is deliberately never
+/// projected into the heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatClaimIdentity {
+    /// Unique worker process session, distinct from its reusable qualified ID.
+    pub worker_session_id: String,
+    /// Attempt that captured and verified this claim.
+    pub attempt_id: String,
+    /// Bead owned by the attempt.
+    pub bead_id: BeadId,
+    /// Canonical identity of the bead store workspace.
+    pub workspace_identity: String,
+    /// Qualified worker name recorded as the claim assignee.
+    pub assignee: String,
+    /// Monotonic claim epoch when the backend exposes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_epoch: Option<u64>,
+    /// Current lease expiry when the backend exposes renewable leases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<DateTime<Utc>>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -132,6 +161,9 @@ pub struct HeartbeatData {
 struct SharedHeartbeatState {
     state: WorkerState,
     current_bead: Option<BeadId>,
+    /// The active claim identity is replaced as one record, never field by
+    /// field. It is cleared at bead and idle boundaries.
+    claim_identity: Option<HeartbeatClaimIdentity>,
     beads_processed: u64,
     /// Cycles that ended with the bead actually closed — see
     /// [`HeartbeatData::beads_completed`].
@@ -157,6 +189,7 @@ impl SharedHeartbeatState {
         SharedHeartbeatState {
             state: WorkerState::Booting,
             current_bead: None,
+            claim_identity: None,
             beads_processed: 0,
             beads_completed: 0,
             current_workspace: None,
@@ -166,6 +199,92 @@ impl SharedHeartbeatState {
             activity: activity::ActivitySlot::default(),
         }
     }
+}
+
+/// Attempt-bound writer used by the worker's renewal task. A delayed renewal
+/// can update only the record published for its own session and attempt.
+#[derive(Clone)]
+pub(crate) struct HeartbeatClaimIdentityReporter {
+    shared_state: Arc<Mutex<SharedHeartbeatState>>,
+    worker_session_id: String,
+    attempt_id: String,
+}
+
+impl HeartbeatClaimIdentityReporter {
+    fn matches_binding(&self, identity: &HeartbeatClaimIdentity) -> bool {
+        identity.worker_session_id == self.worker_session_id
+            && identity.attempt_id == self.attempt_id
+    }
+
+    /// Publish the verified handle as a complete record. A candidate bead or
+    /// an idle worker cannot publish ownership evidence.
+    pub(crate) fn publish_verified(&self, identity: HeartbeatClaimIdentity) -> bool {
+        if !self.matches_binding(&identity) {
+            return false;
+        }
+        let Ok(mut guard) = self.shared_state.lock() else {
+            return false;
+        };
+        if !heartbeat_can_publish_claim(&guard, &identity) {
+            return false;
+        }
+        if guard.claim_identity.as_ref().is_some_and(|current| {
+            current.worker_session_id != self.worker_session_id
+                || current.attempt_id != self.attempt_id
+        }) {
+            return false;
+        }
+        guard.claim_identity = Some(identity);
+        true
+    }
+
+    /// Replace the lease/epoch view only while this attempt is still the
+    /// heartbeat's retained claim. A late renewal from a prior attempt loses.
+    pub(crate) fn update_retained_handle(&self, identity: HeartbeatClaimIdentity) -> bool {
+        if !self.matches_binding(&identity) {
+            return false;
+        }
+        let Ok(mut guard) = self.shared_state.lock() else {
+            return false;
+        };
+        if !heartbeat_can_publish_claim(&guard, &identity)
+            || !guard.claim_identity.as_ref().is_some_and(|current| {
+                current.worker_session_id == self.worker_session_id
+                    && current.attempt_id == self.attempt_id
+                    && current.bead_id == identity.bead_id
+                    && current.workspace_identity == identity.workspace_identity
+                    && current.assignee == identity.assignee
+                    && current.claim_epoch == identity.claim_epoch
+            })
+        {
+            return false;
+        }
+        guard.claim_identity = Some(identity);
+        true
+    }
+
+    /// Remove evidence after a renewal proves the retained claim was lost.
+    /// The attempt check prevents a stale task from clearing a successor.
+    pub(crate) fn clear_if_current(&self) {
+        if let Ok(mut guard) = self.shared_state.lock() {
+            if guard.claim_identity.as_ref().is_some_and(|current| {
+                current.worker_session_id == self.worker_session_id
+                    && current.attempt_id == self.attempt_id
+            }) {
+                guard.claim_identity = None;
+            }
+        }
+    }
+}
+
+fn heartbeat_can_publish_claim(
+    state: &SharedHeartbeatState,
+    identity: &HeartbeatClaimIdentity,
+) -> bool {
+    state.current_bead.as_ref() == Some(&identity.bead_id)
+        && state.state != WorkerState::Exhausted
+        && state.state != WorkerState::Stopped
+        && state.state != WorkerState::Errored
 }
 
 /// Control messages for the native heartbeat thread.
@@ -281,6 +400,7 @@ impl HealthMonitor {
             shared_state: Arc::new(Mutex::new(SharedHeartbeatState {
                 state: WorkerState::Booting,
                 current_bead: None,
+                claim_identity: None,
                 beads_processed: 0,
                 beads_completed: 0,
                 current_workspace: None,
@@ -402,6 +522,7 @@ impl HealthMonitor {
     ) {
         if let Ok(mut guard) = self.shared_state.lock() {
             let next_bead = current_bead.cloned();
+            let next_workspace = workspace.map(Path::to_path_buf);
             if guard.current_bead != next_bead {
                 // A dispatch boundary also invalidates any reporter from the
                 // prior bead. This keeps a late callback from surviving a
@@ -409,9 +530,41 @@ impl HealthMonitor {
                 // bind_activity for the successor attempt.
                 guard.activity.clear();
             }
+            if guard.current_bead != next_bead || guard.current_workspace != next_workspace {
+                guard.claim_identity = None;
+            }
             guard.state = state.clone();
             guard.current_bead = next_bead;
-            guard.current_workspace = workspace.map(|p| p.to_path_buf());
+            guard.current_workspace = next_workspace;
+            if guard.current_bead.is_none()
+                || guard.state == WorkerState::Exhausted
+                || guard.state == WorkerState::Stopped
+                || guard.state == WorkerState::Errored
+            {
+                guard.claim_identity = None;
+            }
+        }
+    }
+
+    /// Create a reporter bound to one process session and dispatch attempt.
+    /// The reporter cannot publish until the worker confirms the claim and
+    /// cannot overwrite a later attempt with a delayed renewal.
+    pub(crate) fn claim_identity_reporter(
+        &self,
+        worker_session_id: String,
+        attempt_id: String,
+    ) -> HeartbeatClaimIdentityReporter {
+        HeartbeatClaimIdentityReporter {
+            shared_state: self.shared_state.clone(),
+            worker_session_id,
+            attempt_id,
+        }
+    }
+
+    /// Clear claim ownership evidence synchronously at a dispatch boundary.
+    pub fn clear_claim_identity(&self) {
+        if let Ok(mut guard) = self.shared_state.lock() {
+            guard.claim_identity = None;
         }
     }
 
@@ -1227,6 +1380,7 @@ impl HealthMonitor {
             last_strand,
             adapter,
             activity,
+            claim_identity,
         ) = {
             let guard = self
                 .shared_state
@@ -1242,6 +1396,7 @@ impl HealthMonitor {
                 guard.last_strand.clone(),
                 guard.adapter.clone(),
                 guard.activity.latest().cloned(),
+                guard.claim_identity.clone(),
             )
         };
 
@@ -1314,6 +1469,7 @@ impl HealthMonitor {
             model,
             heartbeat_file: None,
             activity,
+            claim_identity,
         };
 
         let path = self.heartbeat_path();
@@ -1683,6 +1839,7 @@ fn emitter_loop(
             current_workspace,
             model,
             activity,
+            claim_identity,
         ) = match shared_state.lock() {
             Ok(guard) => (
                 guard.state.clone(),
@@ -1692,6 +1849,7 @@ fn emitter_loop(
                 guard.current_workspace.clone(),
                 guard.model.clone(),
                 guard.activity.latest().cloned(),
+                guard.claim_identity.clone(),
             ),
             Err(_) => {
                 // Mutex poisoned — the main thread panicked. Exit.
@@ -1728,6 +1886,7 @@ fn emitter_loop(
             model,
             heartbeat_file: None,
             activity,
+            claim_identity,
         };
 
         let path = heartbeat_dir.join(format!("{}.json", qualified_id));
@@ -2030,6 +2189,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
         let hb2 = HeartbeatData {
             worker_id: "worker-b".to_string(),
@@ -2048,6 +2208,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         std::fs::write(
@@ -2101,6 +2262,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
         std::fs::write(
             hb_dir.join("claude-worker-a.json"),
@@ -2230,6 +2392,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         // Fresh heartbeat should not be stale.
@@ -2309,6 +2472,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         let json = serde_json::to_string_pretty(&data).unwrap();
@@ -2354,6 +2518,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
         std::fs::write(
             hb_dir.join("self-worker.json"),
@@ -2393,6 +2558,7 @@ mod tests {
         let shared_state = Arc::new(Mutex::new(SharedHeartbeatState {
             state: WorkerState::Selecting,
             current_bead: None,
+            claim_identity: None,
             beads_processed: 0,
             beads_completed: 0,
             current_workspace: None,
@@ -2933,6 +3099,7 @@ mod tests {
                 model: "claude-sonnet-4".to_string(),
                 heartbeat_file: None,
                 activity: None,
+                claim_identity: None,
             };
             let path = hb_dir.join(format!("claude-worker-{}.json", i));
             std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -2982,6 +3149,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
         let path = hb_dir.join("claude-worker-2.json");
         std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -3031,6 +3199,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
         let path = hb_dir.join("claude-worker-2.json");
         std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -3217,6 +3386,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
         std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
         assert!(path.exists(), "heartbeat file should exist");
@@ -4497,6 +4667,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         let ttl = Duration::from_secs(300); // 5 minutes
@@ -4530,6 +4701,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         let ttl = Duration::from_secs(300); // 5 minutes
@@ -4563,6 +4735,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         let ttl = Duration::from_secs(300); // 5 minutes
@@ -4615,6 +4788,7 @@ mod tests {
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -4670,6 +4844,7 @@ mod tests {
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -5376,6 +5551,7 @@ mod tests {
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         let path = hb_dir.join(format!("{}.json", worker_id));
@@ -5424,6 +5600,7 @@ mod tests {
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         let path = hb_dir.join(format!("{}.json", worker_id));
@@ -5528,6 +5705,7 @@ mod tests {
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         let path = hb_dir.join(format!("{}.json", worker_id));
@@ -5577,6 +5755,7 @@ mod tests {
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         let path = hb_dir.join(format!("{}.json", qualified_id));
@@ -5683,6 +5862,7 @@ mod tests {
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
             activity: None,
+            claim_identity: None,
         };
 
         std::fs::write(
@@ -5760,6 +5940,114 @@ mod tests {
             !json.contains("activity"),
             "a no-activity heartbeat must not gain an activity key, got: {json}"
         );
+        assert!(
+            data.claim_identity.is_none(),
+            "a pre-claim-identity heartbeat has unknown ownership evidence"
+        );
+        assert!(
+            !json.contains("claim_identity"),
+            "a missing claim identity must remain absent when reserialized"
+        );
+    }
+
+    #[serial]
+    #[test]
+    fn heartbeat_claim_identity_lifecycle() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        let config = test_config(&hb_dir);
+        let mut monitor = HealthMonitor::new(
+            config,
+            "claim-identity-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+        let bead_id = BeadId::from("needle-claim-identity");
+        monitor.update_state(&WorkerState::Executing, Some(&bead_id), None);
+        monitor.use_manual_emitter_time();
+        monitor.start_emitter().unwrap();
+
+        let heartbeat = || {
+            let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
+            serde_json::from_str::<HeartbeatData>(&content).unwrap()
+        };
+        assert!(
+            heartbeat().claim_identity.is_none(),
+            "a selected candidate is not ownership evidence before claim verification"
+        );
+
+        let expiry = Utc::now() + chrono::Duration::seconds(120);
+        let first = HeartbeatClaimIdentity {
+            worker_session_id: "session-first".to_string(),
+            attempt_id: "attempt-first".to_string(),
+            bead_id: bead_id.clone(),
+            workspace_identity: "/canonical/workspace-a".to_string(),
+            assignee: "claude-worker-a".to_string(),
+            claim_epoch: Some(7),
+            lease_expires_at: Some(expiry),
+        };
+        let first_reporter = monitor
+            .claim_identity_reporter(first.worker_session_id.clone(), first.attempt_id.clone());
+        assert!(first_reporter.publish_verified(first.clone()));
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+        let published = heartbeat()
+            .claim_identity
+            .expect("verified retained handle is projected");
+        assert_eq!(
+            published, first,
+            "the full identity is one heartbeat record"
+        );
+
+        let mut renewed = first.clone();
+        renewed.lease_expires_at = Some(expiry + chrono::Duration::seconds(120));
+        assert!(first_reporter.update_retained_handle(renewed.clone()));
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+        assert_eq!(
+            heartbeat().claim_identity,
+            Some(renewed.clone()),
+            "a confirmed renewal replaces the retained expiry atomically"
+        );
+
+        // A different current bead clears the prior identity before it can be
+        // emitted alongside the next candidate.
+        let next_bead = BeadId::from("needle-next-claim");
+        monitor.update_state(&WorkerState::Claiming, Some(&next_bead), None);
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+        assert!(heartbeat().claim_identity.is_none());
+
+        // Re-claiming the same bead under the same worker name is still a new
+        // attempt. A delayed renewal from the first attempt must not overwrite it.
+        monitor.update_state(&WorkerState::Selecting, None, None);
+        monitor.update_state(&WorkerState::Executing, Some(&bead_id), None);
+        let successor = HeartbeatClaimIdentity {
+            worker_session_id: "session-first".to_string(),
+            attempt_id: "attempt-successor".to_string(),
+            bead_id: bead_id.clone(),
+            workspace_identity: "/canonical/workspace-a".to_string(),
+            assignee: "claude-worker-a".to_string(),
+            claim_epoch: Some(8),
+            lease_expires_at: Some(expiry + chrono::Duration::seconds(240)),
+        };
+        let successor_reporter = monitor.claim_identity_reporter(
+            successor.worker_session_id.clone(),
+            successor.attempt_id.clone(),
+        );
+        assert!(successor_reporter.publish_verified(successor.clone()));
+        renewed.claim_epoch = Some(99);
+        assert!(!first_reporter.publish_verified(renewed.clone()));
+        assert!(!first_reporter.update_retained_handle(renewed));
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+        assert_eq!(heartbeat().claim_identity, Some(successor));
+
+        // EXHAUSTED is advertised as idle even if an old bead ID is still in
+        // the state snapshot; ownership evidence is cleared in that same lock.
+        monitor.update_state(&WorkerState::Exhausted, Some(&bead_id), None);
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+        let idle = heartbeat();
+        assert!(idle.is_idle);
+        assert!(idle.claim_identity.is_none());
+        monitor.stop();
     }
 
     #[test]

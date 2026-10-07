@@ -348,7 +348,9 @@ version = 1
 # worker, age and workspace but no file contents, a live holder past its
 # lease as a warning rather than stale, and an unreadable tree or invalid
 # opt-in reported as degraded without failing doctor.
-max_tests = 4159
+# +1 for heartbeat claim-identity lifecycle coverage (needle-dcd29ec6): the
+# unit test exercises private HealthMonitor emitter state and its reporter.
+max_tests = 4160
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
