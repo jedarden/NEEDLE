@@ -813,6 +813,7 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
             ("harness", "needle"),
             ("harness_version", "0.6.1"),
             ("resolve_reason", "gate:default_rust"),
+            ("resolve_action", "none"),
             ("evidence_ref", "commit:abc123"),
             ("if_revision", "3"),
         ]
@@ -858,6 +859,7 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
             ("harness", "needle"),
             ("harness_version", "0.6.1"),
             ("resolve_reason", "gate:default_rust"),
+            ("resolve_action", "none"),
             ("evidence_ref", "commit:abc123"),
             ("fencing_token", "7"),
         ]
