@@ -326,7 +326,13 @@ version = 1
 # idempotent local exclude without .gitignore, exclude pathspec, force-added
 # rejection, committed-marker range detection, and linked-worktree exclude.
 # They drive real git in a tempdir but need no NEEDLE subprocess.
-max_tests = 4137
+# +8 Phase 20 `needle contention` CLI contracts (needle-f0552fec): rename-pair
+# parsing, acquire then cross-attempt conflict with holder JSON, disabled
+# workspace no-op, release-own-only, read-only check, interactive session
+# identity in list, all-or-none rename, and escaping-path/missing-identity
+# rejection. Identity arrives through an injected lookup (no global env); the
+# real-git fixture is git_safety::test_support, under its existing exception.
+max_tests = 4145
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

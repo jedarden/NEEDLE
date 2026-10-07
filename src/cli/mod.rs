@@ -31,6 +31,7 @@ use crate::upgrade;
 use crate::worker::Worker;
 
 pub mod audit;
+pub mod file_contention;
 pub mod improvements;
 mod lesson;
 mod policy_doctor;
@@ -264,6 +265,22 @@ pub enum CliCommand {
         /// what workers are actually running rather than what the config files say.
         #[arg(long)]
         live: bool,
+    },
+
+    /// Record or inspect advisory file-contention markers in this checkout.
+    ///
+    /// Markers live in `<repo>/.needle/locks/` and are never committed. They
+    /// warn another participant away from a file; they never block a write.
+    ///
+    /// Exit codes:
+    ///   0 - ok (acquired, released, listed, or every checked path is writable)
+    ///   2 - invalid request
+    ///   3 - another participant is active on a requested path
+    ///   4 - stale-modified or ambiguous marker: preserve the file, route it
+    ///   5 - markers unavailable (coverage degraded; nothing was checked)
+    Contention {
+        #[command(subcommand)]
+        command: file_contention::ContentionCommand,
     },
 
     /// Check system health and repair.
@@ -745,6 +762,7 @@ pub fn run() -> Result<()> {
             show_source,
             live,
         } => cmd_config(get, set, dump, show_source, live),
+        CliCommand::Contention { command } => file_contention::run(command),
         CliCommand::Doctor {
             command,
             repair,
@@ -9131,6 +9149,235 @@ fn cmd_update_rules(output: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── needle contention (Phase 20, needle-f0552fec) ──
+
+    struct ContentionFixtureStatus;
+
+    impl crate::file_contention::HolderStatus for ContentionFixtureStatus {
+        fn liveness(
+            &self,
+            _: &crate::file_contention::MarkerRecord,
+        ) -> crate::file_contention::Liveness {
+            crate::file_contention::Liveness::Live
+        }
+        fn bead_state(&self, _: &str) -> Option<crate::file_contention::BeadState> {
+            None
+        }
+    }
+
+    fn contention_repo(enabled: bool) -> tempfile::TempDir {
+        let dir = crate::file_contention::git_safety::test_support::init_repo();
+        if enabled {
+            std::fs::write(
+                dir.path().join(".needle.yaml"),
+                "file_contention:\n  enabled: true\n  lease_secs: 60\n",
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    fn contention(repo: &Path, args: &[&str]) -> file_contention::ContentionCommand {
+        let repo = repo.to_string_lossy().into_owned();
+        let mut argv = vec!["needle", "contention"];
+        argv.extend_from_slice(args);
+        argv.extend_from_slice(&["--repo", &repo, "--json"]);
+        match Cli::try_parse_from(argv).unwrap().command {
+            CliCommand::Contention { command } => command,
+            other => panic!("parsed {other:?}"),
+        }
+    }
+
+    fn run_contention(
+        command: &file_contention::ContentionCommand,
+        env: &[(&str, &str)],
+    ) -> (i32, serde_json::Value) {
+        let env: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let lookup = move |name: &str| env.get(name).cloned();
+        let (code, rendered) =
+            file_contention::execute(command, &lookup, &ContentionFixtureStatus, Utc::now());
+        let value = serde_json::from_str(&rendered)
+            .unwrap_or_else(|e| panic!("non-JSON output {rendered:?}: {e}"));
+        (code, value)
+    }
+
+    const ATTEMPT_A: &[(&str, &str)] = &[
+        ("NEEDLE_BEAD_ID", "needle-a"),
+        ("NEEDLE_ATTEMPT_ID", "attempt-a"),
+        ("NEEDLE_WORKER_ID", "alpha"),
+    ];
+    const ATTEMPT_B: &[(&str, &str)] = &[
+        ("NEEDLE_BEAD_ID", "needle-b"),
+        ("NEEDLE_ATTEMPT_ID", "attempt-b"),
+        ("NEEDLE_WORKER_ID", "bravo"),
+    ];
+
+    #[test]
+    fn file_contention_parses_rename_pair_and_rejects_half_pair() {
+        let cmd = contention(
+            Path::new("/r"),
+            &["acquire", "--rename-from", "a.rs", "--rename-to", "b.rs"],
+        );
+        match cmd {
+            file_contention::ContentionCommand::Acquire {
+                rename_from,
+                rename_to,
+                identity,
+                ..
+            } => {
+                assert_eq!(rename_from, Some(PathBuf::from("a.rs")));
+                assert_eq!(rename_to, Some(PathBuf::from("b.rs")));
+                assert!(identity.json);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["needle", "contention", "acquire", "--rename-from", "a.rs"])
+                .is_err(),
+            "a rename source without a destination must not parse"
+        );
+    }
+
+    #[test]
+    fn file_contention_acquire_then_other_attempt_conflicts() {
+        let repo = contention_repo(true);
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+
+        let (code, out) = run_contention(&acquire, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["schema"], file_contention::OUTPUT_SCHEMA);
+        assert_eq!(out["result"], "acquired");
+        assert_eq!(out["paths"][0], "src/lib.rs");
+        let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+        assert!(exclude.contains("/.needle/locks/"), "{exclude}");
+
+        let (code, out) = run_contention(&acquire, ATTEMPT_B);
+        assert_eq!(code, file_contention::exit::CONFLICT, "{out}");
+        assert_eq!(out["written"], false);
+        let conflict = &out["conflicts"][0];
+        assert_eq!(conflict["assessment"], "active_other");
+        assert_eq!(conflict["holder"]["bead_id"], "needle-a");
+        assert_eq!(conflict["holder"]["worker_id"], "alpha");
+        assert_eq!(conflict["holder"]["attempt_id"], "attempt-a");
+
+        // Re-acquiring as the holder is a renewal, not a conflict.
+        let (code, out) = run_contention(&acquire, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+    }
+
+    #[test]
+    fn file_contention_disabled_workspace_writes_nothing() {
+        let repo = contention_repo(false);
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        let (code, out) = run_contention(&acquire, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["coverage"], "supported_disabled");
+        assert_eq!(out["written"], false);
+        assert!(!repo.path().join(".needle/locks").exists());
+    }
+
+    #[test]
+    fn file_contention_release_removes_only_own_markers() {
+        let repo = contention_repo(true);
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        assert_eq!(run_contention(&acquire, ATTEMPT_A).0, 0);
+
+        let release = contention(repo.path(), &["release"]);
+        let (code, out) = run_contention(&release, ATTEMPT_B);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["released"].as_array().unwrap().len(), 0);
+        assert!(repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+
+        let (_, out) = run_contention(&release, ATTEMPT_A);
+        assert_eq!(out["released"][0], "src/lib.rs");
+        assert!(!repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+    }
+
+    #[test]
+    fn file_contention_check_assesses_without_writing() {
+        let repo = contention_repo(true);
+        let check = contention(repo.path(), &["check", "--path", "src/lib.rs"]);
+        let (code, out) = run_contention(&check, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["paths"][0]["assessment"], "free");
+        assert!(!repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        assert_eq!(run_contention(&acquire, ATTEMPT_A).0, 0);
+        let (code, out) = run_contention(&check, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK);
+        assert_eq!(out["paths"][0]["assessment"], "same_attempt");
+        // No identity at all: nothing is ours, the live holder is a conflict.
+        let (code, out) = run_contention(&check, &[]);
+        assert_eq!(code, file_contention::exit::CONFLICT, "{out}");
+    }
+
+    #[test]
+    fn file_contention_interactive_session_identity_lists_as_session() {
+        let repo = contention_repo(true);
+        let session = &[("NEEDLE_SESSION_ID", "claude-session-1")];
+        let acquire = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        let (code, out) = run_contention(&acquire, session);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+
+        let (code, out) = run_contention(&contention(repo.path(), &["list"]), &[]);
+        assert_eq!(code, file_contention::exit::OK);
+        let marker = &out["markers"][0];
+        assert_eq!(marker["path"], "src/lib.rs");
+        assert_eq!(marker["holder"]["session_id"], "claude-session-1");
+        assert_eq!(marker["holder"]["worker_id"], "interactive");
+        assert!(marker["holder"]["bead_id"].is_null());
+    }
+
+    #[test]
+    fn file_contention_rename_records_both_paths_all_or_none() {
+        let repo = contention_repo(true);
+        let hold_dest = contention(repo.path(), &["acquire", "--path", "src/new.rs"]);
+        assert_eq!(run_contention(&hold_dest, ATTEMPT_B).0, 0);
+
+        let rename = contention(
+            repo.path(),
+            &[
+                "acquire",
+                "--rename-from",
+                "src/lib.rs",
+                "--rename-to",
+                "src/new.rs",
+            ],
+        );
+        let (code, out) = run_contention(&rename, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::CONFLICT, "{out}");
+        assert!(
+            !repo.path().join(".needle/locks/src/lib.rs.lock").exists(),
+            "a conflicting rename must not record its source"
+        );
+
+        assert_eq!(
+            run_contention(&contention(repo.path(), &["release"]), ATTEMPT_B).0,
+            0
+        );
+        let (code, out) = run_contention(&rename, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::OK, "{out}");
+        assert_eq!(out["paths"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn file_contention_rejects_escaping_path_and_missing_identity() {
+        let repo = contention_repo(true);
+        let escape = contention(repo.path(), &["acquire", "--path", "../outside.rs"]);
+        let (code, out) = run_contention(&escape, ATTEMPT_A);
+        assert_eq!(code, file_contention::exit::USAGE, "{out}");
+        assert_eq!(out["result"], "error");
+
+        let anonymous = contention(repo.path(), &["acquire", "--path", "src/lib.rs"]);
+        let (code, out) = run_contention(&anonymous, &[("NEEDLE_WORKER_ID", "alpha")]);
+        assert_eq!(code, file_contention::exit::USAGE, "{out}");
+        assert!(!repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+    }
 
     #[test]
     fn nato_alphabet_has_26_entries() {

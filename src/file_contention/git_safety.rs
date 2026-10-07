@@ -177,15 +177,15 @@ fn git_paths(repo_root: &Path, args: &[&str]) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Real-git fixtures shared by every file-contention unit test, so the
+/// subprocess stays inside this module's single owned `process` exception.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::file_contention::store::{
-        MarkerRead, MarkerStore, Participant, PathIntent, WriteIntent,
-    };
-    use std::time::Duration;
+pub(crate) mod test_support {
+    use std::path::Path;
+    use std::process::Command;
 
-    fn git(repo: &Path, args: &[&str]) -> String {
+    /// Run git in `repo` with a fixture identity and no inherited repo env.
+    pub(crate) fn git(repo: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -207,8 +207,8 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
-    /// A repo with one commit and an active marker for src/lib.rs.
-    fn repo_with_marker() -> tempfile::TempDir {
+    /// An initialised repository with one commit of `src/lib.rs`.
+    pub(crate) fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q", "-b", "main"]);
         git(dir.path(), &["config", "commit.gpgsign", "false"]);
@@ -216,6 +216,23 @@ mod tests {
         std::fs::write(dir.path().join("src/lib.rs"), "pub fn one() {}\n").unwrap();
         git(dir.path(), &["add", "--", "src/lib.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        dir
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_contention::store::{
+        MarkerRead, MarkerStore, Participant, PathIntent, WriteIntent,
+    };
+    use std::time::Duration;
+
+    use super::test_support::git;
+
+    /// A repo with one commit and an active marker for src/lib.rs.
+    fn repo_with_marker() -> tempfile::TempDir {
+        let dir = super::test_support::init_repo();
         let store = MarkerStore::open(dir.path()).unwrap();
         let who = Participant {
             bead_id: Some("needle-1".into()),

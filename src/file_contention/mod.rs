@@ -7,6 +7,7 @@
 //! attempt authority. See docs/plan/plan.md, Phase 20.
 
 pub mod assessment;
+pub mod env;
 pub mod git_safety;
 pub mod store;
 
