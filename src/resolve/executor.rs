@@ -56,7 +56,7 @@ use crate::config::Config;
 use crate::mitosis::MitosisEvaluator;
 use crate::outcome::OutcomeHandler;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{Bead, BeadStatus};
+use crate::types::{Bead, BeadStatus, Outcome};
 use crate::validation::predispatch;
 use crate::validation::resolution::{self as gate_resolution, GateVerdict};
 use crate::validation::verify_shipped_work;
@@ -288,7 +288,10 @@ impl DecisionExecutor {
                         .await);
                 }
                 ResolutionProposal::Release
-                    if observation.interrupted || observation.exit_code < 0 =>
+                    if !matches!(
+                        Outcome::classify(observation.exit_code, observation.interrupted),
+                        Outcome::Success | Outcome::Failure
+                    ) =>
                 {
                     return self
                         .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
@@ -621,7 +624,7 @@ impl DecisionExecutor {
                 return self
                     .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
                     .await
-                    .map(|_| AppliedDecision::Released(ReleaseCause::Unverifiable));
+                    .map(|released| release_result(released, ReleaseCause::Unverifiable));
             }
             let failed: Vec<&str> = report
                 .results
@@ -676,7 +679,7 @@ impl DecisionExecutor {
                     return self
                         .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
                         .await
-                        .map(|_| AppliedDecision::Released(ReleaseCause::Unverifiable));
+                        .map(|released| release_result(released, ReleaseCause::Unverifiable));
                 }
                 Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
                     tracing::warn!(
@@ -689,7 +692,7 @@ impl DecisionExecutor {
                     return self
                         .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
                         .await
-                        .map(|_| AppliedDecision::Released(ReleaseCause::Unverifiable));
+                        .map(|released| release_result(released, ReleaseCause::Unverifiable));
                 }
                 Err(error) => {
                     // The check could not run: nothing judged the closure.
@@ -703,7 +706,7 @@ impl DecisionExecutor {
                     return self
                         .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
                         .await
-                        .map(|_| AppliedDecision::Released(ReleaseCause::Unverifiable));
+                        .map(|released| release_result(released, ReleaseCause::Unverifiable));
                 }
             }
         } else {
@@ -817,7 +820,25 @@ impl DecisionExecutor {
                 )
                 .await
             {
-                Ok((ClaimMutationResult::Applied, Some(receipt))) => Ok(receipt.is_replay),
+                Ok((ClaimMutationResult::Applied, Some(receipt))) => {
+                    if !matches!(
+                        receipt.resulting_state.as_deref(),
+                        Some("closed" | "done" | "completed")
+                    ) {
+                        return self
+                            .mutation_failure(
+                                store,
+                                bead,
+                                actor,
+                                "atomic close receipt",
+                                anyhow::anyhow!(
+                                    "atomic close receipt did not confirm a closed state"
+                                ),
+                            )
+                            .await;
+                    }
+                    Ok(receipt.is_replay)
+                }
                 Ok((ClaimMutationResult::LostOwnership, _)) => {
                     return Ok(AppliedDecision::OwnershipLost)
                 }
@@ -1392,6 +1413,14 @@ fn concise(text: &str, max: usize) -> String {
     format!("{truncated}…")
 }
 
+fn release_result(released: bool, cause: ReleaseCause) -> AppliedDecision {
+    if released {
+        AppliedDecision::Released(cause)
+    } else {
+        AppliedDecision::OwnershipLost
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1436,6 +1465,7 @@ mod tests {
         noop_close: bool,
         atomic_resolution_supported: bool,
         atomic_replay: bool,
+        atomic_receipt_state: Option<&'static str>,
         atomic_calls: AtomicUsize,
         /// `create_bead` fails once this many children already exist.
         fail_create_after: Option<usize>,
@@ -1497,6 +1527,7 @@ mod tests {
                 noop_close: false,
                 atomic_resolution_supported: false,
                 atomic_replay: false,
+                atomic_receipt_state: None,
                 atomic_calls: AtomicUsize::new(0),
                 fail_create_after: None,
                 fail_parent_label_after: None,
@@ -1562,6 +1593,11 @@ mod tests {
         fn with_atomic_resolution(mut self, replay: bool) -> Self {
             self.atomic_resolution_supported = true;
             self.atomic_replay = replay;
+            self
+        }
+
+        fn with_atomic_receipt_state(mut self, state: &'static str) -> Self {
+            self.atomic_receipt_state = Some(state);
             self
         }
 
@@ -1736,7 +1772,11 @@ mod tests {
                 ClaimMutationResult::Applied,
                 Some(crate::bead_store::ResolveReceipt {
                     receipt_id: "receipt-1".to_string(),
-                    resulting_state: Some(claim.status.to_string()),
+                    resulting_state: Some(
+                        self.atomic_receipt_state
+                            .map(str::to_string)
+                            .unwrap_or_else(|| claim.status.to_string()),
+                    ),
                     resulting_attempt_tier: None,
                     is_replay: self.atomic_replay,
                 }),
@@ -1970,6 +2010,8 @@ mod tests {
         compatibility_close_must_change_authoritative_state().await;
         compatibility_release_refuses_a_replaced_claim().await;
         advertised_atomic_resolution_closes_once_and_replay_is_not_completion().await;
+        atomic_close_receipt_must_confirm_a_closed_state().await;
+        abnormal_process_exits_release_before_completion_checks().await;
         stale_revision_refuses_atomic_resolution().await;
         crate::resolve::reducer::test_contracts::complete_requires_authoritative_work_and_gate_acceptance();
         crate::resolve::reducer::test_contracts::stale_fence_crash_and_split_mismatch_fail_quiet();
@@ -2072,6 +2114,76 @@ mod tests {
                 "atomic path must not issue a separate close"
             );
             assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Done);
+        }
+    }
+
+    async fn atomic_close_receipt_must_confirm_a_closed_state() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .with_atomic_resolution(false)
+            .with_atomic_receipt_state("open");
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 0, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 0,
+            interrupted: false,
+            attempt_id: "attempt-1",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &complete_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 1);
+        assert!(store.closes_snapshot().is_empty());
+    }
+
+    async fn abnormal_process_exits_release_before_completion_checks() {
+        for exit_code in [124, 127, 129, -1] {
+            let (_dir, workspace) = temp_workspace();
+            let store = RecordingStore::new(workspace).with_stored_notes("did the work");
+            let bead = store.bead();
+            let evidence =
+                crate::resolve::evidence::capture(&bead.workspace, &bead, exit_code, "", "", false)
+                    .await;
+            let observation = ResolutionObservation {
+                evidence: &evidence,
+                exit_code,
+                interrupted: false,
+                attempt_id: "attempt-1",
+                claim_handle: None,
+            };
+
+            let applied = executor()
+                .apply_observed(
+                    &store,
+                    &bead,
+                    &complete_decision(),
+                    "worker-a",
+                    None,
+                    Some(&observation),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                applied,
+                AppliedDecision::Released(ReleaseCause::Unverifiable),
+                "exit code {exit_code}"
+            );
+            assert!(store.closes_snapshot().is_empty(), "exit code {exit_code}");
         }
     }
 

@@ -6,7 +6,7 @@
 
 use crate::resolve::evidence::EvidenceBundle;
 use crate::resolve::ResolveDecision;
-use crate::types::{Bead, BeadStatus, ClaimStatus};
+use crate::types::{Bead, BeadStatus, ClaimStatus, Outcome};
 use crate::validation::resolution::GateVerdict;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,9 +60,13 @@ pub fn reduce(facts: &ResolutionFacts<'_>) -> ResolutionProposal {
         return ResolutionProposal::OwnershipLost;
     }
 
-    // Negative exits are crash observations; no resolver text can convert a
-    // crash or interruption into accepted work.
-    if facts.interrupted || facts.exit_code < 0 {
+    // Use the process classifier rather than treating only negative exits as
+    // crashes. Timeout (124), missing-agent (127), and signal-style positive
+    // exits are infrastructure observations, not evidence of delivered work.
+    if !matches!(
+        Outcome::classify(facts.exit_code, facts.interrupted),
+        Outcome::Success | Outcome::Failure
+    ) {
         return ResolutionProposal::Release;
     }
 
@@ -72,6 +76,13 @@ pub fn reduce(facts: &ResolutionFacts<'_>) -> ResolutionProposal {
     if bundle.bead_id != facts.bead.id.as_ref()
         || bundle.dispatch.exit_code != facts.exit_code
         || bundle.dispatch.was_interrupted != facts.interrupted
+        || bundle.dispatch.exit_status
+            != if facts.exit_code == 0 {
+                "success"
+            } else {
+                "failure"
+            }
+        || bundle.dispatch.exit_reason != format!("exit_code:{}", facts.exit_code)
     {
         return ResolutionProposal::AdmissionFailure;
     }
@@ -309,6 +320,38 @@ pub(crate) mod test_contracts {
                 ..facts
             }),
             ResolutionProposal::Release
+        );
+        for exit_code in [124, 127, 137, 143] {
+            assert_eq!(
+                reduce(&ResolutionFacts { exit_code, ..facts }),
+                ResolutionProposal::Release,
+                "process exit {exit_code} must not close a bead"
+            );
+        }
+        assert_eq!(
+            reduce(&ResolutionFacts {
+                interrupted: true,
+                ..facts
+            }),
+            ResolutionProposal::Release
+        );
+        let mut invalid_evidence = evidence.clone();
+        invalid_evidence.dispatch.exit_status = "failure".to_string();
+        assert_eq!(
+            reduce(&ResolutionFacts {
+                evidence: Some(&invalid_evidence),
+                ..facts
+            }),
+            ResolutionProposal::AdmissionFailure
+        );
+        invalid_evidence.dispatch.exit_status = "success".to_string();
+        invalid_evidence.dispatch.exit_reason = "exit_code:1".to_string();
+        assert_eq!(
+            reduce(&ResolutionFacts {
+                evidence: Some(&invalid_evidence),
+                ..facts
+            }),
+            ResolutionProposal::AdmissionFailure
         );
         let split = ResolveDecision::Split {
             evidence: "independent work".to_string(),
