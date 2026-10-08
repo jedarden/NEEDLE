@@ -402,6 +402,156 @@ fn canonical_workspace_identity(workspace: &Path) -> Option<String> {
     Some(format!("sha256:{digest:x}"))
 }
 
+/// The fields that make up an exact Mend claim identity. These newtypes keep
+/// values from different identity domains from being accidentally compared or
+/// substituted for one another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MendClaimIdentity {
+    workspace: CanonicalWorkspaceIdentity,
+    bead_id: BeadId,
+    assignee: QualifiedAssignee,
+    worker_session: WorkerSessionId,
+    attempt: ClaimAttemptId,
+    claim_epoch: ClaimEpoch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalWorkspaceIdentity(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QualifiedAssignee(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerSessionId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaimAttemptId(String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClaimEpoch(u64);
+
+/// A missing or mismatched field is intentionally different from an exact
+/// identity. Callers must leave the claim untouched for either non-exact case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimIdentityField {
+    Identity,
+    Workspace,
+    BeadId,
+    QualifiedAssignee,
+    WorkerSession,
+    Attempt,
+    ClaimEpoch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaimIdentityCorrelation {
+    Exact(MendClaimIdentity),
+    Missing(ClaimIdentityField),
+    Mismatched(ClaimIdentityField),
+}
+
+/// Correlate a fresh heartbeat's claim identity with the live bead snapshot.
+/// `session` on HeartbeatData is a reusable worker name, so it is never used
+/// as a substitute for the unique claim-bound worker session ID.
+fn correlate_mend_claim_identity(
+    bead: &Bead,
+    heartbeat: &HeartbeatData,
+    live_claim: &ClaimStatus,
+    store_workspace_identity: Option<&str>,
+) -> ClaimIdentityCorrelation {
+    use ClaimIdentityCorrelation::{Exact, Mismatched, Missing};
+    use ClaimIdentityField as Field;
+
+    let Some(identity) = heartbeat.claim_identity.as_ref() else {
+        return Missing(Field::Identity);
+    };
+
+    let Some(expected_workspace) =
+        store_workspace_identity.filter(|value| !value.trim().is_empty())
+    else {
+        return Missing(Field::Workspace);
+    };
+    let Some(workspace) = canonical_workspace_identity(&heartbeat.workspace) else {
+        return Missing(Field::Workspace);
+    };
+    if identity.workspace_identity.trim().is_empty() {
+        return Missing(Field::Workspace);
+    }
+
+    let Some(current_bead) = heartbeat.current_bead.as_ref() else {
+        return Missing(Field::BeadId);
+    };
+    let Some(expected_assignee) = bead
+        .assignee
+        .as_deref()
+        .filter(|assignee| !assignee.trim().is_empty())
+    else {
+        return Missing(Field::QualifiedAssignee);
+    };
+    let Some(live_assignee) = live_claim
+        .assignee
+        .as_deref()
+        .filter(|assignee| !assignee.trim().is_empty())
+    else {
+        return Missing(Field::QualifiedAssignee);
+    };
+    if heartbeat.qualified_id.trim().is_empty() || identity.assignee.trim().is_empty() {
+        return Missing(Field::QualifiedAssignee);
+    }
+    if identity.worker_session_id.trim().is_empty() {
+        return Missing(Field::WorkerSession);
+    }
+    if identity.attempt_id.trim().is_empty() {
+        return Missing(Field::Attempt);
+    }
+    let Some(identity_epoch) = identity.claim_epoch else {
+        return Missing(Field::ClaimEpoch);
+    };
+
+    let observed = MendClaimIdentity {
+        workspace: CanonicalWorkspaceIdentity(identity.workspace_identity.clone()),
+        bead_id: identity.bead_id.clone(),
+        assignee: QualifiedAssignee(identity.assignee.clone()),
+        worker_session: WorkerSessionId(identity.worker_session_id.clone()),
+        attempt: ClaimAttemptId(identity.attempt_id.clone()),
+        claim_epoch: ClaimEpoch(identity_epoch),
+    };
+
+    if workspace != expected_workspace || observed.workspace.0 != expected_workspace {
+        return Mismatched(Field::Workspace);
+    }
+    if observed.bead_id != bead.id || current_bead != &observed.bead_id {
+        return Mismatched(Field::BeadId);
+    }
+    if live_assignee != expected_assignee
+        || heartbeat.qualified_id != expected_assignee
+        || observed.assignee.0 != expected_assignee
+    {
+        return Mismatched(Field::QualifiedAssignee);
+    }
+    // The legacy session and qualified ID identify a reusable worker slot,
+    // not one process incarnation. Reject them if copied into the unique
+    // worker-session field.
+    if observed.worker_session.0 == heartbeat.session
+        || observed.worker_session.0 == heartbeat.qualified_id
+    {
+        return Mismatched(Field::WorkerSession);
+    }
+    if heartbeat.activity.as_ref().is_some_and(|activity| {
+        activity.attempt_id != observed.attempt.0 || activity.bead_id != observed.bead_id
+    }) {
+        return Mismatched(Field::Attempt);
+    }
+    let Some(live_epoch) = live_claim.claim_epoch else {
+        return Missing(Field::ClaimEpoch);
+    };
+    if observed.claim_epoch.0 != live_epoch {
+        return Mismatched(Field::ClaimEpoch);
+    }
+
+    Exact(observed)
+}
+
 /// Read each requested full heartbeat once. The health helper is intentionally
 /// a smaller projection, so this preserves identity while retaining the same
 /// missing vs unreadable distinction Mend already relied on.
@@ -478,9 +628,9 @@ fn classify_claim_identity(
     {
         return ClaimIdentityVerdict::FencedConflict;
     }
-    if live_claim.revision.is_none() || live_claim.claim_epoch.is_none() {
+    let (Some(_), Some(live_claim_epoch)) = (live_claim.revision, live_claim.claim_epoch) else {
         return unknown(UndeterminedHeartbeat::ClaimSnapshotUnknown);
-    }
+    };
 
     let no_heartbeat_verdict = |reason| {
         if registry == RegistryLiveness::RegisteredDead {
@@ -523,42 +673,28 @@ fn classify_claim_identity(
         return unknown(UndeterminedHeartbeat::Stale);
     }
 
-    let Some(assignee) = bead
-        .assignee
-        .as_deref()
-        .filter(|assignee| !assignee.is_empty())
-    else {
-        return unknown(UndeterminedHeartbeat::ClaimIdentityUnknown);
+    let correlated_identity = match correlate_mend_claim_identity(
+        bead,
+        heartbeat,
+        live_claim,
+        store_workspace_identity,
+    ) {
+        ClaimIdentityCorrelation::Exact(identity) => identity,
+        ClaimIdentityCorrelation::Missing(_) | ClaimIdentityCorrelation::Mismatched(_) => {
+            return unknown(UndeterminedHeartbeat::ClaimIdentityUnknown);
+        }
     };
-    let Some(identity) = heartbeat.claim_identity.as_ref() else {
-        return unknown(UndeterminedHeartbeat::ClaimIdentityUnknown);
-    };
-    let heartbeat_workspace = canonical_workspace_identity(&heartbeat.workspace);
-    let activity_attempt_mismatch = heartbeat.activity.as_ref().is_some_and(|activity| {
-        activity.attempt_id != identity.attempt_id || activity.bead_id != identity.bead_id
-    });
-    if heartbeat.qualified_id != assignee
-        || identity.worker_session_id.is_empty()
-        || identity.attempt_id.is_empty()
-        || identity.assignee != assignee
-        || heartbeat.current_bead.as_ref() != Some(&identity.bead_id)
-        || activity_attempt_mismatch
-        || identity.claim_epoch.is_none()
-        || heartbeat_workspace.as_deref() != store_workspace_identity
-        || Some(identity.workspace_identity.as_str()) != store_workspace_identity
+    // The current claim is real, but the store does not persist the session or
+    // attempt that made the old claim. A reused qualified name alone therefore
+    // cannot prove supersession of another bead.
+    if correlated_identity.bead_id != bead.id
+        || correlated_identity.claim_epoch.0 != live_claim_epoch
     {
         return unknown(UndeterminedHeartbeat::ClaimIdentityUnknown);
     }
-
-    if identity.bead_id != bead.id {
-        // The current claim is real, but the store does not persist the
-        // session/attempt that made the old claim. A reused qualified name
-        // could have replaced that worker, so this is not supersession proof.
+    let Some(identity) = heartbeat.claim_identity.as_ref() else {
         return unknown(UndeterminedHeartbeat::ClaimIdentityUnknown);
-    }
-    if identity.claim_epoch != live_claim.claim_epoch {
-        return unknown(UndeterminedHeartbeat::ClaimIdentityUnknown);
-    }
+    };
 
     if identity
         .lease_expires_at
@@ -4237,6 +4373,154 @@ mod tests {
         }
     }
 
+    fn claim_identity_test_snapshot(bead: &Bead, claim_epoch: Option<u64>) -> ClaimStatus {
+        ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: bead.assignee.clone(),
+            revision: Some(4),
+            claim_epoch,
+        }
+    }
+
+    fn assert_claim_identity_exact_match_normalizes_canonical_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut bead = make_in_progress_bead("nd-identity-exact", "claude-worker-name");
+        bead.workspace = workspace.clone();
+        let workspace_identity = canonical_workspace_identity(&workspace).unwrap();
+        let mut heartbeat =
+            heartbeat_for_claim(&bead, bead.id.as_ref(), "session-unique-1", Some(7), None);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let workspace_alias = temp.path().join("workspace-alias");
+            symlink(&workspace, &workspace_alias).unwrap();
+            heartbeat.workspace = workspace_alias;
+        }
+
+        let snapshot = claim_identity_test_snapshot(&bead, Some(7));
+        let correlated =
+            correlate_mend_claim_identity(&bead, &heartbeat, &snapshot, Some(&workspace_identity));
+
+        assert_eq!(
+            correlated,
+            ClaimIdentityCorrelation::Exact(MendClaimIdentity {
+                workspace: CanonicalWorkspaceIdentity(workspace_identity),
+                bead_id: bead.id.clone(),
+                assignee: QualifiedAssignee("claude-worker-name".to_string()),
+                worker_session: WorkerSessionId("session-unique-1".to_string()),
+                attempt: ClaimAttemptId("attempt-session-unique-1".to_string()),
+                claim_epoch: ClaimEpoch(7),
+            })
+        );
+    }
+
+    fn assert_claim_identity_mismatch_in_any_field_is_not_exact() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut bead = make_in_progress_bead("nd-identity-target", "claude-worker-name");
+        bead.workspace = workspace.clone();
+        let workspace_identity = canonical_workspace_identity(&workspace).unwrap();
+        let snapshot = claim_identity_test_snapshot(&bead, Some(7));
+        let base = heartbeat_for_claim(&bead, bead.id.as_ref(), "session-unique-1", Some(7), None);
+
+        let cases = [
+            {
+                let mut heartbeat = base.clone();
+                heartbeat
+                    .claim_identity
+                    .as_mut()
+                    .unwrap()
+                    .workspace_identity = "sha256:wrong-workspace".to_string();
+                (heartbeat, ClaimIdentityField::Workspace)
+            },
+            {
+                let mut heartbeat = base.clone();
+                heartbeat.claim_identity.as_mut().unwrap().bead_id = BeadId::from("nd-other-bead");
+                (heartbeat, ClaimIdentityField::BeadId)
+            },
+            {
+                let mut heartbeat = base.clone();
+                heartbeat.claim_identity.as_mut().unwrap().assignee =
+                    "claude-other-worker".to_string();
+                (heartbeat, ClaimIdentityField::QualifiedAssignee)
+            },
+            {
+                let mut heartbeat = base.clone();
+                heartbeat.claim_identity.as_mut().unwrap().worker_session_id =
+                    heartbeat.session.clone();
+                (heartbeat, ClaimIdentityField::WorkerSession)
+            },
+            {
+                let mut heartbeat = base.clone();
+                heartbeat.activity = Some(crate::health::AdapterActivity {
+                    attempt_id: "attempt-from-another-dispatch".to_string(),
+                    bead_id: bead.id.clone(),
+                    seq: 1,
+                    kind: crate::health::ActivityKind::ToolCall,
+                    observed_at: Utc::now(),
+                });
+                (heartbeat, ClaimIdentityField::Attempt)
+            },
+            {
+                let mut heartbeat = base.clone();
+                heartbeat.claim_identity.as_mut().unwrap().claim_epoch = Some(8);
+                (heartbeat, ClaimIdentityField::ClaimEpoch)
+            },
+        ];
+
+        for (heartbeat, field) in cases {
+            assert_eq!(
+                correlate_mend_claim_identity(
+                    &bead,
+                    &heartbeat,
+                    &snapshot,
+                    Some(&workspace_identity),
+                ),
+                ClaimIdentityCorrelation::Mismatched(field),
+                "a mismatched {field:?} must not correlate as exact"
+            );
+        }
+    }
+
+    fn assert_claim_identity_missing_or_reused_worker_identity_is_non_authoritative() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut bead = make_in_progress_bead("nd-identity-missing", "claude-worker-name");
+        bead.workspace = workspace.clone();
+        let workspace_identity = canonical_workspace_identity(&workspace).unwrap();
+        let snapshot = claim_identity_test_snapshot(&bead, Some(7));
+        let mut heartbeat =
+            heartbeat_for_claim(&bead, bead.id.as_ref(), "session-unique-1", Some(7), None);
+
+        heartbeat.claim_identity = None;
+        assert_eq!(
+            correlate_mend_claim_identity(&bead, &heartbeat, &snapshot, Some(&workspace_identity),),
+            ClaimIdentityCorrelation::Missing(ClaimIdentityField::Identity),
+            "matching assignee/current_bead and a reusable worker name cannot replace identity"
+        );
+
+        heartbeat.claim_identity = Some(HeartbeatClaimIdentity {
+            worker_session_id: heartbeat.session.clone(),
+            attempt_id: "attempt-session-unique-1".to_string(),
+            bead_id: bead.id.clone(),
+            workspace_identity: workspace_identity.clone(),
+            assignee: bead.assignee.clone().unwrap(),
+            claim_epoch: Some(7),
+            lease_expires_at: None,
+        });
+        assert_eq!(
+            correlate_mend_claim_identity(&bead, &heartbeat, &snapshot, Some(&workspace_identity),),
+            ClaimIdentityCorrelation::Mismatched(ClaimIdentityField::WorkerSession),
+            "a reused worker name is not a process-session identity"
+        );
+    }
+
     #[tokio::test]
     async fn mend_requires_exact_claim_identity() {
         let heartbeat_dir = tempfile::tempdir().unwrap();
@@ -5048,7 +5332,11 @@ mod tests {
     /// when it carries no exact claim identity. The old assignee projection
     /// must not bypass Mend's current identity gate.
     #[tokio::test]
-    async fn heartbeat_claim_wins_over_newer_overlapping_claim() {
+    async fn claim_identity_heartbeat_claim_wins_over_newer_overlapping_claim() {
+        assert_claim_identity_exact_match_normalizes_canonical_workspace();
+        assert_claim_identity_mismatch_in_any_field_is_not_exact();
+        assert_claim_identity_missing_or_reused_worker_identity_is_non_authoritative();
+
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
