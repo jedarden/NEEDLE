@@ -1571,10 +1571,7 @@ mod tests {
 
         let fixture_dir = std::env::var_os("NEEDLE_LOOM_CONFORMANCE_DIR")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/loom/conformance/translation")
-            });
+            .expect("CI/local conformance replay requires NEEDLE_LOOM_CONFORMANCE_DIR");
         let claude: serde_json::Value =
             serde_json::from_slice(&std::fs::read(fixture_dir.join("claude_print.json")).unwrap())
                 .unwrap();
