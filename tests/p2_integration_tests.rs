@@ -1750,7 +1750,7 @@ async fn mitosis_splits_multitask_bead_creates_children() {
         .await
         .expect("claim parent for mitosis fixture");
     assert!(matches!(claim, ClaimResult::Claimed(_)));
-    let dispatcher = create_mitosis_dispatcher(json, store.clone());
+    let dispatcher = create_mitosis_dispatcher(json, store.clone(), None);
     let prompt_builder =
         needle::prompt::PromptBuilder::new(&needle::config::PromptConfig::default());
 
@@ -1815,7 +1815,8 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
     let parent = store.show(&BeadId::from("parent-dedup-001")).await.unwrap();
 
     // First split: creates 2 children.
-    let dispatcher = create_mitosis_dispatcher(json, store.clone());
+    let calls_path = ws.path().join(".mitosis-analyzer-calls");
+    let dispatcher = create_mitosis_dispatcher(json, store.clone(), Some(&calls_path));
     let evaluator1 = MitosisEvaluator::new(
         config.clone(),
         Telemetry::new("test1".to_string()),
@@ -1838,9 +1839,22 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
         result1
     );
     assert_eq!(store.created_count(), 2);
+    let children_before = store.created_children.lock().unwrap().clone();
+    let dependencies_before = store.deps_added.lock().unwrap().clone();
+    assert_eq!(
+        dependencies_before.len(),
+        2,
+        "both children block the parent"
+    );
+    let calls_before = std::fs::read_to_string(&calls_path).unwrap();
+    assert_eq!(
+        calls_before, "invoked\n",
+        "the first split invokes analysis once"
+    );
 
-    // Second split: all children already exist → Skipped.
-    let dispatcher2 = create_mitosis_dispatcher(json, store.clone());
+    // A prior split is retained before analysis, even if a new analyzer
+    // could propose different wording for the same acceptance criteria.
+    let dispatcher2 = create_mitosis_dispatcher(json, store.clone(), Some(&calls_path));
     let evaluator2 = MitosisEvaluator::new(
         config,
         Telemetry::new("test2".to_string()),
@@ -1858,14 +1872,29 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
         .await
         .unwrap();
     assert!(
-        matches!(result2, MitosisResult::Skipped { ref reason } if reason.contains("already exist")),
-        "second split should be skipped (all children exist); got: {:?}",
+        matches!(result2, MitosisResult::Skipped { ref reason } if reason.contains("existing split children remain unfinished")),
+        "second split should retain the unfinished plan before analysis; got: {:?}",
         result2
     );
     assert_eq!(
         store.created_count(),
         2,
         "exactly 2 children total — no duplicates created"
+    );
+    assert_eq!(
+        *store.created_children.lock().unwrap(),
+        children_before,
+        "the existing child identities, titles, and labels are preserved"
+    );
+    assert_eq!(
+        *store.deps_added.lock().unwrap(),
+        dependencies_before,
+        "the existing dependency graph is preserved"
+    );
+    assert_eq!(
+        std::fs::read_to_string(calls_path).unwrap(),
+        calls_before,
+        "a repeated split must not invoke the analyzer"
     );
 }
 
@@ -1910,7 +1939,7 @@ async fn mitosis_concurrent_workers_flock_serializes() {
         let config = config.clone();
 
         let handle = tokio::spawn(async move {
-            let dispatcher = create_mitosis_dispatcher(json, store.clone());
+            let dispatcher = create_mitosis_dispatcher(json, store.clone(), None);
             let prompt_builder =
                 needle::prompt::PromptBuilder::new(&needle::config::PromptConfig::default());
             let telemetry = Telemetry::new(format!("worker-{i}"));
@@ -1988,16 +2017,27 @@ fn create_test_dispatcher() -> needle::dispatch::Dispatcher {
 fn create_mitosis_dispatcher(
     json_response: &str,
     store: Arc<dyn BeadStore>,
+    invocation_log: Option<&Path>,
 ) -> needle::dispatch::Dispatcher {
     let mut adapters = HashMap::new();
+    let mut environment = HashMap::new();
+    let mut invoke_template = format!("echo '{json_response}'");
+    if let Some(path) = invocation_log {
+        environment.insert(
+            "MITOSIS_ANALYZER_CALL_LOG".to_string(),
+            path.to_string_lossy().into_owned(),
+        );
+        invoke_template =
+            format!("printf '%s\\n' invoked >> \"$MITOSIS_ANALYZER_CALL_LOG\"; {invoke_template}");
+    }
     let adapter = needle::dispatch::AgentAdapter {
         name: "mitosis-bash".to_string(),
         description: None,
         agent_cli: "bash".to_string(),
         version_command: None,
         input_method: InputMethod::Stdin,
-        invoke_template: format!("echo '{json_response}'"),
-        environment: HashMap::new(),
+        invoke_template,
+        environment,
         timeout_secs: 10,
         idle_timeout_secs: 0,
         hard_timeout_secs: 0,
@@ -2085,6 +2125,7 @@ struct MitosisDedupeStore {
     claimed_by: Mutex<Option<String>>,
     /// Created children: (id, title, labels), updated atomically via create_bead.
     created_children: Mutex<Vec<(String, String, Vec<String>)>>,
+    deps_added: Mutex<Vec<(BeadId, BeadId)>>,
 }
 
 impl MitosisDedupeStore {
@@ -2094,6 +2135,7 @@ impl MitosisDedupeStore {
             labels,
             claimed_by: Mutex::new(None),
             created_children: Mutex::new(Vec::new()),
+            deps_added: Mutex::new(Vec::new()),
         }
     }
 
@@ -2219,7 +2261,11 @@ impl BeadStore for MitosisDedupeStore {
         Ok(BeadId::from(id))
     }
 
-    async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+    async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+        self.deps_added
+            .lock()
+            .unwrap()
+            .push((blocker_id.clone(), blocked_id.clone()));
         Ok(())
     }
 
