@@ -1520,6 +1520,48 @@ impl GuardedApplier<'_> {
                         },
                     )
                     .await
+                } else if let Some(handle) = observation
+                    .and_then(|observation| observation.claim_handle)
+                    .filter(|handle| handle.is_protected())
+                {
+                    match self
+                        .op(
+                            store.update_claim(handle, &serde_json::json!({"status": "deferred"})),
+                            "update_claim(block after split)",
+                        )
+                        .await
+                    {
+                        Ok(ClaimMutationResult::Applied) => {
+                            self.finish_blocked(
+                                store,
+                                bead,
+                                actor,
+                                AppliedDecision::Split { created, deduped },
+                            )
+                            .await
+                        }
+                        Ok(ClaimMutationResult::LostOwnership) => {
+                            Ok(AppliedDecision::OwnershipLost)
+                        }
+                        Ok(ClaimMutationResult::Unsupported) => {
+                            self.mutation_failure(
+                                store,
+                                bead,
+                                actor,
+                                "guarded split block unsupported",
+                                anyhow::anyhow!(
+                                    "claim-owned compatibility block is unavailable after split"
+                                ),
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            self.reconcile_split_block_failure(
+                                store, bead, actor, created, deduped, error,
+                            )
+                            .await
+                        }
+                    }
                 } else {
                     match self.op(store.block(&bead.id), "block").await {
                         Ok(_) => {
@@ -1532,8 +1574,10 @@ impl GuardedApplier<'_> {
                             .await
                         }
                         Err(error) => {
-                            self.mutation_failure(store, bead, actor, "block after split", error)
-                                .await
+                            self.reconcile_split_block_failure(
+                                store, bead, actor, created, deduped, error,
+                            )
+                            .await
                         }
                     }
                 }
@@ -1564,6 +1608,91 @@ impl GuardedApplier<'_> {
                     .await
             }
         }
+    }
+
+    /// A split's parent block is the final compatibility mutation after
+    /// children have already been created. If the backend response is lost,
+    /// inspect authoritative state before attempting recovery so an applied
+    /// block is not mistaken for an unapplied split (or an unconfirmed write
+    /// credited as one).
+    async fn reconcile_split_block_failure(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        actor: &str,
+        created: usize,
+        deduped: usize,
+        error: anyhow::Error,
+    ) -> Result<AppliedDecision> {
+        let current = match self
+            .op(store.show(&bead.id), "show after failed split block")
+            .await
+        {
+            Ok(current) => current,
+            Err(read_error) => {
+                return self
+                    .mutation_failure(
+                        store,
+                        bead,
+                        actor,
+                        "split block reconciliation",
+                        error.context(format!(
+                            "authoritative reread after split block failed: {read_error:#}"
+                        )),
+                    )
+                    .await;
+            }
+        };
+        let blocked = match self
+            .op(
+                store.is_blocked(&bead.id),
+                "is_blocked after failed split block",
+            )
+            .await
+        {
+            Ok(blocked) => blocked,
+            Err(read_error) => {
+                return self
+                    .mutation_failure(
+                        store,
+                        bead,
+                        actor,
+                        "split block reconciliation",
+                        error.context(format!(
+                            "block state reread after split failed: {read_error:#}"
+                        )),
+                    )
+                    .await;
+            }
+        };
+        if blocked {
+            return match self
+                .finish_blocked(
+                    store,
+                    bead,
+                    actor,
+                    AppliedDecision::Split { created, deduped },
+                )
+                .await
+            {
+                Ok(applied) => Ok(applied),
+                Err(reconcile_error) => {
+                    self.mutation_failure(
+                        store,
+                        bead,
+                        actor,
+                        "split block postcondition",
+                        error.context(format!(
+                            "authoritative state was {}/blocked={blocked}, but reconciliation failed: {reconcile_error:#}",
+                            current.status
+                        )),
+                    )
+                    .await
+                }
+            };
+        }
+        self.mutation_failure(store, bead, actor, "block after split", error)
+            .await
     }
 
     /// bead-rs represents a block as an overlay on the base status. A block
@@ -2080,6 +2209,7 @@ mod tests {
         atomic_calls: AtomicUsize,
         guarded_update_calls: AtomicUsize,
         guarded_update_reclaim_race: bool,
+        guarded_update_response_lost_after_apply: bool,
         /// `create_bead` fails once this many children already exist.
         fail_create_after: Option<usize>,
         /// A *parent* `add_label` fails once this many parent labels have
@@ -2161,6 +2291,7 @@ mod tests {
                 atomic_calls: AtomicUsize::new(0),
                 guarded_update_calls: AtomicUsize::new(0),
                 guarded_update_reclaim_race: false,
+                guarded_update_response_lost_after_apply: false,
                 fail_create_after: None,
                 fail_parent_label_after: None,
                 armed_failure: StateMutex::new(None),
@@ -2273,6 +2404,12 @@ mod tests {
         fn reclaim_during_guarded_update(mut self) -> Self {
             self.claim_identity_supported = true;
             self.guarded_update_reclaim_race = true;
+            self
+        }
+
+        fn lose_guarded_update_response_after_apply(mut self) -> Self {
+            self.claim_identity_supported = true;
+            self.guarded_update_response_lost_after_apply = true;
             self
         }
 
@@ -2543,6 +2680,10 @@ mod tests {
                 claim.status = BeadStatus::Deferred;
             }
             claim.revision += 1;
+            drop(claim);
+            if self.guarded_update_response_lost_after_apply {
+                anyhow::bail!("simulated response loss after guarded update");
+            }
             Ok(ClaimMutationResult::Applied)
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
@@ -4119,8 +4260,100 @@ mod tests {
             "parent blocked pending children"
         );
         assert_eq!(store.released(), 0);
+        split_compatibility_block_refuses_a_reclaimed_claim().await;
+        split_compatibility_block_response_loss_is_reconciled().await;
         advertised_atomic_split_blocks_parent_after_composite_creation().await;
         split_manual_block_overlay_releases_parent_claim().await;
+    }
+
+    async fn split_compatibility_block_refuses_a_reclaimed_claim() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        let store = RecordingStore::new(workspace)
+            .with_fenced_claim_without_atomic()
+            .reclaim_during_guarded_update();
+        let executor = executor_with_mitosis(lock_dir.path());
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-split-reclaimed",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor
+            .apply_observed(
+                &store,
+                &bead,
+                &split_decision(PARENT_ID, &["Add the parser", "Add the serializer"]),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("a reclaimed protected claim is a normal lost-ownership result");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(
+            store.children_snapshot().len(),
+            2,
+            "children were created first"
+        );
+        assert_eq!(store.guarded_update_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "no unfenced block");
+        assert_eq!(store.released(), 0, "never release the new claim");
+        assert_eq!(store.claim.lock().unwrap().claim_epoch, 4);
+    }
+
+    async fn split_compatibility_block_response_loss_is_reconciled() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        let store = RecordingStore::new(workspace)
+            .with_fenced_claim_without_atomic()
+            .lose_guarded_update_response_after_apply();
+        let executor = executor_with_mitosis(lock_dir.path());
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-split-response-loss",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor
+            .apply_observed(
+                &store,
+                &bead,
+                &split_decision(PARENT_ID, &["Add the parser", "Add the serializer"]),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("the authoritative blocked state reconciles the lost response");
+
+        assert_eq!(
+            applied,
+            AppliedDecision::Split {
+                created: 2,
+                deduped: 0,
+            }
+        );
+        assert_eq!(store.guarded_update_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+        assert!(store.is_blocked(&bead.id).await.unwrap());
+        assert_eq!(
+            store.show(&bead.id).await.unwrap().status,
+            BeadStatus::Deferred
+        );
     }
 
     async fn advertised_atomic_split_blocks_parent_after_composite_creation() {
