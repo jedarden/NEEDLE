@@ -4459,10 +4459,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn superseding_heartbeats_release_the_claim() {
-        // A fresh live heartbeat from the claim's own assignee that names
-        // other work supersedes the claim: both naming a different bead and
-        // idling release it, even with the worker registered and alive.
+    async fn superseding_heartbeats_without_identity_hold_the_claim() {
+        // A fresh live heartbeat that names other work or idles is not enough
+        // when it lacks the exact claim identity. A reused qualified worker
+        // name must not turn the legacy projection into release authority.
         #[derive(Clone, Copy, Debug)]
         enum HeartbeatCase {
             DifferentBead,
@@ -4528,13 +4528,13 @@ mod tests {
 
             let result = mend.evaluate(&store, &HashSet::new()).await;
             assert!(
-                matches!(result, StrandResult::WorkCreated),
-                "{case:?} must not protect an abandoned claim: got: {result:?}"
+                matches!(result, StrandResult::NoWork),
+                "{case:?} must hold a claim without exact identity: got: {result:?}"
             );
             assert_eq!(
                 release_count.load(Ordering::Relaxed),
-                1,
-                "{case:?} must release exactly one superseded claim"
+                0,
+                "{case:?} must not release without exact identity"
             );
         }
     }
@@ -4913,10 +4913,11 @@ mod tests {
 
     // ── Superseded claim tests ───────────────────────────────────────────────────
 
-    /// Multiple in_progress beads for same assignee: only newest is valid.
-    /// Older beads are reaped even if worker is alive (dispatch leak detection).
+    /// Multiple in_progress beads for the same assignee are not enough to
+    /// prove that the older claims were superseded. Without an exact
+    /// heartbeat identity for each claim, Mend must leave them untouched.
     #[tokio::test]
-    async fn superseded_claims_reaped_even_with_live_worker() {
+    async fn overlapping_claims_without_exact_identity_are_held() {
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
@@ -4979,19 +4980,19 @@ mod tests {
 
         let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after reaping superseded claims, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when overlap lacks exact claim identity, got: {result:?}"
         );
         assert_eq!(
             release_count.load(Ordering::Relaxed),
-            2,
-            "should release exactly 2 older beads (newest bead should be untouched)"
+            0,
+            "timestamp overlap must not release claims without exact identity"
         );
     }
 
-    /// A heartbeat is stronger evidence than timestamp order. If a leaked
-    /// claim was written after the real dispatch began, preserve the older
-    /// active claim and reap the newer leak.
+    /// A heartbeat naming the older bead is not enough to reap a newer claim
+    /// when it carries no exact claim identity. The old assignee projection
+    /// must not bypass Mend's current identity gate.
     #[tokio::test]
     async fn heartbeat_claim_wins_over_newer_overlapping_claim() {
         let hb_dir = tempfile::tempdir().unwrap();
@@ -5051,8 +5052,8 @@ mod tests {
         );
 
         let result = mend.evaluate(&store, &HashSet::new()).await;
-        assert!(matches!(result, StrandResult::WorkCreated));
-        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+        assert!(matches!(result, StrandResult::NoWork));
+        assert_eq!(release_count.load(Ordering::Relaxed), 0);
 
         let beads = store.all_beads.lock().unwrap();
         let active = beads
@@ -5065,8 +5066,8 @@ mod tests {
             .unwrap();
         assert_eq!(active.status, BeadStatus::InProgress);
         assert_eq!(active.assignee.as_deref(), Some(assignee));
-        assert_eq!(leaked.status, BeadStatus::Open);
-        assert!(leaked.assignee.is_none());
+        assert_eq!(leaked.status, BeadStatus::InProgress);
+        assert_eq!(leaked.assignee.as_deref(), Some(assignee));
     }
 
     /// Single in_progress bead for assignee: NOT reaped if worker alive.
