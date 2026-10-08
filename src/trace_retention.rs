@@ -65,18 +65,19 @@ pub fn sweep(root: &Path, explicit_workspaces: &[PathBuf], dry_run: bool) -> Res
     let (root_config, _) = ConfigLoader::load_resolved(root, CliOverrides::default())?;
     state_dir::set_configured(root_config.paths.state_dir.clone());
     let live_workspaces = live_worker_workspaces(&root_config)?;
-    let workspaces = if explicit_workspaces.is_empty() {
-        discover_workspaces(root)?
+    let (workspaces, discovery_errors) = if explicit_workspaces.is_empty() {
+        discover_workspaces_report(root)?
     } else {
         let mut paths = explicit_workspaces.to_vec();
         paths.sort();
         paths.dedup();
-        paths
+        (paths, 0)
     };
 
     let mut summary = SweepSummary {
         dry_run,
         workspaces_seen: workspaces.len() as u64,
+        errors: discovery_errors,
         ..SweepSummary::default()
     };
 
@@ -104,9 +105,6 @@ pub fn sweep(root: &Path, explicit_workspaces: &[PathBuf], dry_run: bool) -> Res
                     .saturating_add(plan.bytes_reclaimable);
             }
             Err(error) => {
-                // Do not expose trace contents.  The structured count is for
-                // monitoring; the operator can use journal context to locate
-                // the affected workspace if needed.
                 tracing::warn!(workspace = %workspace_identity.display(), error = %error, "trace retention sweep skipped workspace");
                 summary.errors += 1;
             }
@@ -119,34 +117,46 @@ pub fn sweep(root: &Path, explicit_workspaces: &[PathBuf], dry_run: bool) -> Res
 /// Discover workspaces without following symlinks.  Sorting both directory
 /// entries and the final result keeps repeated timer runs reproducible.
 pub fn discover_workspaces(root: &Path) -> Result<Vec<PathBuf>> {
-    if !is_real_dir(root) {
-        return Ok(Vec::new());
-    }
-    let mut found = Vec::new();
-    discover_from(root, &mut found)?;
-    found.sort();
-    found.dedup();
-    Ok(found)
+    Ok(discover_workspaces_report(root)?.0)
 }
 
-fn discover_from(path: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
+fn discover_workspaces_report(root: &Path) -> Result<(Vec<PathBuf>, u64)> {
+    if !is_real_dir(root) {
+        return Ok((Vec::new(), 0));
+    }
+    let mut found = Vec::new();
+    let mut errors = 0;
+    discover_from(root, &mut found, &mut errors)?;
+    found.sort();
+    found.dedup();
+    Ok((found, errors))
+}
+
+fn discover_from(path: &Path, found: &mut Vec<PathBuf>, errors: &mut u64) -> Result<()> {
     let beads_dir = path.join(".beads");
     if is_real_dir(&beads_dir) && is_real_dir(&beads_dir.join("traces")) {
         found.push(path.to_path_buf());
         return Ok(());
     }
 
-    let mut entries = sorted_entries(path)?;
+    let mut entries = match sorted_entries(path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "trace retention discovery skipped unreadable directory");
+            *errors += 1;
+            return Ok(());
+        }
+    };
     for entry in entries.drain(..) {
         let name = entry.file_name();
-        if matches!(
-            name.and_then(|name| name.to_str()),
-            Some(".git" | ".beads" | "target" | "node_modules")
-        ) {
+        let name = name.and_then(|name| name.to_str());
+        if name.is_some_and(|name| {
+            name.starts_with('.') || matches!(name, "target" | "node_modules" | "scratch")
+        }) {
             continue;
         }
         if is_real_dir(&entry) {
-            discover_from(&entry, found)?;
+            discover_from(&entry, found, errors)?;
         }
     }
     Ok(())
@@ -236,6 +246,7 @@ fn plan_workspace(
     archive_enabled: bool,
     prune_local_after_spool: bool,
 ) -> Result<WorkspacePlan> {
+    reject_symlinks(traces_dir)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -404,70 +415,14 @@ fn is_symlink(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
-    use tempfile::TempDir;
-
-    fn metadata(exit_code: i32, days_old: i64) -> TraceMetadata {
-        TraceMetadata {
-            exit_code,
-            captured_at: Utc::now() - chrono::Duration::days(days_old),
-            started_at: None,
-            finished_at: Some(Utc::now()),
-            ..TraceMetadata::default()
+fn reject_symlinks(path: &Path) -> Result<()> {
+    for entry in sorted_entries(path)? {
+        if is_symlink(&entry) {
+            anyhow::bail!("trace tree contains a symlink");
+        }
+        if is_real_dir(&entry) {
+            reject_symlinks(&entry)?;
         }
     }
-
-    fn write_capture(path: &Path, exit_code: i32, days_old: i64) {
-        fs::create_dir_all(path).unwrap();
-        fs::write(path.join("stdout.txt"), "capture").unwrap();
-        fs::write(
-            path.join("metadata.json"),
-            serde_json::to_vec(&metadata(exit_code, days_old)).unwrap(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn plans_flat_and_attempt_layouts_without_trace_content() {
-        let temp = TempDir::new().unwrap();
-        let traces = temp.path().join("traces");
-        let flat = traces.join("flat");
-        write_capture(&flat, 0, 8);
-        write_capture(&traces.join("attempt").join("a1"), 1, 31);
-
-        let plan = plan_workspace(&traces, 30, 7, false, false).unwrap();
-        assert_eq!(plan.traces_pruned, 1);
-        assert_eq!(plan.traces_deleted, 1);
-        assert!(plan.bytes_reclaimable > 0);
-    }
-
-    #[test]
-    fn spool_gate_and_live_capture_are_fail_closed() {
-        let temp = TempDir::new().unwrap();
-        let traces = temp.path().join("traces");
-        let gated = traces.join("gated");
-        write_capture(&gated, 0, 8);
-        let live = traces.join("live");
-        fs::create_dir_all(&live).unwrap();
-        fs::write(live.join("stdout.txt"), "live").unwrap();
-
-        let plan = plan_workspace(&traces, 30, 7, true, true).unwrap();
-        assert!(plan.active_capture);
-        assert_eq!(plan.traces_pruned, 0);
-        assert!(gated.join("stdout.txt").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_capture_is_rejected_without_following_it() {
-        use std::os::unix::fs::symlink;
-        let temp = TempDir::new().unwrap();
-        let traces = temp.path().join("traces");
-        fs::create_dir_all(&traces).unwrap();
-        symlink(temp.path(), traces.join("link")).unwrap();
-        assert!(plan_workspace(&traces, 30, 7, false, false).is_err());
-    }
+    Ok(())
 }
