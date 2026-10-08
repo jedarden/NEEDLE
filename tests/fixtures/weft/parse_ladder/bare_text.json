@@ -1,0 +1,11 @@
+{
+  "input": {
+    "adapter_text": "A plain answer with no fenced block: fixtures are ordered."
+  },
+  "expected": {
+    "contract_version": 1,
+    "parse_fallback": true,
+    "reply_markdown": "A plain answer with no fenced block: fixtures are ordered."
+  },
+  "expected_absent": ["post_summary"]
+}

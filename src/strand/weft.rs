@@ -22,6 +22,124 @@ pub struct WeftExecution {
     pub completion: Value,
 }
 
+/// One result from the adapter-output parse ladder (LOOM EC-05).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParsedWeftOutput {
+    Completion(Value),
+    Fallback { reply_markdown: String },
+    Empty { first_output_timeout: bool },
+}
+
+/// A terminal failure produced by the empty-output rung.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeftOutputFailure {
+    pub error_code: &'static str,
+    pub error_detail: &'static str,
+    pub retryable: bool,
+}
+
+impl ParsedWeftOutput {
+    /// Build only the fields the completion contract accepts; unknown model
+    /// keys are discarded before they can reach the LOOM API.
+    pub fn completion_body(&self) -> Option<Value> {
+        let mut body = serde_json::Map::new();
+        body.insert("contract_version".into(), Value::from(1));
+        match self {
+            Self::Completion(completion) => {
+                body.insert("parse_fallback".into(), Value::from(false));
+                for field in [
+                    "reply_markdown",
+                    "post_summary",
+                    "proposed_bead",
+                    "context_description_edits",
+                ] {
+                    if let Some(value) = completion.get(field).filter(|value| !value.is_null()) {
+                        body.insert(field.to_owned(), value.clone());
+                    }
+                }
+            }
+            Self::Fallback { reply_markdown } => {
+                body.insert("parse_fallback".into(), Value::from(true));
+                body.insert(
+                    "reply_markdown".into(),
+                    Value::String(reply_markdown.clone()),
+                );
+            }
+            Self::Empty { .. } => return None,
+        }
+        Some(Value::Object(body))
+    }
+
+    pub fn failure(&self) -> Option<WeftOutputFailure> {
+        match self {
+            Self::Empty {
+                first_output_timeout,
+            } => Some(WeftOutputFailure {
+                error_code: "empty_reply",
+                error_detail: if *first_output_timeout {
+                    "the adapter produced no output before the timeout"
+                } else {
+                    "the adapter produced no output"
+                },
+                retryable: *first_output_timeout,
+            }),
+            Self::Completion(_) | Self::Fallback { .. } => None,
+        }
+    }
+}
+
+/// Parse an adapter transcript without losing useful unstructured output.
+pub fn parse_adapter_output(text: &str, first_output_timeout: bool) -> ParsedWeftOutput {
+    for body in fenced_json_bodies(text) {
+        let Ok(value) = serde_json::from_str::<Value>(&body) else {
+            continue;
+        };
+        if value
+            .get("reply_markdown")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            return ParsedWeftOutput::Completion(value);
+        }
+    }
+
+    if !text.trim().is_empty() {
+        return ParsedWeftOutput::Fallback {
+            reply_markdown: text.to_owned(),
+        };
+    }
+
+    ParsedWeftOutput::Empty {
+        first_output_timeout,
+    }
+}
+
+fn fenced_json_bodies(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if !line.trim_start().as_bytes().starts_with(&[96, 96, 96]) {
+            if let Some(body) = &mut current {
+                body.push_str(line);
+                body.push('\n');
+            }
+            continue;
+        }
+
+        match &mut current {
+            None => current = Some(String::new()),
+            Some(body) => {
+                blocks.push(std::mem::take(body));
+                current = None;
+            }
+        }
+    }
+    if let Some(body) = current {
+        blocks.push(body);
+    }
+    blocks
+}
+
 #[async_trait]
 pub trait WeftTurnExecutor: Send + Sync {
     async fn execute(&self, brief: LoomBrief) -> Result<WeftExecution, LoomError>;
@@ -161,4 +279,61 @@ impl super::Strand for WeftStrand {
 
 fn strand_error(error: LoomError) -> StrandResult {
     StrandResult::Error(StrandError::StoreError(anyhow!(error)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_ladder_fixture(name: &str) -> Value {
+        serde_json::from_str(match name {
+            "fenced_json" => {
+                include_str!("../../tests/fixtures/weft/parse_ladder/fenced_json.json")
+            }
+            "bare_text" => include_str!("../../tests/fixtures/weft/parse_ladder/bare_text.json"),
+            "empty" => include_str!("../../tests/fixtures/weft/parse_ladder/empty.json"),
+            "empty_first_output_timeout" => include_str!(
+                "../../tests/fixtures/weft/parse_ladder/empty_first_output_timeout.json"
+            ),
+            _ => unreachable!("known fixture"),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn parse_ladder_fenced_json_is_normalized_to_completion_contract() {
+        let fixture = parse_ladder_fixture("fenced_json");
+        let input = &fixture["input"];
+        let parsed = parse_adapter_output(input["adapter_text"].as_str().unwrap(), false);
+        assert_eq!(parsed.completion_body().unwrap(), fixture["expected"]);
+    }
+
+    #[test]
+    fn parse_ladder_bare_text_is_verbatim_and_omits_post_summary() {
+        let fixture = parse_ladder_fixture("bare_text");
+        let input = &fixture["input"];
+        let parsed = parse_adapter_output(input["adapter_text"].as_str().unwrap(), false);
+        let body = parsed.completion_body().unwrap();
+        assert_eq!(body, fixture["expected"]);
+        for field in fixture["expected_absent"].as_array().unwrap() {
+            assert!(body.get(field.as_str().unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn parse_ladder_empty_reply_retries_only_after_first_output_timeout() {
+        for name in ["empty", "empty_first_output_timeout"] {
+            let fixture = parse_ladder_fixture(name);
+            let input = &fixture["input"];
+            let parsed = parse_adapter_output(
+                input["adapter_text"].as_str().unwrap(),
+                input["first_output_timeout"].as_bool().unwrap(),
+            );
+            let failure = parsed.failure().unwrap();
+            assert_eq!(failure.error_code, fixture["expected"]["error_code"]);
+            assert_eq!(failure.error_detail, fixture["expected"]["error_detail"]);
+            assert_eq!(failure.retryable, fixture["expected"]["retryable"]);
+            assert!(parsed.completion_body().is_none());
+        }
+    }
 }

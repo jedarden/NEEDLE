@@ -1,0 +1,11 @@
+{
+  "input": {
+    "adapter_text": "",
+    "first_output_timeout": true
+  },
+  "expected": {
+    "error_code": "empty_reply",
+    "error_detail": "the adapter produced no output before the timeout",
+    "retryable": true
+  }
+}
