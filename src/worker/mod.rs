@@ -7738,6 +7738,7 @@ impl Worker {
                 let mut live_candidate = candidate;
                 if tier_b.failed("StrandRunner") {
                     live_candidate.strands = self.config.strands.clone();
+                    live_candidate.loom = self.config.loom.clone();
                 }
                 if tier_b.failed("OutcomeHandler") {
                     live_candidate.outcome = self.config.outcome.clone();
@@ -7886,9 +7887,20 @@ impl Worker {
         // StrandRunner owns the complete strand waterfall snapshot. Although
         // a few strand thresholds are classified live, rebuilding on any
         // `strands` change keeps every strand's cached config coherent.
-        if config_values_differ(&self.config.strands, &candidate.strands) {
+        let strands_changed = config_values_differ(&self.config.strands, &candidate.strands);
+        // Weft owns a config snapshot inside StrandRunner. Tier-A LOOM edits
+        // therefore rebuild the runner at this cycle boundary; Tier-C endpoint
+        // and token-file edits stay pinned to the boot snapshot until restart.
+        let mut candidate_loom = candidate.loom.clone();
+        candidate_loom.base_url = self.config.loom.base_url.clone();
+        candidate_loom.token_file = self.config.loom.token_file.clone();
+        let loom_changed = config_values_differ(&self.config.loom, &candidate_loom);
+        if strands_changed || loom_changed {
             let mut component_config = self.config.clone();
-            component_config.strands = candidate.strands.clone();
+            if strands_changed {
+                component_config.strands = candidate.strands.clone();
+            }
+            component_config.loom = candidate_loom;
             let worker_id = self.qualified_id();
             let state_root = crate::state_dir::root_for(&component_config.workspace.home);
             let registry = Registry::default_location(&state_root);
@@ -7900,9 +7912,11 @@ impl Worker {
             ));
 
             if install_rebuilt_component(&mut self.strands, "StrandRunner", rebuilt, &mut report) {
-                self.config.strands = candidate.strands.clone();
+                if strands_changed {
+                    self.config.strands = candidate.strands.clone();
+                    report.applied_keys.push("strands".to_string());
+                }
                 strands_rebuilt = true;
-                report.applied_keys.push("strands".to_string());
             }
         }
 
@@ -11122,6 +11136,7 @@ mod tests {
         candidate.workspace.home = PathBuf::from("/tmp/reloaded-home");
         candidate.telemetry.file_sink.enabled = !running_telemetry_enabled;
         candidate.loom.enabled = true;
+        candidate.loom.position = crate::config::LoomPosition::BeforePluck;
         candidate.loom.base_url.push_str("/reload");
         candidate.loom.token_file.push("-reload");
         candidate.loom.serve_strands.insert(
@@ -11132,6 +11147,11 @@ mod tests {
             },
         );
 
+        let mut runtime_candidate = candidate.clone();
+        runtime_candidate.agent.adapters_dir = running_adapters_dir.clone();
+        let rebuild = worker.rebuild_tier_b_components(&runtime_candidate);
+        assert!(rebuild.failures.is_empty());
+        assert_eq!(worker.strands.strand_names().first(), Some(&"weft"));
         let changed_keys = worker.apply_tier_a_config(&candidate);
 
         assert_eq!(worker.config.agent.timeout, running_agent_timeout + 1);
@@ -11141,7 +11161,12 @@ mod tests {
         assert!(changed_keys.contains(&"worker.idle_timeout".to_string()));
         assert!(changed_keys.contains(&"budget.warn_usd".to_string()));
         assert!(changed_keys.contains(&"loom.serve_strands".to_string()));
+        assert!(changed_keys.contains(&"loom.position".to_string()));
         assert!(worker.config.loom.enabled);
+        assert_eq!(
+            worker.config.loom.position,
+            crate::config::LoomPosition::BeforePluck
+        );
         assert_eq!(
             worker.config.loom.serve_strands,
             candidate.loom.serve_strands

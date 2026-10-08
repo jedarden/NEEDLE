@@ -1,0 +1,11 @@
+{
+  "input": {
+    "adapter_text": "Review complete.\n\n\u0060\u0060\u0060json\n{\"reply_markdown\":\"Structured reply\",\"post_summary\":\"Short summary\",\"confidence\":0.82}\n\u0060\u0060\u0060\n\nTrailing prose."
+  },
+  "expected": {
+    "contract_version": 1,
+    "parse_fallback": false,
+    "reply_markdown": "Structured reply",
+    "post_summary": "Short summary"
+  }
+}

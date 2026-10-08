@@ -232,6 +232,136 @@ pub fn validate_loom_adapter(adapter: &AgentAdapter) -> Result<(), String> {
     }
 }
 
+/// Strip template-level safety overrides and append the translated LOOM policy.
+pub fn shape_invocation(
+    template: &str,
+    envelope: &TranslatedEnvelope,
+    max_turns: u64,
+    settings_path: &Path,
+) -> String {
+    let normalized = template
+        .replace("\"$(cat {prompt_file})\"", "- < {prompt_file}")
+        .replace("$(cat {prompt_file})", "- < {prompt_file}");
+    let tokens = shell_words(&normalized);
+    let mut safe = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+        if token.starts_with("--dangerously-")
+            || token.starts_with("--sandbox=")
+            || token.starts_with("--max-turns=")
+            || token.starts_with("--output-format=")
+            || token.starts_with("--approval-mode=")
+            || token.starts_with("--settings=")
+        {
+            index += 1;
+            continue;
+        }
+        if matches!(
+            token,
+            "--sandbox"
+                | "--max-turns"
+                | "--output-format"
+                | "--approval-mode"
+                | "--settings"
+                | "--allowedTools"
+                | "--disallowedTools"
+        ) {
+            index += 2;
+            continue;
+        }
+        if token == "-c"
+            && tokens.get(index + 1).is_some_and(|value| {
+                value.contains("approval_policy") || value.contains("sandbox_mode")
+            })
+        {
+            index += 2;
+            continue;
+        }
+        safe.push(token.to_owned());
+        index += 1;
+    }
+
+    match envelope.harness {
+        WeftHarness::ClaudePrint => {
+            safe.extend([
+                "--max-turns".into(),
+                max_turns.max(1).to_string(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--settings".into(),
+                "NEEDLE_WEFT_SETTINGS_PATH".into(),
+            ]);
+            safe.push("--allowedTools".into());
+            safe.push(shell_quote(&envelope.allowed_tools.join(",")));
+            if !envelope.disallowed_tools.is_empty() {
+                safe.push("--disallowedTools".into());
+                safe.push(shell_quote(&envelope.disallowed_tools.join(",")));
+            }
+        }
+        WeftHarness::Codex => {
+            safe.extend([
+                "--sandbox".into(),
+                "read-only".into(),
+                "-c".into(),
+                "approval_policy=\"never\"".into(),
+            ]);
+            if !safe.iter().any(|arg| arg == "--json") {
+                safe.push("--json".into());
+            }
+        }
+    }
+    safe.join(" ").replace(
+        "NEEDLE_WEFT_SETTINGS_PATH",
+        &shell_quote(&settings_path.display().to_string()),
+    )
+}
+
+fn shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in input.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some(char::from(39)) {
+            current.push(character);
+            escaped = true;
+            continue;
+        }
+        if character == char::from(39) || character == '"' {
+            current.push(character);
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            }
+            continue;
+        }
+        if character.is_whitespace() && quote.is_none() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(character);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+pub fn shell_quote(value: &str) -> String {
+    let quote = char::from(39).to_string();
+    let escaped_quote = format!("{quote}\\{quote}{quote}");
+    format!("{quote}{}{quote}", value.replace(&quote, &escaped_quote))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +516,49 @@ mod tests {
                 |error| error.full_path == "loom.serve_strands.advisor.adapter"
                     && error.message.contains("claude with -p/--print")
             ));
+    }
+
+    #[test]
+    fn loom_invocation_shape_overrides_dangerous_adapter_settings() {
+        let claude_envelope = translate(
+            WeftHarness::ClaudePrint,
+            &EnvelopeRequest {
+                capabilities: vec!["read".into()],
+                deny_paths: vec!["secret/**".into()],
+            },
+        )
+        .unwrap();
+        let claude = shape_invocation(
+            "claude-print --dangerously-skip-permissions --max-turns 99 --output-format json {prompt_file}",
+            &claude_envelope, 4, Path::new("/tmp/weft's settings/settings.json"),
+        );
+        assert!(!claude.contains("--dangerously-skip-permissions"));
+        assert!(claude.contains("--max-turns 4"));
+        assert!(claude.contains("--output-format stream-json"));
+        assert!(claude.contains(&format!(
+            "--settings {}",
+            shell_quote("/tmp/weft's settings/settings.json")
+        )));
+        assert!(claude.contains("--allowedTools 'Read'"));
+        assert!(claude.contains("--disallowedTools 'Read(secret/**)'"));
+
+        let codex_envelope = translate(WeftHarness::Codex, &EnvelopeRequest::default()).unwrap();
+        let codex = shape_invocation(
+            "codex --dangerously-bypass-approvals-and-sandbox --sandbox workspace-write -c approval_policy=on-request --json - < {prompt_file}",
+            &codex_envelope, 4, Path::new("/tmp/weft's settings/settings.json"),
+        );
+        assert!(!codex.contains("dangerously"));
+        assert!(!codex.contains("workspace-write"));
+        assert!(codex.contains("--sandbox read-only"));
+        assert!(codex.contains("approval_policy=\"never\""));
+
+        let codex_subshell = shape_invocation(
+            "codex --model {model} --approval-mode full-auto \"$(cat {prompt_file})\"",
+            &codex_envelope,
+            4,
+            Path::new("/tmp/settings.json"),
+        );
+        assert!(!codex_subshell.contains("$(cat"));
+        assert!(codex_subshell.contains("- < {prompt_file}"));
     }
 }

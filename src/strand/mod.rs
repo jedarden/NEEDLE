@@ -21,6 +21,7 @@ pub mod weave;
 pub mod weft;
 pub mod weft_client;
 pub mod weft_envelope;
+pub mod weft_executor;
 pub(crate) mod workspace_capacity;
 mod workspace_health;
 
@@ -417,13 +418,35 @@ impl StrandRunner {
             config.workspace.default.clone(),
         );
         let cycle_outcome_recorded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut strands: Vec<Box<dyn Strand>> = Vec::with_capacity(11);
+        let weft_enabled = config.loom.enabled && !config.loom.serve_strands.is_empty();
+        let make_weft = || -> Box<dyn Strand> {
+            Box::new(WeftStrand::new(
+                config.loom.clone(),
+                if config.loom.worker_name.is_empty() {
+                    worker_id.to_string()
+                } else {
+                    config.loom.worker_name.clone()
+                },
+                std::sync::Arc::new(weft_executor::MappedWeftExecutor::new(
+                    config.clone(),
+                    runner_telemetry.clone(),
+                )),
+                runner_telemetry.clone(),
+            ))
+        };
+        let mut strands: Vec<Box<dyn Strand>> = Vec::with_capacity(12);
+        if weft_enabled && config.loom.position == crate::config::LoomPosition::BeforePluck {
+            strands.push(make_weft());
+        }
         if config.strands.ci_watch.enabled {
             strands.push(Box::new(ci_watch));
         }
+        strands.push(Box::new(pluck));
+        if weft_enabled && config.loom.position == crate::config::LoomPosition::AfterPluck {
+            strands.push(make_weft());
+        }
         strands.extend(vec![
-            Box::new(pluck) as Box<dyn Strand>,
-            Box::new(mend),
+            Box::new(mend) as Box<dyn Strand>,
             Box::new(explore),
             weave,
             Box::new(unravel),
@@ -1317,6 +1340,374 @@ mod tests {
             outcome.bead.map(|(b, _)| b.id),
             Some(BeadId::from("first".to_string()))
         );
+    }
+
+    struct ConformanceExecutor {
+        harness: crate::strand::weft_envelope::WeftHarness,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::strand::weft::WeftTurnExecutor for ConformanceExecutor {
+        async fn execute(
+            &self,
+            brief: crate::strand::weft_client::LoomBrief,
+            _turn_id: String,
+            _client: std::sync::Arc<crate::strand::weft_client::LoomClient>,
+        ) -> Result<crate::strand::weft::WeftExecution, crate::strand::weft_client::LoomError>
+        {
+            let request = crate::strand::weft_envelope::EnvelopeRequest {
+                capabilities: brief.envelope["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_string())
+                    .collect(),
+                deny_paths: brief.envelope["deny_paths"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_string())
+                    .collect(),
+            };
+            crate::strand::weft_envelope::translate(self.harness, &request)
+                .expect("recorded translation fixture must be expressible for this mapping");
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+            let completion = serde_json::json!({
+                "contract_version": 1,
+                "parse_fallback": false,
+                "reply_markdown": "conformance reply"
+            });
+            Ok(crate::strand::weft::WeftExecution {
+                summary: "conformance reply".to_string(),
+                telemetry: serde_json::json!({"conformance": true}),
+                completion,
+            })
+        }
+    }
+
+    fn serve_conformance_flow(
+        brief: serde_json::Value,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let turn = serde_json::json!([{
+            "id": "turn-conformance",
+            "strand": "advisor",
+            "target_kind": "post",
+            "target_id": "post-1",
+            "queued_at": "2026-10-08T00:00:00Z",
+            "attempt": 1,
+            "contract_version": 1
+        }])
+        .to_string();
+        let claim =
+            r#"{"id":"turn-conformance","lease_expires_at":"2026-10-08T00:02:00Z","attempt":1}"#
+                .to_string();
+        let heartbeat = r#"{"lease_expires_at":"2026-10-08T00:02:00Z"}"#.to_string();
+        let complete = "{}".to_string();
+        let bodies = vec![turn, claim, brief.to_string(), heartbeat, complete];
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::with_capacity(bodies.len());
+            for body in bodies {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "mock LOOM server timed out"
+                            );
+                            std::thread::yield_now();
+                        }
+                        Err(error) => panic!("mock LOOM accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 2048];
+                loop {
+                    let size = stream.read(&mut chunk).unwrap();
+                    if size == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..size]);
+                    let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&request).to_string());
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    fn verify_translation_fixture_table(
+        fixture: &serde_json::Value,
+        harness: crate::strand::weft_envelope::WeftHarness,
+        expected_key: &str,
+    ) {
+        use crate::strand::weft_envelope::{translate, EnvelopeRequest};
+        assert_eq!(fixture["schema"], "loom.conformance.translation.v1");
+        assert_eq!(fixture["adapter"], expected_key.replace('_', "-"));
+        let cases = fixture["cases"].as_array().expect("fixture cases");
+        assert_eq!(cases.len(), 14);
+        for case in cases {
+            let input = &case["input"];
+            let request = EnvelopeRequest {
+                capabilities: input["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_string())
+                    .collect(),
+                deny_paths: input["deny_paths"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_string())
+                    .collect(),
+            };
+            let expected = &case["expected"];
+            if expected["outcome"] == "translated" {
+                let actual = translate(harness, &request).unwrap_or_else(|error| {
+                    panic!("{} unexpectedly rejected: {error}", case["case_id"])
+                });
+                let table = &expected[expected_key];
+                let string_list = |value: &serde_json::Value| {
+                    value
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|item| item.as_str().unwrap().to_string())
+                        .collect::<Vec<_>>()
+                };
+                if harness == crate::strand::weft_envelope::WeftHarness::ClaudePrint {
+                    assert_eq!(
+                        actual.allowed_tools,
+                        string_list(&table["allowed_tools"]),
+                        "{}",
+                        case["case_id"]
+                    );
+                    assert_eq!(
+                        actual.disallowed_tools,
+                        string_list(&table["disallowed_tools"]),
+                        "{}",
+                        case["case_id"]
+                    );
+                }
+                if harness == crate::strand::weft_envelope::WeftHarness::Codex {
+                    assert!(actual.allowed_tools.is_empty());
+                    assert!(actual.disallowed_tools.is_empty());
+                    assert_eq!(
+                        actual.sandbox_mode.as_deref(),
+                        table["sandbox_mode"].as_str()
+                    );
+                    assert_eq!(
+                        actual.approval_policy.as_deref(),
+                        table["approval_policy"].as_str()
+                    );
+                    assert_eq!(actual.writable_roots, string_list(&table["writable_roots"]));
+                    assert_eq!(
+                        actual.network_access,
+                        table["network_access"].as_bool().unwrap()
+                    );
+                }
+            } else {
+                let error =
+                    translate(harness, &request).expect_err("unsupported fixture must fail closed");
+                assert_eq!(
+                    error.error_code,
+                    expected["fail"]["error_code"].as_str().unwrap()
+                );
+                assert!(!error.retryable);
+                assert_eq!(error.capability, expected["subject"].as_str().unwrap());
+            }
+        }
+    }
+
+    fn request_line(request: &str) -> &str {
+        request.lines().next().expect("HTTP request line")
+    }
+
+    fn request_body(request: &str) -> serde_json::Value {
+        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    #[tokio::test]
+    async fn loom_translation_fixtures_drive_mock_worker_round_trips() {
+        use crate::config::{LoomConfig, LoomServeStrand};
+        use crate::strand::weft::WeftStrand;
+        use crate::strand::weft_envelope::WeftHarness;
+        use crate::telemetry::Telemetry;
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture_dir = std::env::var_os("NEEDLE_LOOM_CONFORMANCE_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("CI/local conformance replay requires NEEDLE_LOOM_CONFORMANCE_DIR");
+        let claude: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture_dir.join("claude_print.json")).unwrap())
+                .unwrap();
+        let codex: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture_dir.join("codex.json")).unwrap())
+                .unwrap();
+        let claude_cases = claude["cases"].as_array().unwrap();
+        let codex_cases = codex["cases"].as_array().unwrap();
+        assert_eq!(claude_cases.len(), codex_cases.len());
+        for (claude_case, codex_case) in claude_cases.iter().zip(codex_cases) {
+            assert_eq!(claude_case["case_id"], codex_case["case_id"]);
+            assert_eq!(claude_case["input"], codex_case["input"]);
+        }
+        verify_translation_fixture_table(&claude, WeftHarness::ClaudePrint, "claude_print");
+        verify_translation_fixture_table(&codex, WeftHarness::Codex, "codex");
+
+        for (adapter, harness, fixture, case_id) in [
+            (
+                "claude-print",
+                WeftHarness::ClaudePrint,
+                &claude,
+                "envelope.advisor",
+            ),
+            ("codex", WeftHarness::Codex, &codex, "capability.read"),
+        ] {
+            let case = fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["case_id"] == case_id)
+                .unwrap();
+            let selected = &case["input"];
+            let brief = serde_json::json!({
+                "contract_version": 1,
+                "turn": {"strand":"advisor"},
+                "envelope": selected,
+                "prompt_markdown": "fixture prompt"
+            });
+            let (url, server) = serve_conformance_flow(brief);
+            let directory = tempfile::tempdir().unwrap();
+            let token_file = directory.path().join("loom.token");
+            std::fs::write(&token_file, "conformance-test-token").unwrap();
+            std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let mut config = LoomConfig {
+                enabled: true,
+                base_url: url,
+                token_file,
+                worker_name: "conformance-worker".to_string(),
+                lease_secs: 7,
+                heartbeat_secs: 1,
+                ..LoomConfig::default()
+            };
+            config.serve_strands.insert(
+                "advisor".to_string(),
+                LoomServeStrand {
+                    adapter: adapter.to_string(),
+                    model: Some("conformance-model".to_string()),
+                },
+            );
+            let strand = WeftStrand::new(
+                config,
+                "conformance-worker",
+                std::sync::Arc::new(ConformanceExecutor { harness }),
+                Telemetry::new("weft-conformance".to_string()),
+            );
+            let result = strand.evaluate(&EmptyStore, &HashSet::new()).await;
+            assert!(matches!(result, StrandResult::WorkPerformed { .. }));
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 5);
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|request| request_line(request))
+                    .collect::<Vec<_>>(),
+                vec![
+                    "GET /api/v1/turns?status=queued&strand=advisor&limit=10 HTTP/1.1",
+                    "POST /api/v1/turns/turn-conformance/claim HTTP/1.1",
+                    "GET /api/v1/turns/turn-conformance/brief HTTP/1.1",
+                    "POST /api/v1/turns/turn-conformance/heartbeat HTTP/1.1",
+                    "POST /api/v1/turns/turn-conformance/complete HTTP/1.1",
+                ]
+            );
+            for request in &requests {
+                let lower = request.to_ascii_lowercase();
+                assert!(lower.contains("authorization: bearer conformance-test-token"));
+                assert!(lower.contains("x-loom-worker: conformance-worker"));
+            }
+            assert_eq!(
+                request_body(&requests[1]),
+                serde_json::json!({"lease_secs":7})
+            );
+            assert_eq!(request_body(&requests[3]), serde_json::json!({}));
+            assert_eq!(
+                request_body(&requests[4]),
+                serde_json::json!({
+                    "contract_version":1,
+                    "parse_fallback":false,
+                    "reply_markdown":"conformance reply"
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn from_config_places_weft_before_pluck_or_between_pluck_and_mend() {
+        use crate::config::{LoomPosition, LoomServeStrand};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::isolated_for_test();
+        config.loom.enabled = true;
+        config.loom.serve_strands.insert(
+            "advisor".to_string(),
+            LoomServeStrand {
+                adapter: "claude-print".to_string(),
+                model: Some("claude-sonnet-5".to_string()),
+            },
+        );
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+
+        config.loom.position = LoomPosition::BeforePluck;
+        let before = StrandRunner::from_config(
+            &config,
+            "test-worker",
+            crate::registry::Registry::new(dir.path()),
+            telemetry.clone(),
+        );
+        assert_eq!(before.strand_names()[..3], ["weft", "pluck", "mend"]);
+
+        config.loom.position = LoomPosition::AfterPluck;
+        let after = StrandRunner::from_config(
+            &config,
+            "test-worker",
+            crate::registry::Registry::new(dir.path()),
+            telemetry,
+        );
+        assert_eq!(after.strand_names()[..3], ["pluck", "weft", "mend"]);
     }
 
     #[tokio::test]

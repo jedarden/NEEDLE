@@ -95,10 +95,17 @@ See [`docs/examples/loom.yaml`](examples/loom.yaml) for a complete example.
 
 When enabled, `serve_strands` must contain at least one mapping. Adapter names
 must resolve to a built-in or configured adapter; `adapter: none` is the
-adapter-free courier mapping and omits `model`. `loom.serve_strands` is Tier A
-and takes effect at a cycle boundary. Changing `loom.base_url` or
+adapter-free courier mapping and omits `model`. `position: before_pluck`
+places Weft first in the waterfall; `after_pluck` places it between Pluck and
+Mend. LOOM transport and server failures use the bounded retry schedule, emit
+`weft.unreachable`, then fall through so local selection continues. The
+`weft.claimed`, `weft.completed`, `weft.failed`, and `weft.lease_lost`
+events record turn lifecycle transitions without token or prompt contents.
+
+LOOM runtime settings are applied at the next cycle boundary, including
+`serve_strands` and `position`. Changing `loom.base_url` or
 `loom.token_file` is Tier C and emits `config.reload.restart_required` until
-the worker is restarted. Other Loom settings are Tier A.
+the worker is restarted.
 
 ### Tier B (Rebuild) — Component Reconstruction
 
