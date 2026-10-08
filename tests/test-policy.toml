@@ -4,6 +4,9 @@ version = 1
 # +3 Weft runtime contracts (needle-52adccb4): before/after waterfall placement,
 # all five agent-event names and payloads, and recoverable transport/5xx vs auth
 # classification. Reviewer approved the exact unit ceiling increase to 4198.
+# +1 LOOM conformance replay (needle-980afbb6): both 14-case translation
+# tables, mock list/claim/brief/heartbeat/complete flows for both adapters,
+# and a scheduled heartbeat. Reviewer approved the exact +1 increase to 4199.
 # +3 EC-05 parse-ladder contracts (needle-216baf70): normalize fenced JSON,
 # preserve bare text verbatim while omitting post_summary, and make empty_reply
 # retryable only on first-output timeout. The tests replay local contract fixtures.
@@ -380,7 +383,7 @@ version = 1
 # +4 LOOM client contracts (needle-0ea049d0): request auth/query/body shape,
 # same-worker 409 claim recovery vs foreign contention, token rejection and
 # rotation recovery, and unsupported contract version terminal failure.
-max_tests = 4198
+max_tests = 4199
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -1061,6 +1064,13 @@ kind = "global-env"
 max_occurrences = 15
 owner = "component:worker"
 reason = "Twelve grandfathered occurrences plus three test-only safeguards under the repository-wide environment lock: one neutralizes the host-dependent admission probe, one pins the historical gate-failure regression beneath a private HOME, and one proves exhausted-worker reload from a private HOME."
+
+[[unit_exception]]
+path = "src/strand/mod.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "needle-980afbb6"
+reason = "The replay executor waits past the configured heartbeat interval so the mock API observes the scheduled heartbeat before completion."
 
 # Files under tests/ that are not compiled into a Rust harness are still test
 # assets. Each must match a rule with a durable component owner.

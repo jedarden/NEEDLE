@@ -1,0 +1,192 @@
+{
+  "schema": "loom.conformance.translation.v1",
+  "adapter": "codex",
+  "contract_fingerprint": "sha256:cdd69904e4e9294643609f9fbf7755b8a5f4a61f819d4c6c97560353e01ef704",
+  "description": "Capability/deny-path translation expectations for the codex adapter. Every input block here is harness-neutral and identical, case for case, to the other translation/*.json files; only the expected blocks are harness-specific. Codex's sandbox is mode-based, not tool-based (grounded against codex-cli 0.154.0): every LOOM capability is read-shaped, so a translatable envelope is sandbox_mode read-only with an unattended approval policy of never; writable_roots and network_access are pinned to their no-widening values so a default drift upstream is visible. Codex's sandbox cannot express a per-path read deny — read-only mode leaves the whole filesystem readable — so an envelope carrying deny paths is capability_unsupported, never served with the globs silently ignored (the plan's own rule: a path a harness cannot deny is capability_unsupported).",
+  "cases": [
+    {
+      "case_id": "capability.read",
+      "input": { "capabilities": ["read"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "codex": {
+          "sandbox_mode": "read-only",
+          "approval_policy": "never",
+          "writable_roots": [],
+          "network_access": false
+        }
+      }
+    },
+    {
+      "case_id": "capability.grep",
+      "input": { "capabilities": ["grep"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "codex": {
+          "sandbox_mode": "read-only",
+          "approval_policy": "never",
+          "writable_roots": [],
+          "network_access": false
+        }
+      }
+    },
+    {
+      "case_id": "capability.git_readonly",
+      "input": { "capabilities": ["git-readonly"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "codex": {
+          "sandbox_mode": "read-only",
+          "approval_policy": "never",
+          "writable_roots": [],
+          "network_access": false
+        }
+      }
+    },
+    {
+      "case_id": "capability.kubectl_readonly",
+      "input": { "capabilities": ["kubectl-readonly"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "codex": {
+          "sandbox_mode": "read-only",
+          "approval_policy": "never",
+          "writable_roots": [],
+          "network_access": false
+        }
+      }
+    },
+    {
+      "case_id": "capability.bead_readonly",
+      "input": { "capabilities": ["bead-readonly"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "codex": {
+          "sandbox_mode": "read-only",
+          "approval_policy": "never",
+          "writable_roots": [],
+          "network_access": false
+        }
+      }
+    },
+    {
+      "case_id": "capability.retired_bf",
+      "input": { "capabilities": ["bf"], "deny_paths": [] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "bf",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "Codex's read-only mode emits no command alias; bf is retired and cannot be silently accepted as a bead-readonly capability."
+      }
+    },
+    {
+      "case_id": "capability.retired_br",
+      "input": { "capabilities": ["br"], "deny_paths": [] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "br",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "Codex's read-only mode emits no command alias; br is retired and cannot be silently accepted as a bead-readonly capability."
+      }
+    },
+    {
+      "case_id": "capability.docs_readonly",
+      "input": { "capabilities": ["docs-readonly"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "codex": {
+          "sandbox_mode": "read-only",
+          "approval_policy": "never",
+          "writable_roots": [],
+          "network_access": false
+        },
+        "notes": "Where claude-print has an explicit no-op row for docs-readonly, codex's table needs no special case: the read-only sandbox already grants exactly what docs-readonly asks, so every known read-shaped capability translates to the same settings."
+      }
+    },
+    {
+      "case_id": "capability.web_fetch",
+      "input": { "capabilities": ["web-fetch"], "deny_paths": [] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "web-fetch",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "The read-only sandbox blocks network. Every codex configuration that reaches the web — network_access under workspace-write, or a sandbox bypass — lifts the restriction for every command in the run, which is precisely the silent widening the envelope forbids, so web-fetch has no codex spelling."
+      }
+    },
+    {
+      "case_id": "capability.unknown",
+      "input": { "capabilities": ["read", "deploy"], "deny_paths": [] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "deploy",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "A name outside the vocabulary entirely. The first unknown capability aborts the whole translation even when every other capability would have translated."
+      }
+    },
+    {
+      "case_id": "deny_paths.single",
+      "input": { "capabilities": [], "deny_paths": ["~/.ssh/**"] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "deny_paths",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "One deny path is enough to sink the envelope: codex offers no per-path read deny, so the glob could only be dropped, and dropping it is ignoring the brief's one unconditional instruction."
+      }
+    },
+    {
+      "case_id": "deny_paths.default",
+      "input": {
+        "capabilities": [],
+        "deny_paths": [
+          "~/.config/**",
+          "~/.kube/**",
+          "~/.ssh/**",
+          "~/.config/needle/workers/**"
+        ]
+      },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "deny_paths",
+        "fail": { "error_code": "capability_unsupported", "retryable": false }
+      }
+    },
+    {
+      "case_id": "envelope.advisor",
+      "input": {
+        "capabilities": [
+          "read",
+          "grep",
+          "git-readonly",
+          "kubectl-readonly",
+          "bead-readonly",
+          "docs-readonly"
+        ],
+        "deny_paths": [
+          "~/.config/**",
+          "~/.kube/**",
+          "~/.ssh/**",
+          "~/.config/needle/workers/**"
+        ]
+      },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "deny_paths",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "Every capability in this envelope is individually codex-servable, but the envelope as a whole is not: the deny paths cannot be expressed, so the strand fails fast with capability_unsupported instead of running with the globs unreadable-by-contract. A codex-mapped strand is servable only with an envelope whose deny_paths is empty — which is the envelope the Scenario 8 codex-mapped mock run must carry."
+      }
+    },
+    {
+      "case_id": "envelope.deduplicated",
+      "input": {
+        "capabilities": ["grep", "read", "grep", "docs-readonly"],
+        "deny_paths": ["~/.ssh/**", "~/.kube/**", "~/.ssh/**"]
+      },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "deny_paths",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "Codex refuses the envelope before any list translation: read-only mode cannot express even a duplicated per-path deny, so the whole envelope remains unsupported."
+      }
+    }
+  ]
+}

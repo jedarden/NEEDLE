@@ -1,0 +1,215 @@
+{
+  "schema": "loom.conformance.translation.v1",
+  "adapter": "claude-print",
+  "contract_fingerprint": "sha256:cdd69904e4e9294643609f9fbf7755b8a5f4a61f819d4c6c97560353e01ef704",
+  "description": "Capability/deny-path translation expectations for the claude-print adapter. Every input block here is harness-neutral and identical, case for case, to the other translation/*.json files; only the expected blocks are harness-specific. Translated expectations are the ordered rule lists the adapter's flags carry: the reference worker passes allowed_tools as --allowedTools and disallowed_tools as --disallowedTools; NEEDLE's claude-print adapter may carry the same disallowed rules in a generated settings file's deny list instead — the rules are the expectation, not the transport. A capability with no table row aborts the whole translation (running with a partial envelope would widen exactly where the brief meant to be specific): fail with error_code capability_unsupported, retryable false, never a silent widening.",
+  "cases": [
+    {
+      "case_id": "capability.read",
+      "input": { "capabilities": ["read"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": { "allowed_tools": ["Read"], "disallowed_tools": [] }
+      }
+    },
+    {
+      "case_id": "capability.grep",
+      "input": { "capabilities": ["grep"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": { "allowed_tools": ["Grep", "Glob"], "disallowed_tools": [] }
+      }
+    },
+    {
+      "case_id": "capability.git_readonly",
+      "input": { "capabilities": ["git-readonly"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": {
+          "allowed_tools": [
+            "Bash(git log:*)",
+            "Bash(git show:*)",
+            "Bash(git diff:*)",
+            "Bash(git status:*)"
+          ],
+          "disallowed_tools": []
+        }
+      }
+    },
+    {
+      "case_id": "capability.kubectl_readonly",
+      "input": { "capabilities": ["kubectl-readonly"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": {
+          "allowed_tools": [
+            "Bash(kubectl get:*)",
+            "Bash(kubectl describe:*)",
+            "Bash(kubectl logs:*)"
+          ],
+          "disallowed_tools": []
+        }
+      }
+    },
+    {
+      "case_id": "capability.bead_readonly",
+      "input": { "capabilities": ["bead-readonly"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": {
+          "allowed_tools": [
+            "Bash(bead show:*)",
+            "Bash(bead list:*)"
+          ],
+          "disallowed_tools": []
+        },
+        "notes": "bead-readonly grants only the canonical bead CLI's read commands. Retired bf and br command names are not table rows and must fail as unsupported capabilities."
+      }
+    },
+    {
+      "case_id": "capability.retired_bf",
+      "input": { "capabilities": ["bf"], "deny_paths": [] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "bf",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "bf is retired and cannot be silently accepted as a bead-readonly capability."
+      }
+    },
+    {
+      "case_id": "capability.retired_br",
+      "input": { "capabilities": ["br"], "deny_paths": [] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "br",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "br is retired and cannot be silently accepted as a bead-readonly capability."
+      }
+    },
+    {
+      "case_id": "capability.docs_readonly",
+      "input": { "capabilities": ["docs-readonly"], "deny_paths": [] },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": { "allowed_tools": [], "disallowed_tools": [] },
+        "notes": "docs-readonly has no rules of its own: read's Read grant already expresses it, so it maps to nothing rather than to a rule. It is still a row — a table that knew the name and expanded it to nothing on purpose must be distinguished from a name the table has never heard of."
+      }
+    },
+    {
+      "case_id": "capability.web_fetch",
+      "input": { "capabilities": ["web-fetch"], "deny_paths": [] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "web-fetch",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "No table row on either harness: the plan's claude-print table grants no network tool, and a worker that could fetch the web could exfiltrate everything the deny paths exist to protect."
+      }
+    },
+    {
+      "case_id": "capability.unknown",
+      "input": { "capabilities": ["read", "deploy"], "deny_paths": [] },
+      "expected": {
+        "outcome": "capability_unsupported",
+        "subject": "deploy",
+        "fail": { "error_code": "capability_unsupported", "retryable": false },
+        "notes": "A name outside the vocabulary entirely. The first unknown capability aborts the whole translation even when every other capability would have translated."
+      }
+    },
+    {
+      "case_id": "deny_paths.single",
+      "input": { "capabilities": [], "deny_paths": ["~/.ssh/**"] },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": {
+          "allowed_tools": [],
+          "disallowed_tools": ["Read(~/.ssh/**)"]
+        },
+        "notes": "Deny paths keep the brief's globs verbatim, wrapped in the Read rule specifier. Deny rules win over allow rules in the permission model, so the rule holds even where a broad allow would otherwise reach."
+      }
+    },
+    {
+      "case_id": "deny_paths.default",
+      "input": {
+        "capabilities": [],
+        "deny_paths": [
+          "~/.config/**",
+          "~/.kube/**",
+          "~/.ssh/**",
+          "~/.config/needle/workers/**"
+        ]
+      },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": {
+          "allowed_tools": [],
+          "disallowed_tools": [
+            "Read(~/.config/**)",
+            "Read(~/.kube/**)",
+            "Read(~/.ssh/**)",
+            "Read(~/.config/needle/workers/**)"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "envelope.advisor",
+      "input": {
+        "capabilities": [
+          "read",
+          "grep",
+          "git-readonly",
+          "kubectl-readonly",
+          "bead-readonly",
+          "docs-readonly"
+        ],
+        "deny_paths": [
+          "~/.config/**",
+          "~/.kube/**",
+          "~/.ssh/**",
+          "~/.config/needle/workers/**"
+        ]
+      },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": {
+          "allowed_tools": [
+            "Read",
+            "Grep",
+            "Glob",
+            "Bash(git log:*)",
+            "Bash(git show:*)",
+            "Bash(git diff:*)",
+            "Bash(git status:*)",
+            "Bash(kubectl get:*)",
+            "Bash(kubectl describe:*)",
+            "Bash(kubectl logs:*)",
+            "Bash(bead show:*)",
+            "Bash(bead list:*)"
+          ],
+          "disallowed_tools": [
+            "Read(~/.config/**)",
+            "Read(~/.kube/**)",
+            "Read(~/.ssh/**)",
+            "Read(~/.config/needle/workers/**)"
+          ]
+        },
+        "notes": "The full advisor-shaped envelope. allowed_tools is deduplicated in first-seen capability order — capabilities overlap by design, and a repeated rule is noise — so the expected list is ordered, not a set."
+      }
+    },
+    {
+      "case_id": "envelope.deduplicated",
+      "input": {
+        "capabilities": ["grep", "read", "grep", "docs-readonly"],
+        "deny_paths": ["~/.ssh/**", "~/.kube/**", "~/.ssh/**"]
+      },
+      "expected": {
+        "outcome": "translated",
+        "claude_print": {
+          "allowed_tools": ["Grep", "Glob", "Read"],
+          "disallowed_tools": ["Read(~/.ssh/**)", "Read(~/.kube/**)"]
+        },
+        "notes": "Both emitted rule lists are first-seen deduplicated: repeated capabilities and repeated deny globs do not add duplicate flags."
+      }
+    }
+  ]
+}
