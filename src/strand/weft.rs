@@ -154,6 +154,7 @@ pub struct WeftStrand {
     config: LoomConfig,
     client: Arc<LoomClient>,
     executor: Arc<dyn WeftTurnExecutor>,
+    telemetry: crate::telemetry::Telemetry,
 }
 
 impl WeftStrand {
@@ -161,12 +162,20 @@ impl WeftStrand {
         config: LoomConfig,
         worker_name: impl Into<String>,
         executor: Arc<dyn WeftTurnExecutor>,
+        telemetry: crate::telemetry::Telemetry,
     ) -> Self {
         let client = Arc::new(LoomClient::new(config.clone(), worker_name));
         Self {
             config,
             client,
             executor,
+            telemetry,
+        }
+    }
+
+    fn emit(&self, kind: crate::telemetry::EventKind) {
+        if let Err(error) = self.telemetry.emit(kind, chrono::Utc::now()) {
+            tracing::warn!(%error, "failed to emit Weft telemetry");
         }
     }
 }
@@ -199,7 +208,13 @@ impl super::Strand for WeftStrand {
         let client = Arc::clone(&self.client);
         let turns = match tokio::task::spawn_blocking(move || client.list_turns(&strands)).await {
             Ok(Ok(turns)) => turns,
-            Ok(Err(error)) => return strand_error(error),
+            Ok(Err(error)) => {
+                if is_unreachable(&error) {
+                    self.emit(unreachable_event(None, "list_turns"));
+                    return StrandResult::NoWork;
+                }
+                return strand_error(error);
+            }
             Err(error) => return StrandResult::Error(StrandError::StoreError(anyhow!(error))),
         };
 
@@ -208,12 +223,23 @@ impl super::Strand for WeftStrand {
             let turn_id = turn.id.clone();
             let claim = match tokio::task::spawn_blocking(move || client.claim(&turn_id)).await {
                 Ok(Ok(claim)) => claim,
-                Ok(Err(error)) => return strand_error(error),
+                Ok(Err(error)) => {
+                    if is_unreachable(&error) {
+                        self.emit(unreachable_event(Some(turn.id.clone()), "claim"));
+                        return StrandResult::NoWork;
+                    }
+                    return strand_error(error);
+                }
                 Err(error) => return StrandResult::Error(StrandError::StoreError(anyhow!(error))),
             };
             match claim {
                 ClaimOutcome::Contended => continue,
-                ClaimOutcome::Claimed(_) | ClaimOutcome::AlreadyClaimed => {}
+                ClaimOutcome::Claimed(_) | ClaimOutcome::AlreadyClaimed => {
+                    self.emit(crate::telemetry::EventKind::WeftClaimed {
+                        turn_id: turn.id.clone(),
+                        strand: turn.strand.clone(),
+                    });
+                }
             }
 
             let client = Arc::clone(&self.client);
@@ -222,8 +248,17 @@ impl super::Strand for WeftStrand {
                 Ok(Ok(brief)) => brief,
                 // A lost lease means another worker owns the outcome now. Stop
                 // immediately and discard all local work for this turn.
-                Ok(Err(LoomError::LeaseLost)) => return StrandResult::NoWork,
-                Ok(Err(error)) => return strand_error(error),
+                Ok(Err(LoomError::LeaseLost)) => {
+                    self.emit(lease_lost_event(&turn.id, &turn.strand));
+                    return StrandResult::NoWork;
+                }
+                Ok(Err(error)) => {
+                    if is_unreachable(&error) {
+                        self.emit(unreachable_event(Some(turn.id.clone()), "brief"));
+                        return StrandResult::NoWork;
+                    }
+                    return strand_error(error);
+                }
                 Err(error) => return StrandResult::Error(StrandError::StoreError(anyhow!(error))),
             };
 
@@ -246,21 +281,58 @@ impl super::Strand for WeftStrand {
                             return match tokio::task::spawn_blocking(move || {
                                 client.fail(&turn_id, code, detail, retryable)
                             }).await {
-                                Ok(Ok(_)) | Ok(Err(LoomError::LeaseLost)) => StrandResult::NoWork,
-                                Ok(Err(error)) => strand_error(error),
+                                Ok(Ok(_)) => {
+                                    self.emit(crate::telemetry::EventKind::WeftFailed {
+                                        turn_id: turn.id.clone(),
+                                        strand: turn.strand.clone(),
+                                        error_code: code.to_string(),
+                                        retryable,
+                                    });
+                                    StrandResult::NoWork
+                                }
+                                Ok(Err(LoomError::LeaseLost)) => {
+                                    self.emit(lease_lost_event(&turn.id, &turn.strand));
+                                    StrandResult::NoWork
+                                }
+                                Ok(Err(error)) => {
+                                    if is_unreachable(&error) {
+                                        self.emit(unreachable_event(Some(turn.id.clone()), "fail"));
+                                        StrandResult::NoWork
+                                    } else {
+                                        strand_error(error)
+                                    }
+                                }
                                 Err(error) => StrandResult::Error(StrandError::StoreError(anyhow!(error))),
                             };
                         }
-                        Err(LoomError::LeaseLost) => return StrandResult::NoWork,
-                        Err(error) => return strand_error(error),
+                        Err(LoomError::LeaseLost) => {
+                            self.emit(lease_lost_event(&turn.id, &turn.strand));
+                            return StrandResult::NoWork;
+                        }
+                        Err(error) => {
+                            if is_unreachable(&error) {
+                                self.emit(unreachable_event(Some(turn.id.clone()), "execute"));
+                                return StrandResult::NoWork;
+                            }
+                            return strand_error(error);
+                        }
                     },
                     _ = heartbeat.tick() => {
                         let client = Arc::clone(&self.client);
                         let turn_id = turn.id.clone();
                         match tokio::task::spawn_blocking(move || client.heartbeat(&turn_id)).await {
                             Ok(Ok(_)) => {}
-                            Ok(Err(LoomError::LeaseLost)) => return StrandResult::NoWork,
-                            Ok(Err(error)) => return strand_error(error),
+                            Ok(Err(LoomError::LeaseLost)) => {
+                                self.emit(lease_lost_event(&turn.id, &turn.strand));
+                                return StrandResult::NoWork;
+                            }
+                            Ok(Err(error)) => {
+                                if is_unreachable(&error) {
+                                    self.emit(unreachable_event(Some(turn.id.clone()), "heartbeat"));
+                                    return StrandResult::NoWork;
+                                }
+                                return strand_error(error);
+                            }
                             Err(error) => return StrandResult::Error(StrandError::StoreError(anyhow!(error))),
                         }
                     }
@@ -273,13 +345,26 @@ impl super::Strand for WeftStrand {
             match tokio::task::spawn_blocking(move || client.complete(&turn_id, &completion)).await
             {
                 Ok(Ok(_)) => {
+                    self.emit(crate::telemetry::EventKind::WeftCompleted {
+                        turn_id: turn.id.clone(),
+                        strand: turn.strand.clone(),
+                    });
                     return StrandResult::WorkPerformed {
                         summary: execution.summary,
                         telemetry: execution.telemetry,
                     };
                 }
-                Ok(Err(LoomError::LeaseLost)) => return StrandResult::NoWork,
-                Ok(Err(error)) => return strand_error(error),
+                Ok(Err(LoomError::LeaseLost)) => {
+                    self.emit(lease_lost_event(&turn.id, &turn.strand));
+                    return StrandResult::NoWork;
+                }
+                Ok(Err(error)) => {
+                    if is_unreachable(&error) {
+                        self.emit(unreachable_event(Some(turn.id.clone()), "complete"));
+                        return StrandResult::NoWork;
+                    }
+                    return strand_error(error);
+                }
                 Err(error) => return StrandResult::Error(StrandError::StoreError(anyhow!(error))),
             }
         }
@@ -292,9 +377,54 @@ fn strand_error(error: LoomError) -> StrandResult {
     StrandResult::Error(StrandError::StoreError(anyhow!(error)))
 }
 
+fn is_unreachable(error: &LoomError) -> bool {
+    matches!(error, LoomError::Transport(_))
+        || matches!(
+            error,
+            LoomError::Http {
+                status: 500..=599,
+                ..
+            }
+        )
+}
+
+fn unreachable_event(turn_id: Option<String>, operation: &str) -> crate::telemetry::EventKind {
+    crate::telemetry::EventKind::WeftUnreachable {
+        turn_id,
+        operation: operation.to_string(),
+    }
+}
+
+fn lease_lost_event(turn_id: &str, strand: &str) -> crate::telemetry::EventKind {
+    crate::telemetry::EventKind::WeftLeaseLost {
+        turn_id: turn_id.to_string(),
+        strand: strand.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreachable_errors_are_distinct_from_authentication_failures() {
+        assert!(is_unreachable(&LoomError::Transport(
+            "connection refused".into()
+        )));
+        assert!(is_unreachable(&LoomError::Http {
+            status: 503,
+            code: "unavailable".into(),
+            message: "try later".into(),
+            claimed_by_worker: None,
+        }));
+        assert!(!is_unreachable(&LoomError::Unauthorized));
+        assert!(!is_unreachable(&LoomError::Http {
+            status: 401,
+            code: "unauthorized".into(),
+            message: "rejected".into(),
+            claimed_by_worker: None,
+        }));
+    }
 
     fn parse_ladder_fixture(name: &str) -> Value {
         serde_json::from_str(match name {

@@ -633,6 +633,33 @@ pub enum EventKind {
         result: String,
         duration_ms: u64,
     },
+    /// A LOOM turn was claimed by this NEEDLE worker.
+    WeftClaimed {
+        turn_id: String,
+        strand: String,
+    },
+    /// A claimed LOOM turn was completed successfully.
+    WeftCompleted {
+        turn_id: String,
+        strand: String,
+    },
+    /// A claimed LOOM turn was failed through the worker API.
+    WeftFailed {
+        turn_id: String,
+        strand: String,
+        error_code: String,
+        retryable: bool,
+    },
+    /// LOOM reported that another worker owns the turn's lease.
+    WeftLeaseLost {
+        turn_id: String,
+        strand: String,
+    },
+    /// A LOOM request exhausted its bounded transport/5xx retry schedule.
+    WeftUnreachable {
+        turn_id: Option<String>,
+        operation: String,
+    },
     StrandSkipped {
         strand_name: String,
         reason: String,
@@ -2015,6 +2042,11 @@ impl EventKind {
             EventKind::WorkerAdmissionRestored { .. } => "worker.admission_restored",
             EventKind::ConfigWarning { .. } => "config.warning",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
+            EventKind::WeftClaimed { .. } => "weft.claimed",
+            EventKind::WeftCompleted { .. } => "weft.completed",
+            EventKind::WeftFailed { .. } => "weft.failed",
+            EventKind::WeftLeaseLost { .. } => "weft.lease_lost",
+            EventKind::WeftUnreachable { .. } => "weft.unreachable",
             EventKind::StrandSkipped { .. } => "strand.skipped",
             EventKind::WorkspaceAtCapacity { .. } => "strand.workspace_at_capacity",
             EventKind::GenerationGateEvaluated { .. } => "generation.gate_evaluated",
@@ -2314,6 +2346,11 @@ impl EventKind {
             | EventKind::WorkerAdmissionRestored { .. }
             | EventKind::ConfigWarning { .. }
             | EventKind::StrandEvaluated { .. }
+            | EventKind::WeftClaimed { .. }
+            | EventKind::WeftCompleted { .. }
+            | EventKind::WeftFailed { .. }
+            | EventKind::WeftLeaseLost { .. }
+            | EventKind::WeftUnreachable { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::WorkspaceAtCapacity { .. }
             | EventKind::GenerationGateEvaluated { .. }
@@ -2599,6 +2636,29 @@ impl EventKind {
                     "result": result,
                     "duration_ms": duration_ms,
                 })
+            }
+            EventKind::WeftClaimed { turn_id, strand } => {
+                serde_json::json!({ "turn_id": turn_id, "strand": strand })
+            }
+            EventKind::WeftCompleted { turn_id, strand } => {
+                serde_json::json!({ "turn_id": turn_id, "strand": strand })
+            }
+            EventKind::WeftFailed {
+                turn_id,
+                strand,
+                error_code,
+                retryable,
+            } => serde_json::json!({
+                "turn_id": turn_id,
+                "strand": strand,
+                "error_code": error_code,
+                "retryable": retryable,
+            }),
+            EventKind::WeftLeaseLost { turn_id, strand } => {
+                serde_json::json!({ "turn_id": turn_id, "strand": strand })
+            }
+            EventKind::WeftUnreachable { turn_id, operation } => {
+                serde_json::json!({ "turn_id": turn_id, "operation": operation })
             }
             EventKind::StrandSkipped {
                 strand_name,
@@ -4692,6 +4752,11 @@ impl EventKind {
             | EventKind::GenerationCreatorFailed { .. }
             | EventKind::CycleOutcome { .. }
             | EventKind::QueueEmpty
+            | EventKind::WeftClaimed { .. }
+            | EventKind::WeftCompleted { .. }
+            | EventKind::WeftFailed { .. }
+            | EventKind::WeftLeaseLost { .. }
+            | EventKind::WeftUnreachable { .. }
             | EventKind::PluckStarvationDetected { .. }
             | EventKind::PluckNoCandidate { .. }
             | EventKind::PluckLaneEmpty { .. }
@@ -7516,6 +7581,64 @@ mod tests {
         attempt_resolved_fixture, check_object_matches, documented_attempt_resolved_examples,
         fixture_spec,
     };
+
+    #[test]
+    fn weft_events_keep_the_agent_event_names_and_safe_payloads() {
+        let events = [
+            (
+                EventKind::WeftClaimed {
+                    turn_id: "turn-1".into(),
+                    strand: "advisor".into(),
+                },
+                "weft.claimed",
+                serde_json::json!({"turn_id":"turn-1","strand":"advisor"}),
+            ),
+            (
+                EventKind::WeftCompleted {
+                    turn_id: "turn-1".into(),
+                    strand: "advisor".into(),
+                },
+                "weft.completed",
+                serde_json::json!({"turn_id":"turn-1","strand":"advisor"}),
+            ),
+            (
+                EventKind::WeftFailed {
+                    turn_id: "turn-1".into(),
+                    strand: "advisor".into(),
+                    error_code: "adapter_failed".into(),
+                    retryable: false,
+                },
+                "weft.failed",
+                serde_json::json!({
+                    "turn_id":"turn-1",
+                    "strand":"advisor",
+                    "error_code":"adapter_failed",
+                    "retryable":false
+                }),
+            ),
+            (
+                EventKind::WeftLeaseLost {
+                    turn_id: "turn-1".into(),
+                    strand: "advisor".into(),
+                },
+                "weft.lease_lost",
+                serde_json::json!({"turn_id":"turn-1","strand":"advisor"}),
+            ),
+            (
+                EventKind::WeftUnreachable {
+                    turn_id: Some("turn-1".into()),
+                    operation: "heartbeat".into(),
+                },
+                "weft.unreachable",
+                serde_json::json!({"turn_id":"turn-1","operation":"heartbeat"}),
+            ),
+        ];
+
+        for (event, event_type, payload) in events {
+            assert_eq!(event.event_type(), event_type);
+            assert_eq!(event.to_data(), payload);
+        }
+    }
 
     /// In-memory sink for testing — collects events via a shared Vec.
     struct MemorySink {

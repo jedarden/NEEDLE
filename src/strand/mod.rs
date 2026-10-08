@@ -418,13 +418,35 @@ impl StrandRunner {
             config.workspace.default.clone(),
         );
         let cycle_outcome_recorded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut strands: Vec<Box<dyn Strand>> = Vec::with_capacity(11);
+        let weft_enabled = config.loom.enabled && !config.loom.serve_strands.is_empty();
+        let make_weft = || -> Box<dyn Strand> {
+            Box::new(WeftStrand::new(
+                config.loom.clone(),
+                if config.loom.worker_name.is_empty() {
+                    worker_id.to_string()
+                } else {
+                    config.loom.worker_name.clone()
+                },
+                std::sync::Arc::new(weft_executor::MappedWeftExecutor::new(
+                    config.clone(),
+                    runner_telemetry.clone(),
+                )),
+                runner_telemetry.clone(),
+            ))
+        };
+        let mut strands: Vec<Box<dyn Strand>> = Vec::with_capacity(12);
+        if weft_enabled && config.loom.position == crate::config::LoomPosition::BeforePluck {
+            strands.push(make_weft());
+        }
         if config.strands.ci_watch.enabled {
             strands.push(Box::new(ci_watch));
         }
+        strands.push(Box::new(pluck));
+        if weft_enabled && config.loom.position == crate::config::LoomPosition::AfterPluck {
+            strands.push(make_weft());
+        }
         strands.extend(vec![
-            Box::new(pluck) as Box<dyn Strand>,
-            Box::new(mend),
+            Box::new(mend) as Box<dyn Strand>,
             Box::new(explore),
             weave,
             Box::new(unravel),
@@ -1318,6 +1340,41 @@ mod tests {
             outcome.bead.map(|(b, _)| b.id),
             Some(BeadId::from("first".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn from_config_places_weft_before_pluck_or_between_pluck_and_mend() {
+        use crate::config::{LoomPosition, LoomServeStrand};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::isolated_for_test();
+        config.loom.enabled = true;
+        config.loom.serve_strands.insert(
+            "advisor".to_string(),
+            LoomServeStrand {
+                adapter: "claude-print".to_string(),
+                model: Some("claude-sonnet-5".to_string()),
+            },
+        );
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+
+        config.loom.position = LoomPosition::BeforePluck;
+        let before = StrandRunner::from_config(
+            &config,
+            "test-worker",
+            crate::registry::Registry::new(dir.path()),
+            telemetry.clone(),
+        );
+        assert_eq!(before.strand_names()[..3], ["weft", "pluck", "mend"]);
+
+        config.loom.position = LoomPosition::AfterPluck;
+        let after = StrandRunner::from_config(
+            &config,
+            "test-worker",
+            crate::registry::Registry::new(dir.path()),
+            telemetry,
+        );
+        assert_eq!(after.strand_names()[..3], ["pluck", "weft", "mend"]);
     }
 
     #[tokio::test]

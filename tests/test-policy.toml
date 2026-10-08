@@ -1,6 +1,9 @@
 version = 1
 
 # These ceilings are deliberate review gates, not aspirational coverage goals.
+# +3 Weft runtime contracts (needle-52adccb4): before/after waterfall placement,
+# all five agent-event names and payloads, and recoverable transport/5xx vs auth
+# classification. Reviewer approved the exact unit ceiling increase to 4198.
 # +3 EC-05 parse-ladder contracts (needle-216baf70): normalize fenced JSON,
 # preserve bare text verbatim while omitting post_summary, and make empty_reply
 # retryable only on first-output timeout. The tests replay local contract fixtures.
@@ -377,7 +380,7 @@ version = 1
 # +4 LOOM client contracts (needle-0ea049d0): request auth/query/body shape,
 # same-worker 409 claim recovery vs foreign contention, token rejection and
 # rotation recovery, and unsupported contract version terminal failure.
-max_tests = 4195
+max_tests = 4198
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
