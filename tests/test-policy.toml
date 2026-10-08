@@ -355,7 +355,12 @@ version = 1
 # +6 prior-split dispatch/analysis contracts (needle-5765decb) and +1
 # live pre-claim heartbeat recovery race (needle-8d14d0d1). In-process
 # store fixtures exercise private worker/mitosis and shared recovery paths.
-max_tests = 4168
+# +4 Claude Code pre-write hook contracts (needle-804452c5): deny a second
+# worker naming the holder while other files proceed, inert unless the
+# dispatch enabled coverage, fail open on unclear input or paths, and
+# notebook/relative-path coverage. Injected env lookup; real-git fixture via
+# git_safety::test_support.
+max_tests = 4172
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

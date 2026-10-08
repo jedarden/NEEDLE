@@ -85,6 +85,15 @@ pub enum ContentionCommand {
         #[command(flatten)]
         identity: IdentityArgs,
     },
+    /// Claude Code PreToolUse hook: read the hook event on stdin and deny an
+    /// Edit/Write/MultiEdit/NotebookEdit whose file another participant holds.
+    ///
+    /// A no-op unless the dispatch exported NEEDLE_FILE_CONTENTION=enabled.
+    /// Always exits 0; every fault fails open (the write is allowed, uncovered).
+    ClaudeHook {
+        #[command(flatten)]
+        identity: IdentityArgs,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -193,6 +202,20 @@ pub fn run(command: ContentionCommand) -> Result<()> {
         .join("state")
         .join("heartbeats");
     let status = LocalHolderStatus::new(Some(&heartbeats), Duration::from_secs(120));
+    if let ContentionCommand::ClaudeHook { .. } = command {
+        // Fail open: a hook fault must never stall the agent.
+        if process_env(env::COVERAGE).as_deref() != Some("enabled") {
+            std::process::exit(0);
+        }
+        let mut input = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).is_ok() {
+            if let Some(decision) = claude_hook_decision(&input, &process_env, &status, Utc::now())
+            {
+                println!("{decision}");
+            }
+        }
+        std::process::exit(0);
+    }
     let (code, rendered) = execute(&command, &process_env, &status, Utc::now());
     println!("{rendered}");
     std::process::exit(code);
@@ -213,7 +236,8 @@ fn identity_of(command: &ContentionCommand) -> &IdentityArgs {
         | ContentionCommand::Acquire { identity, .. }
         | ContentionCommand::Renew { identity, .. }
         | ContentionCommand::Release { identity, .. }
-        | ContentionCommand::List { identity } => identity,
+        | ContentionCommand::List { identity }
+        | ContentionCommand::ClaudeHook { identity } => identity,
     }
 }
 
@@ -258,6 +282,9 @@ fn execute_inner(
         ContentionCommand::Renew { paths, .. } => renew(&ctx, paths, lookup, now),
         ContentionCommand::Release { paths, .. } => release(&ctx, paths, lookup),
         ContentionCommand::List { .. } => list(&ctx, lookup, status, now),
+        ContentionCommand::ClaudeHook { .. } => {
+            bail!("claude-hook reads its event from stdin; run it as a Claude Code hook")
+        }
     }
 }
 
@@ -663,4 +690,122 @@ fn result_name(code: i32) -> &'static str {
         exit::DEGRADED => "degraded",
         _ => "error",
     }
+}
+
+/// Decide a Claude Code PreToolUse event (needle-804452c5).
+///
+/// Returns the hook's stdout document when the write must be denied, `None`
+/// to allow it. The target path is acquired through the same all-or-none
+/// path as `needle contention acquire`, so a later write to a held file is a
+/// renewal. Anything that is not a clear conflict — coverage not enabled, an
+/// unknown tool, a path outside the repo or under .git/.needle, degraded
+/// markers, malformed input — allows the write (uncovered, never protected).
+pub fn claude_hook_decision(
+    input: &str,
+    lookup: EnvLookup<'_>,
+    status: &dyn HolderStatus,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    if lookup(env::COVERAGE).as_deref() != Some("enabled") {
+        return None;
+    }
+    let repo = PathBuf::from(lookup(env::REPO)?);
+    let event: serde_json::Value = serde_json::from_str(input).ok()?;
+    let tool_input = event.get("tool_input")?;
+    let key = match event.get("tool_name")?.as_str()? {
+        "Write" | "Edit" | "MultiEdit" => "file_path",
+        "NotebookEdit" => "notebook_path",
+        _ => return None,
+    };
+    let raw = PathBuf::from(tool_input.get(key)?.as_str()?);
+    let path = if raw.is_absolute() {
+        raw
+    } else {
+        // Claude Code resolves relative paths against the session cwd.
+        event
+            .get("cwd")
+            .and_then(|cwd| cwd.as_str())
+            .map_or_else(|| repo.join(&raw), |cwd| Path::new(cwd).join(&raw))
+    };
+    let intent =
+        if event.get("tool_name").and_then(|t| t.as_str()) == Some("Write") && !path.exists() {
+            IntentArg::Create
+        } else {
+            IntentArg::Modify
+        };
+    let command = ContentionCommand::Acquire {
+        paths: vec![path],
+        intent,
+        rename_from: None,
+        rename_to: None,
+        identity: IdentityArgs {
+            repo: Some(repo.clone()),
+            json: true,
+            ..IdentityArgs::default()
+        },
+    };
+    let (code, rendered) = execute(&command, lookup, status, now);
+    if code != exit::CONFLICT && code != exit::NEEDS_ATTENTION {
+        return None;
+    }
+    let out: serde_json::Value = serde_json::from_str(&rendered).ok()?;
+    let conflict = out.get("conflicts")?.as_array()?.first()?;
+    let file = conflict
+        .get("path")
+        .and_then(|p| p.as_str())
+        .unwrap_or("this file");
+    let holder = conflict.get("holder").cloned().unwrap_or_default();
+    let text = |key: &str| {
+        holder
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+            .to_string()
+    };
+    let who = format!(
+        "worker {} (bead {}, {} {}, editing for {}s)",
+        text("worker_id"),
+        text("bead_id"),
+        if holder.get("attempt_id").is_some_and(|v| !v.is_null()) {
+            "attempt"
+        } else {
+            "session"
+        },
+        if holder.get("attempt_id").is_some_and(|v| !v.is_null()) {
+            text("attempt_id")
+        } else {
+            text("session_id")
+        },
+        holder.get("age_secs").and_then(|v| v.as_i64()).unwrap_or(0),
+    );
+    let reason = if code == exit::CONFLICT {
+        format!(
+            "File contention: {file} is being edited right now by {who} in this same checkout. \
+             Do not edit it now. Continue with other files or other parts of your task, \
+             and come back to {file} later; the edit will be allowed once that holder \
+             finishes. Inspect with: needle contention list --repo {}",
+            repo.display()
+        )
+    } else {
+        let detail = conflict
+            .get("detail")
+            .and_then(|d| d.as_str())
+            .unwrap_or("its state is ambiguous");
+        format!(
+            "File contention: {file} holds unfinished changes from {who}: {detail}. \
+             Do not overwrite or revert it. Leave {file} alone, continue with other work, \
+             and mention it in your final summary. Inspect with: needle contention list --repo {}",
+            repo.display()
+        )
+    };
+    Some(
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        })
+        .to_string(),
+    )
 }
