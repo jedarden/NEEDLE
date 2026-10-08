@@ -20,6 +20,16 @@ pub fn resolve_usage(
     pricing: &PricingConfig,
 ) -> AttemptUsage {
     if extracted.input_tokens.is_some() || extracted.output_tokens.is_some() {
+        warn_if_unpriced_usage(
+            model,
+            UsageBreakdown {
+                input: extracted.input_tokens.unwrap_or_default(),
+                output: extracted.output_tokens.unwrap_or_default(),
+                ..UsageBreakdown::default()
+            },
+            reported_cost,
+            pricing,
+        );
         let cost = reported_cost.or_else(|| crate::cost::estimate_cost(extracted, model, pricing));
         return AttemptUsage {
             tokens_in: extracted.input_tokens,
@@ -36,6 +46,7 @@ pub fn resolve_usage(
             ..AttemptUsage::default()
         };
     };
+    warn_if_unpriced_usage(model, streamed, reported_cost, pricing);
     let cost =
         reported_cost.or_else(|| crate::cost::estimate_breakdown_cost(&streamed, model, pricing));
     AttemptUsage {
@@ -44,6 +55,40 @@ pub fn resolve_usage(
         estimated_cost_usd: cost,
         costed: cost.is_some(),
     }
+}
+
+/// Emit one structured warning for token-bearing attempts whose cost cannot
+/// be estimated because the configured model has no price. `tracing::warn!`
+/// is exported through the worker's OpenTelemetry tracing layer and remains
+/// visible in its worker log when OTLP is unavailable.
+fn warn_if_unpriced_usage(
+    model: &str,
+    usage: UsageBreakdown,
+    reported_cost: Option<f64>,
+    pricing: &PricingConfig,
+) {
+    if !should_warn_unpriced_usage(model, usage, reported_cost, pricing) {
+        return;
+    }
+
+    tracing::warn!(
+        event_name = "attempt.usage_unpriced",
+        model,
+        input_tokens = usage.input,
+        output_tokens = usage.output,
+        cache_read_tokens = usage.cache_read,
+        cache_write_tokens = usage.cache_write,
+        "adapter reported token usage for a model without configured pricing; attempt cost remains unknown"
+    );
+}
+
+fn should_warn_unpriced_usage(
+    model: &str,
+    usage: UsageBreakdown,
+    reported_cost: Option<f64>,
+    pricing: &PricingConfig,
+) -> bool {
+    usage != UsageBreakdown::default() && reported_cost.is_none() && !pricing.contains_key(model)
 }
 
 /// Replay captured adapter output into a priced usage breakdown.
@@ -217,6 +262,44 @@ fn parse_aider_count(field: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::{layer::Context, prelude::*, Layer};
+
+    #[derive(Clone)]
+    struct CapturedWarningEvents(Arc<Mutex<Vec<Option<String>>>>);
+
+    impl<S: tracing::Subscriber> Layer<S> for CapturedWarningEvents {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut visitor = EventNameVisitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .expect("capture lock is healthy")
+                .push(visitor.event_name);
+        }
+    }
+
+    #[derive(Default)]
+    struct EventNameVisitor {
+        event_name: Option<String>,
+    }
+
+    impl tracing::field::Visit for EventNameVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "event_name" {
+                self.event_name = Some(format!("{value:?}").trim_matches('"').to_string());
+            }
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "event_name" {
+                self.event_name = Some(value.to_string());
+            }
+        }
+    }
 
     /// The recorded fixture: every summary shape aider emits, provenance in
     /// its header (source-verified against Aider-AI/aider@main, 2026-09-26).
@@ -262,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn aider_legacy_regex_extraction_misses_real_summary_lines() {
+    fn adapter_usage_warns_on_unpriced_tokens_and_legacy_regex_misses_aider_summaries() {
         // Why the AiderSummary parser replaced the adapter's original
         // `Tokens:\s+([\d,]+)\s+sent,\s+([\d,]+)\s+received` regex: aider
         // abbreviates every count >= 1000 (`12.5k`) and interleaves cache
@@ -283,5 +366,27 @@ mod tests {
                 "legacy regex must not match real aider output: {line}"
             );
         }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber =
+            tracing_subscriber::registry().with(CapturedWarningEvents(Arc::clone(&captured)));
+        let dispatch = tracing::Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, || {
+            let usage = resolve_usage(
+                UsageFormat::CodexJsonl,
+                &TokenUsage::default(),
+                None,
+                r#"{"type":"turn.completed","usage":{"input_tokens":18,"output_tokens":3}}"#,
+                "unpriced-model",
+                &PricingConfig::new(),
+            );
+            assert!(!usage.costed);
+            assert_eq!(usage.tokens_in, Some(18));
+            assert_eq!(usage.tokens_out, Some(3));
+        });
+        assert_eq!(
+            *captured.lock().expect("capture lock is healthy"),
+            vec![Some("attempt.usage_unpriced".to_string())]
+        );
     }
 }
