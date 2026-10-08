@@ -350,7 +350,9 @@ version = 1
 # opt-in reported as degraded without failing doctor.
 # +1 for heartbeat claim-identity lifecycle coverage (needle-dcd29ec6): the
 # unit test exercises private HealthMonitor emitter state and its reporter.
-max_tests = 4160
+# +1 exact heartbeat/live-claim identity Mend recovery matrix
+# (needle-4260af3f): the required test covers all claim verdicts and fencing.
+max_tests = 4161
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

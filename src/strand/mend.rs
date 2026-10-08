@@ -373,7 +373,8 @@ enum ClaimIdentityVerdict {
     Superseded { named: Option<BeadId> },
     /// Positive process evidence shows the process behind the claim is dead.
     Dead { evidence: DeadProcessEvidence },
-    /// The exact live claim identity reports that its backend lease expired.
+    /// The exact claim identity carries the expiry returned by the backend's
+    /// verified fenced handle, and the live snapshot still has that epoch.
     Expired,
     /// The live claim no longer matches the bead inventory or heartbeat claim.
     FencedConflict,
@@ -560,6 +561,9 @@ fn classify_claim_identity(
         .lease_expires_at
         .is_some_and(|lease_expires_at| lease_expires_at <= now)
     {
+        // The expiry was copied from a backend-verified fenced claim handle.
+        // Matching the live claim epoch above makes a renewal or reassignment
+        // invalidate this evidence before recovery can use it.
         ClaimIdentityVerdict::Expired
     } else {
         ClaimIdentityVerdict::Current
@@ -4220,13 +4224,7 @@ mod tests {
             heartbeat_for_claim(&beads[4], ids[4], "session-missing", Some(1), None),
             heartbeat_for_claim(&beads[5], ids[5], "session-new-attempt", Some(1), None),
             heartbeat_for_claim(&beads[6], ids[6], "session-old-epoch", Some(2), None),
-            heartbeat_for_claim(
-                &beads[7],
-                ids[7],
-                "session-fenced-conflict",
-                Some(1),
-                Some(now - chrono::Duration::seconds(1)),
-            ),
+            heartbeat_for_claim(&beads[7], ids[7], "session-fenced-conflict", Some(1), None),
             heartbeat_for_claim(&beads[8], ids[8], "session-wrong-workspace", Some(1), None),
         ];
         heartbeats[3].claim_identity = None;
@@ -4274,7 +4272,7 @@ mod tests {
 
         assert_eq!(
             released, 2,
-            "only dead and exact expired claims are released"
+            "only the positively dead and exact expired claims are released"
         );
         assert_eq!(release_count.load(Ordering::Relaxed), 2);
 
