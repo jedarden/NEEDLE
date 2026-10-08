@@ -4224,7 +4224,13 @@ mod tests {
             heartbeat_for_claim(&beads[4], ids[4], "session-missing", Some(1), None),
             heartbeat_for_claim(&beads[5], ids[5], "session-new-attempt", Some(1), None),
             heartbeat_for_claim(&beads[6], ids[6], "session-old-epoch", Some(2), None),
-            heartbeat_for_claim(&beads[7], ids[7], "session-fenced-conflict", Some(1), None),
+            heartbeat_for_claim(
+                &beads[7],
+                ids[7],
+                "session-fenced-conflict",
+                Some(1),
+                Some(now - chrono::Duration::seconds(1)),
+            ),
             heartbeat_for_claim(&beads[8], ids[8], "session-wrong-workspace", Some(1), None),
         ];
         heartbeats[3].claim_identity = None;
@@ -4235,7 +4241,6 @@ mod tests {
             kind: crate::health::ActivityKind::ToolCall,
             observed_at: now,
         });
-        heartbeats[7].workspace = registry_dir.path().to_path_buf();
         for heartbeat in &heartbeats {
             write_heartbeat(heartbeat_dir.path(), heartbeat);
         }
