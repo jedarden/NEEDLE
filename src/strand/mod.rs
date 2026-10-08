@@ -21,6 +21,7 @@ pub mod weave;
 pub mod weft;
 pub mod weft_client;
 pub mod weft_envelope;
+pub mod weft_executor;
 pub(crate) mod workspace_capacity;
 mod workspace_health;
 

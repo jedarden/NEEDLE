@@ -142,7 +142,12 @@ fn fenced_json_bodies(text: &str) -> Vec<String> {
 
 #[async_trait]
 pub trait WeftTurnExecutor: Send + Sync {
-    async fn execute(&self, brief: LoomBrief) -> Result<WeftExecution, LoomError>;
+    async fn execute(
+        &self,
+        brief: LoomBrief,
+        turn_id: String,
+        client: Arc<LoomClient>,
+    ) -> Result<WeftExecution, LoomError>;
 }
 
 pub struct WeftStrand {
@@ -222,7 +227,9 @@ impl super::Strand for WeftStrand {
                 Err(error) => return StrandResult::Error(StrandError::StoreError(anyhow!(error))),
             };
 
-            let execution_future = self.executor.execute(brief);
+            let execution_future =
+                self.executor
+                    .execute(brief, turn.id.clone(), Arc::clone(&self.client));
             tokio::pin!(execution_future);
             let heartbeat_delay = Duration::from_secs(self.config.heartbeat_secs.max(1));
             let mut heartbeat = tokio::time::interval_at(
@@ -233,15 +240,19 @@ impl super::Strand for WeftStrand {
                 tokio::select! {
                     result = &mut execution_future => break match result {
                         Ok(execution) => execution,
-                        Err(error) => {
+                        Err(LoomError::TurnFailure { code, detail, retryable }) => {
                             let client = Arc::clone(&self.client);
                             let turn_id = turn.id.clone();
-                            let detail = error.to_string();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                client.fail(&turn_id, "execution_failed", &detail, true)
-                            }).await;
-                            return strand_error(error);
+                            return match tokio::task::spawn_blocking(move || {
+                                client.fail(&turn_id, code, detail, retryable)
+                            }).await {
+                                Ok(Ok(_)) | Ok(Err(LoomError::LeaseLost)) => StrandResult::NoWork,
+                                Ok(Err(error)) => strand_error(error),
+                                Err(error) => StrandResult::Error(StrandError::StoreError(anyhow!(error))),
+                            };
                         }
+                        Err(LoomError::LeaseLost) => return StrandResult::NoWork,
+                        Err(error) => return strand_error(error),
                     },
                     _ = heartbeat.tick() => {
                         let client = Arc::clone(&self.client);

@@ -1716,6 +1716,7 @@ impl Dispatcher {
             adapter,
             workspace,
             SpawnAuthority::Claim(None),
+            None,
         )
         .await
     }
@@ -1742,6 +1743,29 @@ impl Dispatcher {
             adapter,
             workspace,
             SpawnAuthority::UnclaimedAnalysis,
+            None,
+        )
+        .await
+    }
+
+    /// Execute a claim-free analysis agent with a hard Codex turn ceiling.
+    /// Codex CLI has no max-turns flag, so the dispatcher enforces the ceiling
+    /// from its JSONL turn.completed stream.
+    pub async fn dispatch_unclaimed_analysis_with_turn_limit(
+        &self,
+        bead_id: &BeadId,
+        prompt: &BuiltPrompt,
+        adapter: &AgentAdapter,
+        workspace: &Path,
+        max_turns: u64,
+    ) -> Result<ExecutionResult> {
+        self.dispatch_inner(
+            bead_id,
+            prompt,
+            adapter,
+            workspace,
+            SpawnAuthority::UnclaimedAnalysis,
+            Some(max_turns.max(1)),
         )
         .await
     }
@@ -1768,6 +1792,7 @@ impl Dispatcher {
             adapter,
             workspace,
             SpawnAuthority::Claim(Some(context)),
+            None,
         )
         .await
     }
@@ -1779,6 +1804,7 @@ impl Dispatcher {
         adapter: &AgentAdapter,
         workspace: &Path,
         authority: SpawnAuthority<'_>,
+        max_turns: Option<u64>,
     ) -> Result<ExecutionResult> {
         if let Some(context) = authority.claim_context() {
             if let Some(attempt_id) = context.attempt_id() {
@@ -1834,7 +1860,14 @@ impl Dispatcher {
         )?;
 
         let result = self
-            .execute_agent(bead_id, &prompt.content, adapter, workspace, authority)
+            .execute_agent(
+                bead_id,
+                &prompt.content,
+                adapter,
+                workspace,
+                authority,
+                max_turns,
+            )
             .await;
 
         // Emit completion telemetry regardless of success/failure.
@@ -2169,11 +2202,19 @@ impl Dispatcher {
         adapter: &AgentAdapter,
         workspace: &Path,
         authority: SpawnAuthority<'_>,
+        max_turns: Option<u64>,
     ) -> Result<ExecutionResult> {
         let prompt_file = write_prompt_to_temp(bead_id, prompt_content)?;
 
         let result = self
-            .run_process(bead_id, adapter, workspace, &prompt_file, authority)
+            .run_process(
+                bead_id,
+                adapter,
+                workspace,
+                &prompt_file,
+                authority,
+                max_turns,
+            )
             .await;
 
         // Always clean up temp file.
@@ -2199,6 +2240,7 @@ impl Dispatcher {
         workspace: &Path,
         prompt_file: &Path,
         authority: SpawnAuthority<'_>,
+        max_turns: Option<u64>,
     ) -> Result<ExecutionResult> {
         // Create the trace capture for this dispatch attempt, scoped to the
         // attempt's own directory (`.beads/traces/<bead-id>/<attempt-id>/`)
@@ -2414,6 +2456,7 @@ impl Dispatcher {
 
                     let mut command = tokio::process::Command::new("bash");
                     command
+                        .current_dir(workspace)
                         .arg("-c")
                         .arg(&rendered)
                         .stdout(std::process::Stdio::piped())
@@ -2652,8 +2695,11 @@ impl Dispatcher {
 
         let stdout_task = tokio::spawn({
             let activity_tx = activity_tx.clone();
+            let turn_limit = max_turns;
             async move {
                 let mut captured = String::new();
+                let mut completed_turns = 0u64;
+                let mut turn_limit_sent = false;
                 if let Some(pipe) = stdout_pipe {
                     // Read stdout in chunks to detect activity on every byte,
                     // not just at newlines. This ensures idle timeout resets
@@ -2679,6 +2725,19 @@ impl Dispatcher {
                         for byte in chunk_bytes.iter() {
                             line_buffer.push(*byte);
                             if *byte == b'\n' {
+                                if let Some(limit) = turn_limit {
+                                    if update_codex_turn_limit(
+                                        &line_buffer,
+                                        limit,
+                                        &mut completed_turns,
+                                        &mut turn_limit_sent,
+                                    ) && pid > 0
+                                    {
+                                        unsafe {
+                                            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                                        }
+                                    }
+                                }
                                 if let Some(ref tx) = transform_tx {
                                     // Convert line to String (without the newline for transform).
                                     let line = String::from_utf8_lossy(&line_buffer)
@@ -2694,6 +2753,19 @@ impl Dispatcher {
 
                     // Handle any remaining partial line at EOF (without trailing newline).
                     if !line_buffer.is_empty() {
+                        if let Some(limit) = turn_limit {
+                            if update_codex_turn_limit(
+                                &line_buffer,
+                                limit,
+                                &mut completed_turns,
+                                &mut turn_limit_sent,
+                            ) && pid > 0
+                            {
+                                unsafe {
+                                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                                }
+                            }
+                        }
                         if let Some(ref tx) = transform_tx {
                             let line = String::from_utf8_lossy(&line_buffer).to_string();
                             let _ = tx.try_send(line);
@@ -3307,6 +3379,36 @@ fn build_sanitizer(config: &Config) -> Option<Arc<Sanitizer>> {
 /// The per-bead agent log path, beneath the state root's `logs`
 /// (ADR-030 decision 5). Always resolvable; `Option` preserves the caller's
 /// drain-on-missing shape.
+fn is_codex_turn_completed(line: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|event| event == "turn.completed")
+}
+
+fn update_codex_turn_limit(
+    line: &[u8],
+    limit: u64,
+    completed: &mut u64,
+    signalled: &mut bool,
+) -> bool {
+    if *signalled || !is_codex_turn_completed(line) {
+        return false;
+    }
+    *completed = completed.saturating_add(1);
+    if *completed >= limit.max(1) {
+        *signalled = true;
+        true
+    } else {
+        false
+    }
+}
+
 fn agent_log_path(worker_id: &str, bead_id: &BeadId) -> Option<PathBuf> {
     Some(crate::state_dir::logs_dir().join(format!("{}-{}.agent.jsonl", worker_id, bead_id)))
 }
@@ -4121,6 +4223,85 @@ fn inherited_file_contention_to_strip(child_env: &HashMap<String, String>) -> Ve
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn codex_jsonl_turn_limit_triggers_at_limit_once() {
+        let mut completed = 0;
+        let mut signalled = false;
+        assert!(!super::update_codex_turn_limit(
+            r#"{"type":"item.completed"}"#.as_bytes(),
+            2,
+            &mut completed,
+            &mut signalled
+        ));
+        assert!(!super::update_codex_turn_limit(
+            r#"{"type":"turn.completed"}"#.as_bytes(),
+            2,
+            &mut completed,
+            &mut signalled
+        ));
+        assert_eq!(completed, 1);
+        assert!(super::update_codex_turn_limit(
+            r#"{"type":"turn.completed"}"#.as_bytes(),
+            2,
+            &mut completed,
+            &mut signalled
+        ));
+        assert!(!super::update_codex_turn_limit(
+            r#"{"type":"turn.completed"}"#.as_bytes(),
+            2,
+            &mut completed,
+            &mut signalled
+        ));
+        assert_eq!(completed, 2);
+
+        let directory = tempfile::tempdir().unwrap();
+        let fake = directory.path().join("fake-codex");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho '{\"type\":\"turn.completed\"}'\nsleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let cwd_file = workspace.join("actual-cwd");
+        let template = format!("pwd > '{}' && '{}'", cwd_file.display(), fake.display());
+        let adapter = test_adapter("codex-monitor", &template);
+        let mut adapters = HashMap::new();
+        adapters.insert(adapter.name.clone(), adapter.clone());
+        let dispatcher = Dispatcher::with_adapters(
+            adapters,
+            crate::telemetry::Telemetry::new("weft-turn-limit-test".into()),
+            30,
+        );
+        let prompt = BuiltPrompt {
+            content: "fixture prompt".into(),
+            hash: "fixture".into(),
+            token_estimate: 3,
+            template_name: "test".into(),
+            template_version: "1".into(),
+        };
+        let started = std::time::Instant::now();
+        let result = dispatcher
+            .dispatch_unclaimed_analysis_with_turn_limit(
+                &BeadId::from("needle-test-turn"),
+                &prompt,
+                &adapter,
+                &workspace,
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(result.stdout.contains(r#"{"type":"turn.completed"}"#));
+        assert_eq!(
+            std::fs::read_to_string(cwd_file).unwrap().trim(),
+            workspace.display().to_string()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
     use super::*;
 
     // ── File-contention hook contract (Phase 20, needle-7f04ec50) ──

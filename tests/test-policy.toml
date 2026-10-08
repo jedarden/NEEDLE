@@ -12,6 +12,9 @@ version = 1
 # Raise one only when a reviewer agrees that the named tier is the cheapest
 # correct home for the added behavior. Counts are literal Rust test attributes.
 [unit]
+# +4 Weft executor contracts (needle-04e4eaa7): fail-safe command shaping,
+# Codex JSONL max-turn termination, bounded authenticated attachment download,
+# and turn scratch path/cleanup behavior.
 # +4 for the Explore claimability/rotation scan-order contracts
 # (needle-4193db57): three worker_scan_order rotation suites and one
 # admit_candidates excluded-id suite in src/strand/explore.rs. These belong in
@@ -374,7 +377,7 @@ version = 1
 # +4 LOOM client contracts (needle-0ea049d0): request auth/query/body shape,
 # same-worker 409 claim recovery vs foreign contention, token rejection and
 # rotation recovery, and unsupported contract version terminal failure.
-max_tests = 4191
+max_tests = 4195
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

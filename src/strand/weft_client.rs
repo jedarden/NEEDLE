@@ -1,6 +1,7 @@
 //! LOOM's token-authenticated worker API used by the Weft strand.
 
 use std::fmt;
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
@@ -100,6 +101,14 @@ pub enum LoomError {
     Decode(String),
     ContractUnsupported(u32),
     Token(std::io::Error),
+    AttachmentTooLarge {
+        max_bytes: u64,
+    },
+    TurnFailure {
+        code: &'static str,
+        detail: &'static str,
+        retryable: bool,
+    },
 }
 
 impl fmt::Display for LoomError {
@@ -121,6 +130,13 @@ impl fmt::Display for LoomError {
                 write!(f, "unsupported LOOM contract version {version}")
             }
             Self::Token(error) => write!(f, "cannot read LOOM token file: {error}"),
+            Self::AttachmentTooLarge { max_bytes } => {
+                write!(
+                    f,
+                    "LOOM attachment exceeds the declared {max_bytes} byte limit"
+                )
+            }
+            Self::TurnFailure { code, detail, .. } => write!(f, "{code}: {detail}"),
         }
     }
 }
@@ -229,6 +245,82 @@ impl LoomClient {
             "retryable": retryable,
         });
         self.request("POST", &self.endpoint(turn_id, "fail"), Some(&body))
+    }
+
+    /// Download one authenticated attachment without buffering more than its
+    /// brief-declared size plus one sentinel byte.
+    pub fn download_attachment(
+        &self,
+        attachment_id: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, LoomError> {
+        let url = format!(
+            "{}/api/v1/attachments/{}",
+            self.config.base_url.trim_end_matches('/'),
+            url_encode(attachment_id)
+        );
+        let token = self.token()?;
+        let mut last_error = None;
+        for attempt in 0..=self.retry_delays.len() {
+            let response = self
+                .agent
+                .get(&url)
+                .set("Authorization", &format!("Bearer {token}"))
+                .set("X-Loom-Worker", &self.worker_name)
+                .set("Accept", "application/octet-stream")
+                .call();
+            match response {
+                Ok(response) => {
+                    let mut bytes = Vec::new();
+                    response
+                        .into_reader()
+                        .take(max_bytes.saturating_add(1))
+                        .read_to_end(&mut bytes)
+                        .map_err(|error| LoomError::Transport(error.to_string()))?;
+                    if bytes.len() as u64 > max_bytes {
+                        return Err(LoomError::AttachmentTooLarge { max_bytes });
+                    }
+                    return Ok(bytes);
+                }
+                Err(ureq::Error::Status(status, response)) => {
+                    let api_error = response
+                        .into_string()
+                        .ok()
+                        .and_then(|body| serde_json::from_str::<ApiError>(&body).ok())
+                        .unwrap_or(ApiError {
+                            code: String::new(),
+                            message: String::new(),
+                            claimed_by_worker: None,
+                        });
+                    if status == 401 {
+                        *self.rejected_token.lock().expect("token mutex poisoned") =
+                            Some(token.clone());
+                        return Err(LoomError::Unauthorized);
+                    }
+                    if status == 409 && api_error.code == "lease_lost" {
+                        return Err(LoomError::LeaseLost);
+                    }
+                    let error = LoomError::Http {
+                        status,
+                        code: api_error.code,
+                        message: api_error.message,
+                        claimed_by_worker: api_error.claimed_by_worker,
+                    };
+                    if status >= 500 {
+                        last_error = Some(error);
+                    } else {
+                        return Err(error);
+                    }
+                }
+                Err(ureq::Error::Transport(error)) => {
+                    last_error = Some(LoomError::Transport(error.to_string()));
+                }
+            }
+            if let Some(delay) = self.retry_delays.get(attempt) {
+                thread::sleep(*delay);
+            }
+        }
+        Err(last_error.unwrap_or_else(|| LoomError::Transport("attachment request failed".into())))
     }
 
     fn endpoint(&self, turn_id: &str, suffix: &str) -> String {
@@ -477,6 +569,24 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].contains("Bearer secret-one"));
         assert!(requests[1].contains("Bearer secret-two"));
+    }
+
+    #[test]
+    fn attachment_download_authenticates_and_rejects_bytes_over_declared_limit() {
+        let (url, server) = serve(vec![(503, r#"{"code":"busy"}"#), (200, "four")]);
+        let (_directory, mut client, _) = make_client(url);
+        client.retry_delays = vec![Duration::ZERO];
+        assert!(matches!(
+            client.download_attachment("att-1", 3),
+            Err(LoomError::AttachmentTooLarge { max_bytes: 3 })
+        ));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        let request = requests[0].to_ascii_lowercase();
+        assert!(request.starts_with("get /api/v1/attachments/att-1 "));
+        assert!(request.contains("authorization: bearer secret-one"));
+        assert!(request.contains("x-loom-worker: weft-worker"));
+        assert!(request.contains("accept: application/octet-stream"));
     }
 
     #[test]
