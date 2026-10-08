@@ -63,10 +63,12 @@ pub fn reduce(facts: &ResolutionFacts<'_>) -> ResolutionProposal {
     // Use the process classifier rather than treating only negative exits as
     // crashes. Timeout (124), missing-agent (127), and signal-style positive
     // exits are infrastructure observations, not evidence of delivered work.
-    if !matches!(
-        Outcome::classify(facts.exit_code, facts.interrupted),
-        Outcome::Success | Outcome::Failure
-    ) {
+    if facts.exit_code == 124
+        || !matches!(
+            Outcome::classify(facts.exit_code, facts.interrupted),
+            Outcome::Success | Outcome::Failure
+        )
+    {
         return ResolutionProposal::Release;
     }
 
@@ -210,7 +212,19 @@ pub(crate) mod test_contracts {
             interrupted: false,
             policy: ResolutionPolicy::default(),
         };
-        assert_eq!(reduce(&facts), ResolutionProposal::Complete);
+        let inputs_before = (
+            serde_json::to_value(&bead).expect("bead serializes"),
+            claim.clone(),
+            evidence.clone(),
+            decision.clone(),
+        );
+        let proposal = reduce(&facts);
+        assert_eq!(proposal, ResolutionProposal::Complete);
+        assert_eq!(
+            reduce(&facts),
+            proposal,
+            "identical facts yield one proposal"
+        );
         assert_eq!(
             reduce(&ResolutionFacts {
                 gates: GateVerdict::Pending,
@@ -263,6 +277,27 @@ pub(crate) mod test_contracts {
                 ..facts
             }),
             ResolutionProposal::AdmissionFailure
+        );
+        let invalid_decision = ResolveDecision::Complete {
+            evidence: String::new(),
+            commit_message: "deliver".to_string(),
+        };
+        assert_eq!(
+            reduce(&ResolutionFacts {
+                decision: Some(&invalid_decision),
+                ..facts
+            }),
+            ResolutionProposal::AdmissionFailure
+        );
+        assert_eq!(
+            inputs_before,
+            (
+                serde_json::to_value(&bead).expect("bead serializes"),
+                claim,
+                evidence,
+                decision,
+            ),
+            "reduction leaves its inputs unchanged"
         );
     }
 
@@ -328,6 +363,19 @@ pub(crate) mod test_contracts {
                 "process exit {exit_code} must not close a bead"
             );
         }
+        let mut timeout_evidence = evidence.clone();
+        timeout_evidence.dispatch.exit_code = 124;
+        timeout_evidence.dispatch.exit_status = "failure".to_string();
+        timeout_evidence.dispatch.exit_reason = "exit_code:124".to_string();
+        assert_eq!(
+            reduce(&ResolutionFacts {
+                evidence: Some(&timeout_evidence),
+                exit_code: 124,
+                ..facts
+            }),
+            ResolutionProposal::Release,
+            "a matching timeout bundle still cannot propose completion"
+        );
         assert_eq!(
             reduce(&ResolutionFacts {
                 interrupted: true,
@@ -358,6 +406,21 @@ pub(crate) mod test_contracts {
             parent_bead_id: "other".to_string(),
             child_titles: vec!["child".to_string()],
         };
+        let matching_split = ResolveDecision::Split {
+            evidence: "independent work".to_string(),
+            parent_bead_id: bead.id.to_string(),
+            child_titles: vec!["child one".to_string(), "child two".to_string()],
+        };
+        assert_eq!(
+            reduce(&ResolutionFacts {
+                decision: Some(&matching_split),
+                gates: GateVerdict::Pending,
+                work_accepted: false,
+                ..facts
+            }),
+            ResolutionProposal::Split,
+            "a split is one explicit proposal, never a close proposal"
+        );
         assert_eq!(
             reduce(&ResolutionFacts {
                 decision: Some(&split),
