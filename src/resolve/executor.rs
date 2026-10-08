@@ -314,6 +314,12 @@ impl GuardedApplier<'_> {
         fallback: Option<&predispatch::PreDispatch>,
         observation: Option<&ResolutionObservation<'_>>,
     ) -> Result<AppliedDecision> {
+        let Some(observation) = observation else {
+            return Err(anyhow::anyhow!(
+                "resolution admission failed: process observation and an evidence bundle are required"
+            ));
+        };
+
         // Defensive re-check of the resolver's own validation. The contract
         // says only validated decisions reach this point; refusing here keeps
         // a malformed decision from driving any mutation.
@@ -323,99 +329,104 @@ impl GuardedApplier<'_> {
                 .await);
         }
 
-        if let Some(observation) = observation {
-            let claim = self
-                .op(store.claim_status(&bead.id), "claim_status")
-                .await?;
-            let (expected_revision, expected_epoch) = observation
-                .claim_handle
-                .map(|handle| (handle.current_revision, handle.claim_epoch))
-                .unwrap_or((None, None));
-            let proposal = reducer::reduce(&ResolutionFacts {
-                bead,
-                claim: &claim,
-                actor,
-                expected_revision,
-                expected_epoch,
-                evidence: Some(observation.evidence),
-                gates: GateVerdict::Pending,
-                // Complete is reduced again after real gate and shipped-work
-                // verdicts below. This preflight screens malformed evidence,
-                // crashes and ownership before any decision writes.
-                work_accepted: false,
-                decision: Some(decision),
-                exit_code: observation.exit_code,
-                interrupted: observation.interrupted,
-                policy: self.resolution_policy(bead, false),
-            });
-            match proposal {
-                ResolutionProposal::OwnershipLost => return Ok(AppliedDecision::OwnershipLost),
-                ResolutionProposal::AdmissionFailure => {
-                    return Err(self
-                        .fail_safely(
-                            store,
-                            bead,
-                            actor,
-                            "resolution evidence",
-                            anyhow::anyhow!("resolution evidence was not accepted"),
+        let claim = self
+            .op(store.claim_status(&bead.id), "claim_status")
+            .await?;
+        let (expected_revision, expected_epoch) = observation
+            .claim_handle
+            .map(|handle| (handle.current_revision, handle.claim_epoch))
+            .unwrap_or((None, None));
+        let proposal = reducer::reduce(&ResolutionFacts {
+            bead,
+            claim: &claim,
+            actor,
+            expected_revision,
+            expected_epoch,
+            evidence: Some(observation.evidence),
+            gates: GateVerdict::Pending,
+            // Complete is reduced again after real gate and shipped-work
+            // verdicts below. This preflight screens malformed evidence,
+            // crashes and ownership before any decision writes.
+            work_accepted: false,
+            decision: Some(decision),
+            exit_code: observation.exit_code,
+            interrupted: observation.interrupted,
+            policy: self.resolution_policy(bead, false),
+        });
+        match proposal {
+            ResolutionProposal::OwnershipLost => return Ok(AppliedDecision::OwnershipLost),
+            ResolutionProposal::AdmissionFailure => {
+                let error = match decision {
+                    ResolveDecision::Split { parent_bead_id, .. }
+                        if parent_bead_id != bead.id.as_ref() =>
+                    {
+                        anyhow::anyhow!(
+                            "split decision names parent {parent_bead_id}, expected {}",
+                            bead.id
                         )
-                        .await);
-                }
-                ResolutionProposal::Release
-                    if !matches!(
-                        Outcome::classify(observation.exit_code, observation.interrupted),
-                        Outcome::Success | Outcome::Failure
-                    ) =>
-                {
-                    return self
-                        .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
-                        .await
-                        .map(|released| {
-                            if released {
-                                AppliedDecision::Released(ReleaseCause::Unverifiable)
-                            } else {
-                                AppliedDecision::OwnershipLost
-                            }
-                        });
-                }
-                ResolutionProposal::VerifyThenComplete
-                | ResolutionProposal::Complete
-                | ResolutionProposal::Release
-                | ResolutionProposal::Quarantine
-                | ResolutionProposal::Block
-                | ResolutionProposal::Split => {}
+                    }
+                    _ => anyhow::anyhow!("resolution evidence was not accepted"),
+                };
+                return Err(self
+                    .fail_safely(store, bead, actor, "resolution evidence", error)
+                    .await);
             }
+            ResolutionProposal::Release
+                if !matches!(
+                    Outcome::classify(observation.exit_code, observation.interrupted),
+                    Outcome::Success | Outcome::Failure
+                ) =>
+            {
+                return self
+                    .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                    .await
+                    .map(|released| {
+                        if released {
+                            AppliedDecision::Released(ReleaseCause::Unverifiable)
+                        } else {
+                            AppliedDecision::OwnershipLost
+                        }
+                    });
+            }
+            ResolutionProposal::VerifyThenComplete
+            | ResolutionProposal::Complete
+            | ResolutionProposal::Release
+            | ResolutionProposal::Quarantine
+            | ResolutionProposal::Block
+            | ResolutionProposal::Split => {}
         }
 
-        let atomic = store
-            .negotiated_capabilities()
-            .and_then(|capabilities| {
-                capabilities
-                    .get("atomic_resolution")
-                    .and_then(serde_json::Value::as_bool)
-            })
-            .unwrap_or(false);
-        let applied = match decision {
-            ResolveDecision::Complete {
-                evidence,
-                commit_message,
-            } => {
+        let atomic = atomic_resolution_advertised(store);
+        // The pure reducer selects the lifecycle action. The Resolve payload
+        // is used only for that action's note and evidence fields; a mismatch
+        // fails closed instead of letting a second decision tree overrule it.
+        let applied = match (proposal, decision) {
+            (
+                ResolutionProposal::VerifyThenComplete | ResolutionProposal::Complete,
+                ResolveDecision::Complete {
+                    evidence,
+                    commit_message,
+                },
+            ) => {
                 self.apply_complete(
                     store,
                     bead,
                     actor,
                     (evidence, commit_message),
                     fallback,
-                    observation,
+                    Some(observation),
                 )
                 .await
             }
-            ResolveDecision::Retry { evidence, strategy } if atomic => {
+            (
+                ResolutionProposal::Release | ResolutionProposal::Quarantine,
+                ResolveDecision::Retry { evidence, strategy },
+            ) if atomic => {
                 self.apply_atomic_simple(
                     store,
                     bead,
                     actor,
-                    observation,
+                    Some(observation),
                     AtomicSimple {
                         action: ResolutionAction::Release,
                         outcome: "work_failure",
@@ -429,20 +440,26 @@ impl GuardedApplier<'_> {
                 )
                 .await
             }
-            ResolveDecision::Retry { evidence, strategy } => {
+            (
+                ResolutionProposal::Release | ResolutionProposal::Quarantine,
+                ResolveDecision::Retry { evidence, strategy },
+            ) => {
                 self.apply_retry(store, bead, actor, evidence, strategy)
                     .await
             }
-            ResolveDecision::Blocked {
-                evidence,
-                blocker_type,
-                description,
-            } if atomic => {
+            (
+                ResolutionProposal::Block,
+                ResolveDecision::Blocked {
+                    evidence,
+                    blocker_type,
+                    description,
+                },
+            ) if atomic => {
                 self.apply_atomic_simple(
                     store,
                     bead,
                     actor,
-                    observation,
+                    Some(observation),
                     AtomicSimple {
                         action: ResolutionAction::Block,
                         outcome: "indeterminate",
@@ -457,18 +474,30 @@ impl GuardedApplier<'_> {
                 )
                 .await
             }
-            ResolveDecision::Blocked {
-                evidence,
-                blocker_type,
-                description,
-            } => {
+            (
+                ResolutionProposal::Block,
+                ResolveDecision::Blocked {
+                    evidence,
+                    blocker_type,
+                    description,
+                },
+            ) => {
                 self.apply_blocked(store, bead, actor, evidence, blocker_type, description)
                     .await
             }
-            ResolveDecision::Split { .. } => {
-                self.apply_split(store, bead, actor, decision, observation)
+            (ResolutionProposal::Split, ResolveDecision::Split { .. }) => {
+                self.apply_split(store, bead, actor, decision, Some(observation))
                     .await
             }
+            _ => Err(self
+                .fail_safely(
+                    store,
+                    bead,
+                    actor,
+                    "resolution proposal mismatch",
+                    anyhow::anyhow!("reducer proposal does not match Resolve payload"),
+                )
+                .await),
         };
 
         match applied {
@@ -477,9 +506,35 @@ impl GuardedApplier<'_> {
                 // authoritative read. A backend may report success after a
                 // partial or no-op mutation; that is never a completed action.
                 if !matches!(applied, AppliedDecision::OwnershipLost) {
-                    let current = self
-                        .op(store.show(&bead.id), "show after resolution")
-                        .await?;
+                    let current = match self.op(store.show(&bead.id), "show after resolution").await
+                    {
+                        Ok(current) => current,
+                        Err(error) => {
+                            // The lifecycle operation may have committed even
+                            // when its confirming read failed.  Treat that
+                            // boundary as uncertain and run the same guarded
+                            // recovery path; never turn an unconfirmed write
+                            // into completion credit.
+                            applied = self
+                                .mutation_failure(
+                                    store,
+                                    bead,
+                                    actor,
+                                    "resolution reconciliation",
+                                    error,
+                                )
+                                .await?;
+                            let _ = self.telemetry.emit(
+                                EventKind::OutcomeHandled {
+                                    bead_id: bead.id.clone(),
+                                    outcome: format!("resolve:{}", decision.as_str()),
+                                    action: applied.as_str().to_string(),
+                                },
+                                Utc::now(),
+                            );
+                            return Ok(applied);
+                        }
+                    };
                     let reconciled = match &applied {
                         AppliedDecision::Completed | AppliedDecision::AlreadyClosed => {
                             current.status.is_done()
@@ -615,9 +670,23 @@ impl GuardedApplier<'_> {
                 Ok(applied)
             };
         }
-        let current = self
+        let current = match self
             .op(store.show(&bead.id), "show after atomic resolution")
-            .await?;
+            .await
+        {
+            Ok(current) => current,
+            Err(error) => {
+                return self
+                    .mutation_failure(
+                        store,
+                        bead,
+                        actor,
+                        "atomic resolution reconciliation",
+                        error,
+                    )
+                    .await;
+            }
+        };
         let expected = match request.action {
             ResolutionAction::Release => current.status == BeadStatus::Open,
             ResolutionAction::Block => unreachable!("block was reconciled above"),
@@ -866,14 +935,7 @@ impl GuardedApplier<'_> {
             "closed by NEEDLE resolve: {}",
             concise(commit_message, MAX_NOTE_CHARS)
         );
-        let atomic = store
-            .negotiated_capabilities()
-            .and_then(|capabilities| {
-                capabilities
-                    .get("atomic_resolution")
-                    .and_then(|value| value.as_bool())
-            })
-            .unwrap_or(false);
+        let atomic = atomic_resolution_advertised(store);
         let close_result = if atomic {
             let Some(observation) = observation else {
                 return self
@@ -983,7 +1045,14 @@ impl GuardedApplier<'_> {
             Ok(replay) => {
                 // A successful command is not proof of a lifecycle change.
                 // Re-read immediately, including on an identical replay.
-                let closed = self.op(store.show(&bead.id), "show after close").await?;
+                let closed = match self.op(store.show(&bead.id), "show after close").await {
+                    Ok(closed) => closed,
+                    Err(error) => {
+                        return self
+                            .mutation_failure(store, bead, actor, "close reconciliation", error)
+                            .await;
+                    }
+                };
                 if !closed.status.is_done() || replay {
                     return if replay && closed.status.is_done() {
                         Ok(AppliedDecision::AlreadyClosed)
@@ -1228,14 +1297,7 @@ impl GuardedApplier<'_> {
                 if !self.ensure_owned(store, &bead.id, actor).await? {
                     return Ok(AppliedDecision::OwnershipLost);
                 }
-                let atomic = store
-                    .negotiated_capabilities()
-                    .and_then(|capabilities| {
-                        capabilities
-                            .get("atomic_resolution")
-                            .and_then(serde_json::Value::as_bool)
-                    })
-                    .unwrap_or(false);
+                let atomic = atomic_resolution_advertised(store);
                 if atomic {
                     self.apply_atomic_simple(
                         store,
@@ -1704,6 +1766,28 @@ fn release_result(released: bool, cause: ReleaseCause) -> AppliedDecision {
     }
 }
 
+/// Read the atomic-resolution switch from either capability projection that
+/// bead-rs has used.  The CLI store flattens the negotiated snapshot for
+/// legacy callers, while the native capability document advertises transition
+/// switches under `transitions`.  Only an explicit JSON `true` enables the
+/// atomic path; an omitted, malformed, or false value deliberately selects the
+/// reconciled compatibility path.
+fn atomic_resolution_advertised(store: &dyn BeadStore) -> bool {
+    let Some(capabilities) = store.negotiated_capabilities() else {
+        return false;
+    };
+    capabilities
+        .get("atomic_resolution")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| {
+            capabilities
+                .get("transitions")
+                .and_then(|transitions| transitions.get("atomic_resolution"))
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1750,9 +1834,12 @@ mod tests {
         fail_block: bool,
         fail_close: bool,
         noop_close: bool,
+        fail_show_after_done: bool,
         manual_block_retains_claim: bool,
         atomic_resolution_supported: bool,
+        atomic_capability_nested: bool,
         atomic_replay: bool,
+        atomic_response_lost_after_apply: bool,
         atomic_receipt_state: Option<&'static str>,
         atomic_calls: AtomicUsize,
         /// `create_bead` fails once this many children already exist.
@@ -1821,9 +1908,12 @@ mod tests {
                 fail_block: false,
                 fail_close: false,
                 noop_close: false,
+                fail_show_after_done: false,
                 manual_block_retains_claim: false,
                 atomic_resolution_supported: false,
+                atomic_capability_nested: false,
                 atomic_replay: false,
+                atomic_response_lost_after_apply: false,
                 atomic_receipt_state: None,
                 atomic_calls: AtomicUsize::new(0),
                 fail_create_after: None,
@@ -1882,6 +1972,11 @@ mod tests {
             self
         }
 
+        fn with_authoritative_read_failure_after_close(mut self) -> Self {
+            self.fail_show_after_done = true;
+            self
+        }
+
         fn with_recovery_conflict(mut self) -> Self {
             self.recovery_conflict = true;
             self
@@ -1890,6 +1985,18 @@ mod tests {
         fn with_atomic_resolution(mut self, replay: bool) -> Self {
             self.atomic_resolution_supported = true;
             self.atomic_replay = replay;
+            self
+        }
+
+        fn with_nested_atomic_capability(mut self, replay: bool) -> Self {
+            self.atomic_resolution_supported = true;
+            self.atomic_capability_nested = true;
+            self.atomic_replay = replay;
+            self
+        }
+
+        fn losing_atomic_reply_after_apply(mut self) -> Self {
+            self.atomic_response_lost_after_apply = true;
             self
         }
 
@@ -2019,7 +2126,15 @@ mod tests {
     #[async_trait::async_trait]
     impl BeadStore for RecordingStore {
         fn negotiated_capabilities(&self) -> Option<serde_json::Value> {
-            Some(serde_json::json!({"atomic_resolution": self.atomic_resolution_supported}))
+            if self.atomic_capability_nested {
+                Some(serde_json::json!({
+                    "transitions": {"atomic_resolution": self.atomic_resolution_supported}
+                }))
+            } else {
+                Some(serde_json::json!({
+                    "atomic_resolution": self.atomic_resolution_supported
+                }))
+            }
         }
 
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
@@ -2033,6 +2148,9 @@ mod tests {
         async fn show(&self, _id: &BeadId) -> Result<Bead> {
             let mut bead = self.bead();
             let claim = self.claim.lock().unwrap();
+            if self.fail_show_after_done && claim.status.is_done() {
+                anyhow::bail!("authoritative show failed after lifecycle mutation");
+            }
             bead.status = claim.status.clone();
             bead.assignee = claim.assignee.clone();
             Ok(bead)
@@ -2095,6 +2213,9 @@ mod tests {
                     ResolutionAction::Quarantine => BeadStatus::Deferred,
                 };
                 claim.assignee = None;
+            }
+            if self.atomic_response_lost_after_apply {
+                anyhow::bail!("simulated process crash after atomic lifecycle effect");
             }
             Ok((
                 ClaimMutationResult::Applied,
@@ -2315,15 +2436,24 @@ mod tests {
         decision: &ResolveDecision,
     ) -> Result<AppliedDecision> {
         let bead = store.bead();
-        // These unit fixtures cover the compatibility mutation sequence in
-        // isolation. Production callers cannot bypass process evidence:
-        // `DecisionExecutor::apply` forwards `None` and fails safely.
-        GuardedApplier {
-            executor,
-            retained_claim: None,
-        }
-        .apply_observed(store, &bead, decision, "worker-a", None, None)
-        .await
+        let exit_code = if matches!(decision, ResolveDecision::Complete { .. }) {
+            0
+        } else {
+            1
+        };
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, exit_code, "", "", false)
+                .await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code,
+            interrupted: false,
+            attempt_id: "attempt-unit-test",
+            claim_handle: None,
+        };
+        executor
+            .apply_observed(store, &bead, decision, "worker-a", None, Some(&observation))
+            .await
     }
 
     // ── complete ─────────────────────────────────────────────────────────
@@ -2358,6 +2488,8 @@ mod tests {
         invalid_observed_decision_does_not_release_a_newer_same_actor_claim().await;
         advertised_atomic_resolution_closes_once_and_replay_is_not_completion().await;
         atomic_close_receipt_must_confirm_a_closed_state().await;
+        atomic_close_response_loss_after_effect_fails_quiet().await;
+        authoritative_read_failure_after_close_fails_quiet().await;
         abnormal_process_exits_release_before_completion_checks().await;
         stale_revision_refuses_atomic_resolution().await;
         missing_observation_fails_safely().await;
@@ -2563,11 +2695,14 @@ mod tests {
     }
 
     async fn advertised_atomic_resolution_closes_once_and_replay_is_not_completion() {
-        for replay in [false, true] {
+        for (replay, nested_capability) in [(false, false), (true, false), (false, true)] {
             let (_dir, workspace) = temp_workspace();
-            let store = RecordingStore::new(workspace)
-                .with_stored_notes("did the work")
-                .with_atomic_resolution(replay);
+            let store = RecordingStore::new(workspace).with_stored_notes("did the work");
+            let store = if nested_capability {
+                store.with_nested_atomic_capability(replay)
+            } else {
+                store.with_atomic_resolution(replay)
+            };
             let bead = store.bead();
             let handle = protected_handle(&bead, 7);
             let evidence =
@@ -2639,6 +2774,93 @@ mod tests {
         assert_eq!(applied, AppliedDecision::OwnershipLost);
         assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 1);
         assert!(store.closes_snapshot().is_empty());
+    }
+
+    async fn atomic_close_response_loss_after_effect_fails_quiet() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .with_atomic_resolution(false)
+            .losing_atomic_reply_after_apply();
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 0, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 0,
+            interrupted: false,
+            attempt_id: "attempt-crash-boundary",
+            claim_handle: Some(&handle),
+        };
+        let helper = crate::telemetry::test_utils::TestHelper::new("resolve-crash-boundary");
+        let executor = DecisionExecutor::new(Config::default(), helper.telemetry().clone());
+
+        let applied = executor
+            .apply_observed(
+                &store,
+                &bead,
+                &complete_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("uncertain effect must fail quiet without a completion receipt");
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.released(), 0, "the closed bead is not released");
+        assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Done);
+
+        // Replaying the same attempt after the crash boundary cannot claim a
+        // new completion or apply another lifecycle effect.
+        let replay = executor
+            .apply_observed(
+                &store,
+                &bead,
+                &complete_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("reconciliation should recognize that ownership is gone");
+        assert_eq!(replay, AppliedDecision::OwnershipLost);
+        assert_eq!(store.atomic_calls.load(Ordering::SeqCst), 1);
+
+        helper.sync().await;
+        assert!(helper.events_by_type("bead.completed").is_empty());
+    }
+
+    async fn authoritative_read_failure_after_close_fails_quiet() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .with_authoritative_read_failure_after_close();
+        let bead = store.bead();
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 0, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 0,
+            interrupted: false,
+            attempt_id: "attempt-read-boundary",
+            claim_handle: None,
+        };
+
+        let applied = executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &complete_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("an uncertain post-close read is a safe, non-completion outcome");
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.closes_snapshot().len(), 1);
     }
 
     async fn abnormal_process_exits_release_before_completion_checks() {
@@ -3296,7 +3518,7 @@ mod tests {
         // The prerequisite note is allowed to land while this worker still
         // owns the bead; the second ownership check must fence the state
         // transition itself after the handoff.
-        let store = RecordingStore::new(workspace).flips_to_foreign_owner_after_n_reads(1);
+        let store = RecordingStore::new(workspace).flips_to_foreign_owner_after_n_reads(2);
 
         let applied = apply(&executor(), &store, &blocked_decision())
             .await
@@ -3819,7 +4041,7 @@ mod tests {
         // Mitosis has created and wired the children. The winner closes the
         // parent before the executor's final ownership guard, so the losing
         // split must not block or release that new owner.
-        let store = RecordingStore::new(workspace).closed_by_winner_after_n_reads(2);
+        let store = RecordingStore::new(workspace).closed_by_winner_after_n_reads(3);
         let executor = executor_with_mitosis(lock_dir.path());
 
         let applied = apply(
