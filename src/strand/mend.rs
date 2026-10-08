@@ -4241,7 +4241,7 @@ mod tests {
             kind: crate::health::ActivityKind::ToolCall,
             observed_at: now,
         });
-        heartbeats[8].workspace = registry_dir.path().to_path_buf();
+        heartbeats[7].workspace = registry_dir.path().to_path_buf();
         for heartbeat in &heartbeats {
             write_heartbeat(heartbeat_dir.path(), heartbeat);
         }
