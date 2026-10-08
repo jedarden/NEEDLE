@@ -192,30 +192,61 @@ fn sweep_workspace(workspace: &Path, dry_run: bool) -> Result<WorkspacePlan> {
         return Ok(WorkspacePlan::default());
     }
 
-    let lock = retention_lock(&traces_dir)?;
-    let plan = plan_workspace(
+    sweep_traces(
         &traces_dir,
         config.strands.learning.trace_retention_failed_days,
         config.strands.learning.trace_retention_success_days,
         config.attempt_archive.enabled,
         config.attempt_archive.prune_local_after_spool,
+        dry_run,
+    )
+}
+
+fn sweep_traces(
+    traces_dir: &Path,
+    retention_days_failed: u32,
+    retention_days_success: u32,
+    archive_enabled: bool,
+    prune_local_after_spool: bool,
+    dry_run: bool,
+) -> Result<WorkspacePlan> {
+    // A dry run is read-only, including its coordination behavior: creating a
+    // lock file under every scanned workspace would make a fleet preview
+    // mutate repositories outside the NEEDLE checkout.
+    if dry_run {
+        return plan_workspace(
+            traces_dir,
+            retention_days_failed,
+            retention_days_success,
+            archive_enabled,
+            prune_local_after_spool,
+        );
+    }
+
+    let lock = retention_lock(traces_dir)?;
+    let plan = plan_workspace(
+        traces_dir,
+        retention_days_failed,
+        retention_days_success,
+        archive_enabled,
+        prune_local_after_spool,
     )?;
-    if plan.active_capture || dry_run {
+    if plan.active_capture {
         drop(lock);
         return Ok(plan);
     }
 
-    let before = directory_bytes(&traces_dir)?;
+    let before = directory_bytes(traces_dir)?;
     let cleanup = cleanup_traces_with_options(
-        &traces_dir,
-        config.strands.learning.trace_retention_failed_days,
-        config.strands.learning.trace_retention_success_days,
+        traces_dir,
+        retention_days_failed,
+        retention_days_success,
         TraceCleanupOptions {
-            archive_enabled: config.attempt_archive.enabled,
-            prune_local_after_spool: config.attempt_archive.prune_local_after_spool,
+            archive_enabled,
+            prune_local_after_spool,
         },
     )?;
-    let after = directory_bytes(&traces_dir)?;
+    let after = directory_bytes(traces_dir)?;
     drop(lock);
 
     Ok(WorkspacePlan {
