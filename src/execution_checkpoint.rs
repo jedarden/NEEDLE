@@ -377,19 +377,20 @@ mod tests {
     }
 
     #[test]
-    fn append_rejects_recovery_checkpoint_with_different_recorded_owner() {
+    fn stale_owner_mismatch_and_sensitive_evidence_fail_without_publishing() {
         let workspace = tempfile::tempdir().unwrap();
         let bead_id = BeadId::from("needle-test");
         let checkpoints =
             ExecutionCheckpointStore::new(workspace.path(), &bead_id, "attempt-1").unwrap();
-        let mut value = record();
-        value.schema_version = needle_learning::CURRENT_EXECUTION_CHECKPOINT_VERSION;
-        value.recovery_decision = Some(RecoveryDecision::Retry);
-        value.ownership = Some(CheckpointOwnership {
+
+        let mut wrong_owner = record();
+        wrong_owner.schema_version = needle_learning::CURRENT_EXECUTION_CHECKPOINT_VERSION;
+        wrong_owner.recovery_decision = Some(RecoveryDecision::Retry);
+        wrong_owner.ownership = Some(CheckpointOwnership {
             actor: "worker-elsewhere".into(),
             revision: Some(12),
         });
-        value.evidence_refs = vec![CheckpointEvidence::RecoveryDecision {
+        wrong_owner.evidence_refs = vec![CheckpointEvidence::RecoveryDecision {
             reference: EvidenceRef {
                 evidence_id: EvidenceId::new("recovery-decision").unwrap(),
                 digest: ContentHash::new("sha256:decision").unwrap(),
@@ -398,19 +399,12 @@ mod tests {
         }];
         let (held, live) = claim(4);
         assert!(checkpoints
-            .append_with_status(&value, &held, &live, &sanitizer())
+            .append_with_status(&wrong_owner, &held, &live, &sanitizer())
             .unwrap_err()
             .to_string()
             .contains("does not match the held claim identity"));
         assert!(!checkpoints.attempt_dir().exists());
-    }
 
-    #[test]
-    fn stale_owner_and_sensitive_evidence_fail_without_publishing() {
-        let workspace = tempfile::tempdir().unwrap();
-        let bead_id = BeadId::from("needle-test");
-        let checkpoints =
-            ExecutionCheckpointStore::new(workspace.path(), &bead_id, "attempt-1").unwrap();
         let value = record();
         let (held, mut live) = claim(4);
         live.claim_epoch = Some(5);

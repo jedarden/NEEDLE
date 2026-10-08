@@ -8606,6 +8606,7 @@ mod tests {
         );
     }
 
+    #[tokio::test]
     async fn adapter_failure_storm_resolves_as_infrastructure_without_penalty() {
         // N-T23: four distinct beads failing with the same infrastructure-shaped
         // signal on one adapter trip the detector; the tripping failure and
