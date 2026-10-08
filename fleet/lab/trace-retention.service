@@ -1,0 +1,14 @@
+[Unit]
+Description=NEEDLE trace retention sweep for inactive workspaces
+After=default.target
+
+[Service]
+Type=oneshot
+Slice=needle.slice
+WorkingDirectory=/home/coding
+Environment=HOME=/home/coding
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/run/current-system/sw/bin
+ExecStart=/home/coding/.local/bin/needle trace-retention --root /home/coding --json
+
+[Install]
+WantedBy=default.target

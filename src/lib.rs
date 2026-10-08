@@ -103,6 +103,7 @@ pub mod test_output;
 pub mod test_runner;
 pub mod tmux_socket;
 pub mod trace;
+pub mod trace_retention;
 pub mod transcript;
 pub mod tsnet;
 pub mod types;

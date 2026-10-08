@@ -144,6 +144,30 @@ pub enum CliCommand {
         identifier: Option<String>,
     },
 
+    /// Sweep retention-eligible traces in workspaces without a live worker.
+    ///
+    /// The sweep is deterministic and fail-closed: it skips active workers,
+    /// unfinished captures, and symlinked trace trees. Use `--dry-run` for a
+    /// report without changing captures; `--json` is intended for timers.
+    #[command(name = "trace-retention")]
+    TraceRetention {
+        /// Root under which real `.beads/traces` workspaces are discovered.
+        #[arg(long)]
+        root: Option<PathBuf>,
+
+        /// Sweep only these workspaces (repeatable); bypasses root discovery.
+        #[arg(short = 'w', long = "workspace")]
+        workspace: Vec<PathBuf>,
+
+        /// Report eligible captures without pruning or deleting them.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print one machine-readable summary document.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List active workers.
     List {
         /// Output format.
@@ -735,6 +759,12 @@ pub fn run() -> Result<()> {
         ),
         CliCommand::Stop { all, identifier } => cmd_stop(all, identifier),
         CliCommand::Cleanup { all, identifier } => cmd_cleanup(all, identifier),
+        CliCommand::TraceRetention {
+            root,
+            workspace,
+            dry_run,
+            json,
+        } => cmd_trace_retention(root, workspace, dry_run, json),
         CliCommand::List { format } => cmd_list(format),
         CliCommand::Attach { identifier } => cmd_attach(&identifier),
         CliCommand::Status {
@@ -5029,6 +5059,53 @@ fn cmd_supervise(workspace: Option<PathBuf>) -> Result<()> {
         tokio::runtime::Runtime::new().context("failed to create tokio runtime for supervisor")?;
 
     rt.block_on(crate::supervisor::run_supervisor(workspace))
+}
+
+fn cmd_trace_retention(
+    root: Option<PathBuf>,
+    workspaces: Vec<PathBuf>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    let current_dir = std::env::current_dir().context("failed to determine current directory")?;
+    let scan_root = match root {
+        Some(root) => root,
+        None => {
+            ConfigLoader::load_resolved(&current_dir, CliOverrides::default())?
+                .0
+                .strands
+                .explore
+                .workspace_root
+        }
+    };
+    let summary = crate::trace_retention::sweep(&scan_root, &workspaces, dry_run)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .context("failed to serialize retention summary")?
+        );
+    } else {
+        println!(
+            "trace-retention: seen={} swept={} skipped_active={} skipped_live_capture={} pruned={} deleted={} bytes={} errors={}{}",
+            summary.workspaces_seen,
+            summary.workspaces_swept,
+            summary.workspaces_skipped_active,
+            summary.workspaces_skipped_live_capture,
+            summary.traces_pruned,
+            summary.traces_deleted,
+            summary.bytes_reclaimed,
+            summary.errors,
+            if dry_run { " (dry-run)" } else { "" },
+        );
+    }
+    if summary.errors > 0 {
+        bail!(
+            "trace retention sweep completed with {} error(s)",
+            summary.errors
+        );
+    }
+    Ok(())
 }
 
 /// `needle config` — view or inspect configuration.

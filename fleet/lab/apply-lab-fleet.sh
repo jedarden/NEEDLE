@@ -5,6 +5,7 @@
 # Installs:
 #   needle.slice            -> ~/.config/systemd/user/needle.slice
 #   needle-worker@.service  -> ~/.config/systemd/user/needle-worker@.service
+#   trace-retention.{service,timer} -> ~/.config/systemd/user/
 #   workers.tsv instances   -> ~/.config/needle/workers/<identifier>.env
 # and enables exactly the manifest instances. Any other needle-worker@<id>
 # instance that is still enabled gets MASKED (not merely disabled): the
@@ -130,6 +131,15 @@ for unit in needle.slice needle-worker@.service; do
     fi
 done
 
+for unit in trace-retention.service trace-retention.timer; do
+    if ! cmp -s "$SRC_DIR/$unit" "$SYSTEMD_DIR/$unit" 2>/dev/null; then
+        echo "- installing $unit"
+        run install -m 644 "$SRC_DIR/$unit" "$SYSTEMD_DIR/$unit"
+    else
+        echo "- $unit already current"
+    fi
+done
+
 # --- per-instance env files --------------------------------------------------
 mkdir -p "$WORKERS_DIR"
 run install -m 644 "$SRC_DIR/fleet-policy.env" "$HOME/.config/needle/fleet-policy.env"
@@ -198,6 +208,7 @@ fi
 
 # --- reload (never restarts anything) ----------------------------------------
 run systemctl --user daemon-reload
+run systemctl --user enable --now trace-retention.timer
 
 echo
 echo "== fleet policy applied. Current state:"

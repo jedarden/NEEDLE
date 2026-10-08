@@ -12,6 +12,7 @@ what it deliberately never touches (credentials, systemd-managed drop-ins).
 | File | Deploys to |
 |---|---|
 | `needle-worker@.service` | `~/.config/systemd/user/needle-worker@.service` |
+| `trace-retention.{service,timer}` | scheduled inactive-workspace trace cleanup |
 | `needle.slice` | `~/.config/systemd/user/needle.slice` |
 | `workers.tsv` | rendered to `~/.config/needle/workers/<identifier>.env` |
 | `fleet-policy.env` | `~/.config/needle/fleet-policy.env` |
@@ -168,6 +169,30 @@ no longer exist — Mend will release them if those workspaces rejoin the
 fleet.
 
 ## Operational notes
+
+## Trace retention sweep
+
+`trace-retention.timer` runs every 15 minutes after boot and invokes
+`needle trace-retention --root /home/coding --json`. The command discovers real
+`.beads/traces` workspaces in sorted order, loads each workspace's configured
+failed/success retention windows, and skips workspaces with a live NEEDLE
+worker, unfinished capture metadata, or any symlink in the trace tree. Actual
+pruning/deletion is delegated to the same cleanup and `attempt_archive`
+spooled-marker gate used by Mend. Successful captures retain `metadata.json`.
+
+Install or converge with `./fleet/lab/apply-lab-fleet.sh`; it installs and
+enables the timer without restarting workers. Review the JSON result and exit
+status with:
+
+```text
+systemctl --user status trace-retention.timer
+journalctl --user -u trace-retention.service --since today --no-pager
+needle trace-retention --root /home/coding --dry-run --json
+```
+
+The summary contains workspace/trace counts, reclaimed bytes, and an error
+count only; trace contents are never printed. A nonzero error count fails the
+oneshot so the timer's journal state is visible to fleet monitoring.
 
 - `workers.tsv` pins every worker with `NEEDLE_WS`; roaming (`--workspace`
   dropped) is disabled on purpose until the claude-governor queue is triaged
