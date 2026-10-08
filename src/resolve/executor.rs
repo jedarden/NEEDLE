@@ -1277,22 +1277,26 @@ impl GuardedApplier<'_> {
             return Ok(AppliedDecision::OwnershipLost);
         }
 
-        // Guidance is best-effort: a backend without notes support must still
-        // release, or the bead wedges in `in_progress` forever.
-        let note = format!(
-            "resolve retry ({}): {}",
-            concise(strategy, 120),
-            concise(evidence, MAX_NOTE_CHARS)
-        );
-        if let Err(error) = self
-            .op(store.append_notes(&bead.id, &note), "append_notes")
-            .await
-        {
-            tracing::warn!(
-                bead_id = %bead.id,
-                error = %error,
-                "resolve retry: could not record guidance note — releasing anyway"
+        // Guidance is best-effort for legacy claims. A protected backend has
+        // no claim-owned note operation, so an unguarded note write would let
+        // a stale resolver mutate the bead after its lease changed; the
+        // fenced lifecycle release is the only compatibility mutation here.
+        if !self.retained_claim.is_some_and(ClaimHandle::is_protected) {
+            let note = format!(
+                "resolve retry ({}): {}",
+                concise(strategy, 120),
+                concise(evidence, MAX_NOTE_CHARS)
             );
+            if let Err(error) = self
+                .op(store.append_notes(&bead.id, &note), "append_notes")
+                .await
+            {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "resolve retry: could not record guidance note — releasing anyway"
+                );
+            }
         }
 
         if !self.ensure_owned(store, &bead.id, actor).await? {
@@ -1354,16 +1358,9 @@ impl GuardedApplier<'_> {
                 .await
             {
                 Ok(ClaimMutationResult::Applied) => {
-                    if let Err(error) = self
-                        .op(store.append_notes(&bead.id, &note), "append_notes")
-                        .await
-                    {
-                        tracing::warn!(
-                            bead_id = %bead.id,
-                            error = %error,
-                            "resolve blocked: could not record prerequisite note — block is confirmed"
-                        );
-                    }
+                    // The status update is fenced. There is no equivalent
+                    // claim-owned note operation, so do not follow it with an
+                    // unfenced write under a protected claim.
                     return self
                         .finish_blocked(store, bead, actor, AppliedDecision::Blocked)
                         .await;
@@ -1717,16 +1714,44 @@ impl GuardedApplier<'_> {
         if !self.matches_retained_claim(&bead.id, actor, &expected) {
             return Ok(false);
         }
-        // The live revision is needed after this invocation's own writes, but
-        // only after its claim epoch has matched the retained dispatch handle.
-        // bead-rs checks both values in the conditional release operation.
-        match self
-            .op(
+        // Prefer the exact retained credential while no prior guarded write
+        // has advanced the revision. This is the strongest compatibility
+        // fence: a stale resolver cannot release a newer claim, even if the
+        // actor name is unchanged. After a guarded update (for example the
+        // deferred status used by a block), the handle's revision is stale;
+        // use the backend's revision+epoch recovery CAS against the freshly
+        // observed state instead.
+        let release = if let Some(handle) = self
+            .retained_claim
+            .filter(|handle| handle.is_protected())
+            .filter(|handle| {
+                handle.bead_id == bead.id
+                    && handle.current_revision == expected.revision
+                    && handle.claim_epoch == expected.claim_epoch
+            }) {
+            match self.op(store.release_claim(handle), "release_claim").await {
+                Ok(ClaimMutationResult::Applied) => Ok(RecoveryReleaseOutcome::Released),
+                Ok(ClaimMutationResult::LostOwnership) => Ok(RecoveryReleaseOutcome::Conflict),
+                // A capability-aware backend may expose the claim fence but
+                // not its standalone release operation. Its recovery CAS is
+                // still safe because it uses this exact live revision/epoch.
+                Ok(ClaimMutationResult::Unsupported) => {
+                    self.op(
+                        store.release_recovery(&bead.id, &expected),
+                        "release_recovery",
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            self.op(
                 store.release_recovery(&bead.id, &expected),
                 "release_recovery",
             )
             .await
-        {
+        };
+        match release {
             Ok(RecoveryReleaseOutcome::Conflict) => Ok(false),
             Ok(RecoveryReleaseOutcome::Released) => {
                 let current = self.op(store.show(&bead.id), "show after release").await?;
@@ -2761,6 +2786,7 @@ mod tests {
         compatibility_block_response_loss_is_reconciled().await;
         compatibility_block_fence_refuses_a_reclaimed_claim().await;
         compatibility_release_refuses_a_replaced_claim().await;
+        protected_compatibility_retry_skips_unfenced_guidance().await;
         compatibility_reclaim_by_same_actor_before_mutation_is_ownership_lost().await;
         compatibility_reclaim_by_same_actor_before_release_is_not_released().await;
         invalid_observed_decision_does_not_release_a_newer_same_actor_claim().await;
@@ -2915,6 +2941,41 @@ mod tests {
             store.show(&store.bead().id).await.unwrap().status,
             BeadStatus::InProgress
         );
+    }
+
+    async fn protected_compatibility_retry_skips_unfenced_guidance() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace).with_fenced_claim_without_atomic();
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-protected-retry",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &retry_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("protected compatibility retry should release safely");
+
+        assert_eq!(applied, AppliedDecision::Released(ReleaseCause::Retry));
+        assert!(
+            store.notes_snapshot().is_empty(),
+            "protected retry must not issue an unfenced note mutation"
+        );
+        assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Open);
     }
 
     async fn compatibility_reclaim_by_same_actor_before_mutation_is_ownership_lost() {
