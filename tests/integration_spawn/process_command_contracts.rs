@@ -150,12 +150,33 @@ impl GitRepo {
 }
 
 fn git_output(path: &Path, args: &[&str]) -> Output {
-    Command::new("git")
+    process_contract_command("git")
         .args(args)
         .current_dir(path)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .expect("execute Git fixture command")
+}
+
+/// Resolve host tools to explicit paths so subprocess setup does not depend
+/// on a later PATH lookup.
+fn process_contract_command(name: &str) -> Command {
+    let candidate = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join(name))
+        .find(|path| {
+            fs::metadata(path)
+                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("could not resolve {name:?} on this test case's PATH"));
+    let candidate = fs::canonicalize(candidate).expect("canonicalize resolved host command");
+    Command::new(candidate)
+}
+
+fn process_contract_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn git_ok(path: &Path, args: &[&str]) {
@@ -937,7 +958,6 @@ fn archive_and_status_process_contracts_executable(
     path
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
     let spool = TempDir::new().unwrap();
@@ -1030,7 +1050,6 @@ fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
     assert_eq!(listed, sidecar.contents);
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_archive_missing_trace_facts() {
     let spool = TempDir::new().unwrap();
@@ -1054,7 +1073,6 @@ fn archive_and_status_process_contracts_archive_missing_trace_facts() {
     assert!(!receipt.sidecar.with_extension("json.partial").exists());
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
     let spool = TempDir::new().unwrap();
@@ -1063,8 +1081,10 @@ fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
     let workspace = TempDir::new().unwrap();
     let workspace_path = workspace.path().to_path_buf();
     let session_id = "session-archive";
+    let claude_dir = home.path().join(".claude");
     let project_dir =
-        needle::transcript::TranscriptDiscovery::new(&workspace_path, None, 0).project_dir();
+        needle::transcript::TranscriptDiscovery::new(&workspace_path, Some(&claude_dir), 0)
+            .project_dir();
     fs::create_dir_all(project_dir.join(session_id)).unwrap();
     let transcript = r#"{"type":"user","content":"token sk-test-abc123"}\n"#;
     fs::write(project_dir.join(format!("{session_id}.jsonl")), transcript).unwrap();
@@ -1108,13 +1128,17 @@ fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
             .expect("spooled");
 
     let read_tar = |path: &str| {
-        let output = Command::new("tar")
+        let output = process_contract_command("tar")
             .arg("-xOf")
             .arg(&receipt.bundle)
             .arg(path)
             .output()
             .unwrap();
-        assert!(output.status.success(), "tar could not read {path}");
+        assert!(
+            output.status.success(),
+            "tar could not read {path}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap()
     };
     let expected = sanitizer.sanitize(transcript);
@@ -1160,7 +1184,6 @@ fn archive_harness_transcript_contract_copies_sanitizes_and_records_absence() {
     );
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_version_stdout() {
     let root = TempDir::new().unwrap();
@@ -1175,7 +1198,6 @@ fn archive_and_status_process_contracts_version_stdout() {
     );
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_version_nonzero_exit() {
     let root = TempDir::new().unwrap();
@@ -1188,7 +1210,6 @@ fn archive_and_status_process_contracts_version_nonzero_exit() {
     assert!(error.contains("exited with code"));
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_version_empty_output() {
     let root = TempDir::new().unwrap();
@@ -1200,7 +1221,6 @@ fn archive_and_status_process_contracts_version_empty_output() {
     assert!(spawn_version_output(&executable).unwrap().trim().is_empty());
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_version_multiline_output() {
     let root = TempDir::new().unwrap();
@@ -1215,7 +1235,6 @@ fn archive_and_status_process_contracts_version_multiline_output() {
     assert!(output.contains("Copyright"));
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_version_preserves_raw_output() {
     let root = TempDir::new().unwrap();
@@ -1229,7 +1248,6 @@ fn archive_and_status_process_contracts_version_preserves_raw_output() {
         .contains("  tool-with-spacing   1.2.3  "));
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_version_returns_string() {
     let root = TempDir::new().unwrap();
@@ -1242,7 +1260,6 @@ fn archive_and_status_process_contracts_version_returns_string() {
     assert_eq!(output.trim(), "test output");
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_version_basic_spawn() {
     let root = TempDir::new().unwrap();
@@ -1254,7 +1271,6 @@ fn archive_and_status_process_contracts_version_basic_spawn() {
     assert!(spawn_version_output(&executable).is_ok());
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[tokio::test]
 async fn archive_and_status_process_contracts_workspace_template() {
     let repository = GitRepo::new();
@@ -1273,7 +1289,6 @@ async fn archive_and_status_process_contracts_workspace_template() {
     assert_eq!(template, "needle-ci");
 }
 
-#[serial_test::file_serial(process_contracts)]
 #[test]
 fn archive_and_status_process_contracts_canary_backend_projection() {
     let projection = r#"[{"status":"closed","labels":["native"]}]"#;
@@ -1678,16 +1693,16 @@ async fn dispatch_telemetry_process_contracts_e2e_all_template_variables_substit
     let dispatcher = process_contract_dispatcher(adapters);
     let adapter = dispatcher.adapter("vars").unwrap().clone();
 
-    let workspace = std::env::temp_dir().join("needle-e2e-vars");
-    let _ = std::fs::create_dir_all(&workspace);
+    let workspace = TempDir::new().expect("create isolated variable-substitution workspace");
+    let workspace_path = workspace.path();
 
     let result = dispatcher
         .dispatch_with_context(
             &BeadId::from("needle-tmpl"),
             &process_contract_prompt("irrelevant"),
             &adapter,
-            &workspace,
-            &crate::pre_spawn_pass_store::claimed_context(&workspace),
+            workspace_path,
+            &crate::pre_spawn_pass_store::claimed_context(workspace_path),
         )
         .await
         .unwrap();
@@ -1695,7 +1710,7 @@ async fn dispatch_telemetry_process_contracts_e2e_all_template_variables_substit
     assert_eq!(result.exit_code, 0);
     let out = result.stdout.trim();
     assert!(
-        out.contains(&format!("ws={}", workspace.display())),
+        out.contains(&format!("ws={}", workspace_path.display())),
         "workspace not substituted: {out}"
     );
     assert!(
@@ -1715,8 +1730,6 @@ async fn dispatch_telemetry_process_contracts_e2e_all_template_variables_substit
         out.contains("pf=/"),
         "prompt_file should be an absolute path: {out}"
     );
-
-    let _ = std::fs::remove_dir_all(&workspace);
 }
 
 #[tokio::test]
@@ -1859,8 +1872,9 @@ async fn dispatch_telemetry_process_contracts_activity_detection_during_transfor
 #[tokio::test]
 async fn dispatch_telemetry_process_contracts_hard_timeout_kills_entire_process_group_active() {
     // Test that hard timeout kills the entire process group, even when agent is active.
-    let pid_file = std::env::temp_dir().join(format!("needle-hard-pg-{}.pid", std::process::id()));
-    let pid_file_str = pid_file.display().to_string();
+    let process_state = TempDir::new().expect("create isolated hard-timeout process state");
+    let pid_file = process_state.path().join("grandchild.pid");
+    let pid_file_str = process_contract_shell_quote(&pid_file.display().to_string());
 
     let cmd = format!(
         "sleep 1000 & echo $! > {pid_file_str}; while true; do echo 'active'; sleep 0.05; done"
@@ -1937,8 +1951,8 @@ async fn dispatch_telemetry_process_contracts_hard_timeout_kills_entire_process_
 #[tokio::test]
 async fn dispatch_telemetry_process_contracts_e2e_workspace_directory_is_correct() {
     // Verify the agent process can see the workspace directory.
-    let workspace = std::env::temp_dir().join("needle-e2e-wsdir");
-    let _ = std::fs::create_dir_all(&workspace);
+    let workspace = TempDir::new().expect("create isolated workspace-directory fixture");
+    let workspace_path = workspace.path();
 
     let mut adapters = HashMap::new();
     adapters.insert(
@@ -1953,16 +1967,16 @@ async fn dispatch_telemetry_process_contracts_e2e_workspace_directory_is_correct
             &BeadId::from("nd-wsdir"),
             &process_contract_prompt("t"),
             &adapter,
-            &workspace,
-            &crate::pre_spawn_pass_store::claimed_context(&workspace),
+            workspace_path,
+            &crate::pre_spawn_pass_store::claimed_context(workspace_path),
         )
         .await
         .unwrap();
 
     assert_eq!(result.exit_code, 0);
     // Canonicalize both to handle symlinks (e.g., /tmp -> /private/tmp on macOS)
-    let expected = std::fs::canonicalize(&workspace)
-        .unwrap_or_else(|_| workspace.clone())
+    let expected = std::fs::canonicalize(workspace_path)
+        .unwrap_or_else(|_| workspace_path.to_path_buf())
         .display()
         .to_string();
     let actual = result.stdout.trim().to_string();
@@ -1970,8 +1984,6 @@ async fn dispatch_telemetry_process_contracts_e2e_workspace_directory_is_correct
         .map(|p| p.display().to_string())
         .unwrap_or(actual);
     assert_eq!(actual_canonical, expected);
-
-    let _ = std::fs::remove_dir_all(&workspace);
 }
 
 #[tokio::test]
@@ -2594,9 +2606,9 @@ async fn dispatch_telemetry_process_contracts_e2e_outer_cancellation_still_kills
     // Here the adapter's own timeout is set effectively unreachable
     // within the test's window, so the only thing that can kill the
     // process is the guard reacting to the *outer* future being dropped.
-    let pid_file =
-        std::env::temp_dir().join(format!("needle-outercancel-{}.pid", std::process::id()));
-    let pid_file_str = pid_file.display().to_string();
+    let process_state = TempDir::new().expect("create isolated cancellation process state");
+    let pid_file = process_state.path().join("grandchild.pid");
+    let pid_file_str = process_contract_shell_quote(&pid_file.display().to_string());
 
     let cmd = format!("sleep 1000 & echo $! > {pid_file_str}; sleep 1000");
     let mut adapter = process_contract_adapter("outercancel", &cmd);
@@ -3118,8 +3130,9 @@ async fn dispatch_telemetry_process_contracts_e2e_timeout_kills_entire_process_g
     // bash child) is killed.  The agent starts a background sleep and writes
     // its PID to a temp file before blocking.  After timeout we assert the
     // grandchild is gone.
-    let pid_file = std::env::temp_dir().join(format!("needle-pgkill-{}.pid", std::process::id()));
-    let pid_file_str = pid_file.display().to_string();
+    let process_state = TempDir::new().expect("create isolated process-group state");
+    let pid_file = process_state.path().join("grandchild.pid");
+    let pid_file_str = process_contract_shell_quote(&pid_file.display().to_string());
 
     // Start a background sleep, capture its PID, then sleep (will time out).
     let cmd = format!("sleep 1000 & echo $! > {pid_file_str}; sleep 1000");
@@ -3346,10 +3359,13 @@ async fn dispatch_telemetry_process_contracts_dispatch_missing_binary_returns_12
 
 #[test]
 fn dispatch_telemetry_process_contracts_hook_sink_dispatches_json_to_stdin() {
-    let tmp = std::env::temp_dir().join("needle-hook-test-stdin");
-    let _ = std::fs::remove_file(&tmp);
+    let hook_state = TempDir::new().expect("create isolated hook stdin state");
+    let tmp = hook_state.path().join("hook-input.json");
 
-    let cmd = format!("cat > {}", tmp.display());
+    let cmd = format!(
+        "cat > {}",
+        process_contract_shell_quote(&tmp.display().to_string())
+    );
     let configs = vec![HookConfig {
         event_filter: "worker.*".to_string(),
         command: cmd,
@@ -3372,8 +3388,6 @@ fn dispatch_telemetry_process_contracts_hook_sink_dispatches_json_to_stdin() {
     // Verify it's valid JSON containing the event type
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(parsed["event_type"], "worker.started");
-
-    let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]
