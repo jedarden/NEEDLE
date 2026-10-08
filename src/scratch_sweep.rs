@@ -1,10 +1,12 @@
-//! Startup cleanup for stale disposable checkouts under `$HOME/scratch`.
+//! Startup cleanup for stale disposable checkouts under `$HOME/scratch` and
+//! `$HOME/.needle`.
 //!
-//! Removal is deliberately narrow: an entry must have a known fleet prefix,
-//! be an independent Git clone (a real `.git/` directory), be older than the
-//! configured TTL, have an `origin`, and contain neither stashes nor commits
-//! absent from all remote refs. Process inspection is fail-closed and is read
-//! again immediately before the destructive operation.
+//! Removal is deliberately narrow: scratch entries need a known fleet prefix,
+//! while NEEDLE-home entries may have any name except protected state roots.
+//! In either location an entry must be an independent Git clone (a real
+//! `.git/` directory), be older than the configured TTL, have an `origin`, and
+//! contain neither stashes nor commits absent from all remote refs. Process
+//! inspection is fail-closed and is read again immediately before deletion.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -26,7 +28,14 @@ const DISPOSABLE_PREFIXES: &[&str] = &[
     "icg-",
     "claude-print-",
 ];
+const NEEDLE_HOME_RESERVED_ENTRIES: &[&str] = &["snapshots", "state", "logs"];
 const SWEEP_LOCK_FILE: &str = ".needle-scratch-sweep.lock";
+
+#[derive(Clone, Copy)]
+enum CandidateNamePolicy {
+    FleetPrefixes,
+    AnyName,
+}
 
 /// One checkout removed by a startup sweep.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +64,8 @@ pub enum SweepOutcome {
     Completed(SweepReport),
 }
 
-/// Sweep the current user's scratch directory using the configured TTL.
+/// Sweep stale disposable checkouts from the current user's scratch and NEEDLE
+/// home directories using the configured TTL.
 pub fn sweep_home_scratch(config: &ScratchSweepConfig) -> Result<SweepOutcome> {
     if !config.enabled {
         return Ok(SweepOutcome::Disabled);
@@ -63,9 +73,9 @@ pub fn sweep_home_scratch(config: &ScratchSweepConfig) -> Result<SweepOutcome> {
 
     let home =
         std::env::var_os("HOME").context("HOME is not set; cannot locate scratch directory")?;
-    let scratch_root = PathBuf::from(home).join("scratch");
-    sweep_scratch_root(
-        &scratch_root,
+    let home = PathBuf::from(home);
+    sweep_home_roots(
+        &home,
         config.ttl_hours,
         &ProcProcessInspector::new(PathBuf::from("/proc")),
         &GitCheckoutAuditor,
@@ -98,7 +108,79 @@ pub fn sweep_scratch_directory_with_proc_root(
         &ProcProcessInspector::new(proc_root.to_path_buf()),
         &GitCheckoutAuditor,
         SystemTime::now(),
+        CandidateNamePolicy::FleetPrefixes,
     )
+}
+
+fn sweep_home_roots(
+    home: &Path,
+    ttl_hours: u64,
+    process_inspector: &dyn ProcessInspector,
+    checkout_auditor: &dyn CheckoutAuditor,
+    now: SystemTime,
+) -> Result<SweepOutcome> {
+    let roots = [
+        (home.join("scratch"), CandidateNamePolicy::FleetPrefixes),
+        (home.join(".needle"), CandidateNamePolicy::AnyName),
+    ];
+    let mut combined = SweepReport::default();
+    let mut completed_roots = 0;
+    let mut already_running = false;
+    let mut first_missing = None;
+    let mut first_error = None;
+
+    for (root, name_policy) in roots {
+        match sweep_scratch_root(
+            &root,
+            ttl_hours,
+            process_inspector,
+            checkout_auditor,
+            now,
+            name_policy,
+        ) {
+            Ok(SweepOutcome::Completed(report)) => {
+                completed_roots += 1;
+                combined.entries_examined += report.entries_examined;
+                combined.stale_candidates += report.stale_candidates;
+                combined.skipped_live += report.skipped_live;
+                combined.skipped_safety += report.skipped_safety;
+                combined.bytes_reclaimed = combined
+                    .bytes_reclaimed
+                    .saturating_add(report.bytes_reclaimed);
+                combined.removed.extend(report.removed);
+            }
+            Ok(SweepOutcome::ScratchDirectoryMissing { path }) => {
+                first_missing.get_or_insert(path);
+            }
+            Ok(SweepOutcome::AlreadyRunning) => {
+                already_running = true;
+                tracing::info!(root = %root.display(), "scratch sweep for root is already running");
+            }
+            Ok(SweepOutcome::Disabled) => {
+                unreachable!("root sweeps do not make independent enablement decisions")
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    if completed_roots > 0 {
+        return Ok(SweepOutcome::Completed(combined));
+    }
+    if already_running {
+        return Ok(SweepOutcome::AlreadyRunning);
+    }
+    if let Some(path) = first_missing {
+        return Ok(SweepOutcome::ScratchDirectoryMissing { path });
+    }
+
+    unreachable!("the home sweep always visits at least one root")
 }
 
 fn sweep_scratch_root(
@@ -107,6 +189,7 @@ fn sweep_scratch_root(
     process_inspector: &dyn ProcessInspector,
     checkout_auditor: &dyn CheckoutAuditor,
     now: SystemTime,
+    name_policy: CandidateNamePolicy,
 ) -> Result<SweepOutcome> {
     if ttl_hours == 0 {
         bail!("scratch sweep TTL must be at least one hour");
@@ -117,11 +200,9 @@ fn sweep_scratch_root(
         });
     }
 
-    // Follow the root symlink deliberately.  Fleet hosts keep $HOME/scratch on
-    // a larger data volume and expose it through that stable path.  Candidate
-    // entries are still qualified from the canonical root below, so allowing
-    // the root itself to be a symlink does not relax any per-entry deletion
-    // guard.
+    // Follow the root symlink deliberately. Fleet hosts may expose scratch on
+    // another volume through this stable path; candidate deletion remains
+    // constrained to direct children of the resolved root.
     let root_metadata = fs::metadata(scratch_root)
         .with_context(|| format!("failed to inspect {}", scratch_root.display()))?;
     if !root_metadata.file_type().is_dir() {
@@ -166,7 +247,8 @@ fn sweep_scratch_root(
             }
         };
 
-        let Some(candidate) = qualify_candidate(&canonical_root, &entry, ttl, now, &mut report)
+        let Some(candidate) =
+            qualify_candidate(&canonical_root, &entry, ttl, now, name_policy, &mut report)
         else {
             continue;
         };
@@ -202,10 +284,9 @@ fn sweep_scratch_root(
             }
         };
 
-        // Destructive gate: consume a fresh, explicit process-check result
-        // immediately before removal. Busy and indeterminate are both preserve.
-        let deletion_gate = process_inspector.inspect(&candidate);
-        match deletion_gate {
+        // Recheck immediately before deletion; busy and indeterminate both
+        // preserve the candidate.
+        match process_inspector.inspect(&candidate) {
             ProcessUse::Clear => {}
             ProcessUse::Busy { pid, reason } => {
                 report.skipped_live += 1;
@@ -289,15 +370,25 @@ fn qualify_candidate(
     entry: &fs::DirEntry,
     ttl: Duration,
     now: SystemTime,
+    name_policy: CandidateNamePolicy,
     report: &mut SweepReport,
 ) -> Option<PathBuf> {
     let name = entry.file_name();
     let name = name.to_str()?;
-    if !DISPOSABLE_PREFIXES
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
-    {
-        return None;
+    match name_policy {
+        CandidateNamePolicy::FleetPrefixes => {
+            if !DISPOSABLE_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+            {
+                return None;
+            }
+        }
+        CandidateNamePolicy::AnyName => {
+            if NEEDLE_HOME_RESERVED_ENTRIES.contains(&name) {
+                return None;
+            }
+        }
     }
 
     let metadata = match fs::symlink_metadata(entry.path()) {
@@ -718,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_only_old_allowlisted_independent_clone_markers() {
+    fn sweeps_home_roots_with_root_specific_name_filters() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         let now = SystemTime::now();
@@ -741,8 +832,17 @@ mod tests {
         fs::create_dir_all(&matching_non_repo).unwrap();
         make_old(&matching_non_repo, now);
 
-        let report =
-            completed(sweep_scratch_root(root, 48, &ClearProcesses, &SafeCheckout, now).unwrap());
+        let report = completed(
+            sweep_scratch_root(
+                root,
+                48,
+                &ClearProcesses,
+                &SafeCheckout,
+                now,
+                CandidateNamePolicy::FleetPrefixes,
+            )
+            .unwrap(),
+        );
 
         assert!(!removable.exists());
         assert!(young.exists());
@@ -754,6 +854,47 @@ mod tests {
         assert_eq!(report.removed.len(), 1);
         assert!(report.bytes_reclaimed > 0);
         assert_eq!(report.removed[0].bytes_reclaimed, report.bytes_reclaimed);
+
+        // The home startup sweep still applies the legacy prefix allowlist in
+        // scratch, but accepts varied clone names under NEEDLE's state root.
+        let home = TempDir::new().unwrap();
+        let scratch = home.path().join("scratch");
+        let needle_home = home.path().join(".needle");
+        fs::create_dir_all(&scratch).unwrap();
+        fs::create_dir_all(&needle_home).unwrap();
+        let now = SystemTime::now();
+
+        let scratch_clone = make_clone_marker(&scratch, "needle-verify.abc123");
+        make_old(&scratch_clone, now);
+        let unknown_scratch_clone = make_clone_marker(&scratch, "restore-rehearsal-scratch");
+        make_old(&unknown_scratch_clone, now);
+
+        let needle_clone = make_clone_marker(&needle_home, "restore-rehearsal-20261005");
+        make_old(&needle_clone, now);
+        let arbitrary_clone = make_clone_marker(&needle_home, "claudepr-session-42");
+        make_old(&arbitrary_clone, now);
+        let data_dump = needle_home.join("session-data-dump");
+        fs::create_dir_all(&data_dump).unwrap();
+        make_old(&data_dump, now);
+
+        let reserved_roots = ["snapshots", "state", "logs"].map(|name| {
+            let path = make_clone_marker(&needle_home, name);
+            make_old(&path, now);
+            path
+        });
+
+        let report = completed(
+            sweep_home_roots(home.path(), 48, &ClearProcesses, &SafeCheckout, now).unwrap(),
+        );
+
+        assert!(!scratch_clone.exists());
+        assert!(unknown_scratch_clone.exists());
+        assert!(!needle_clone.exists());
+        assert!(!arbitrary_clone.exists());
+        assert!(data_dump.exists());
+        assert!(reserved_roots.iter().all(|path| path.exists()));
+        assert_eq!(report.removed.len(), 3);
+        assert_eq!(report.stale_candidates, 3);
     }
 
     #[test]
@@ -764,8 +905,15 @@ mod tests {
         make_old(&candidate, now);
 
         let report = completed(
-            sweep_scratch_root(temp.path(), 48, &IndeterminateProcesses, &SafeCheckout, now)
-                .unwrap(),
+            sweep_scratch_root(
+                temp.path(),
+                48,
+                &IndeterminateProcesses,
+                &SafeCheckout,
+                now,
+                CandidateNamePolicy::FleetPrefixes,
+            )
+            .unwrap(),
         );
 
         assert!(candidate.exists());
@@ -783,8 +931,17 @@ mod tests {
             calls: Cell::new(0),
         };
 
-        let report =
-            completed(sweep_scratch_root(temp.path(), 48, &inspector, &SafeCheckout, now).unwrap());
+        let report = completed(
+            sweep_scratch_root(
+                temp.path(),
+                48,
+                &inspector,
+                &SafeCheckout,
+                now,
+                CandidateNamePolicy::FleetPrefixes,
+            )
+            .unwrap(),
+        );
 
         assert!(candidate.exists());
         assert_eq!(inspector.calls.get(), 2);
@@ -803,6 +960,7 @@ mod tests {
             &ClearProcesses,
             &SafeCheckout,
             SystemTime::now(),
+            CandidateNamePolicy::FleetPrefixes,
         )
         .unwrap();
 
@@ -821,6 +979,7 @@ mod tests {
             &ClearProcesses,
             &SafeCheckout,
             SystemTime::now(),
+            CandidateNamePolicy::FleetPrefixes,
         )
         .unwrap_err();
 
@@ -842,8 +1001,17 @@ mod tests {
         let candidate = make_clone_marker(target.path(), "needle-symlink-root.abc123");
         make_old(&candidate, now);
 
-        let report =
-            completed(sweep_scratch_root(&link, 48, &ClearProcesses, &SafeCheckout, now).unwrap());
+        let report = completed(
+            sweep_scratch_root(
+                &link,
+                48,
+                &ClearProcesses,
+                &SafeCheckout,
+                now,
+                CandidateNamePolicy::FleetPrefixes,
+            )
+            .unwrap(),
+        );
 
         assert!(!candidate.exists());
         assert_eq!(report.removed.len(), 1);
@@ -862,9 +1030,15 @@ mod tests {
         let link = link_parent.path().join("scratch");
         symlink(&target, &link).unwrap();
 
-        let error =
-            sweep_scratch_root(&link, 48, &ClearProcesses, &SafeCheckout, SystemTime::now())
-                .unwrap_err();
+        let error = sweep_scratch_root(
+            &link,
+            48,
+            &ClearProcesses,
+            &SafeCheckout,
+            SystemTime::now(),
+            CandidateNamePolicy::FleetPrefixes,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("not a directory"));
         assert_eq!(fs::read(&target).unwrap(), b"preserve\n");
