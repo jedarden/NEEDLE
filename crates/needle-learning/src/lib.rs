@@ -16,8 +16,9 @@ pub mod source;
 
 pub use adapters::{LegacyAttemptEvent, LegacyObservation, LegacyOutcome};
 pub use execution_checkpoint::{
-    validate_checkpoint, CheckpointEvidence, CheckpointValidationError, ExecutionCheckpoint,
-    RecoveryAttribution,
+    validate_checkpoint, CheckpointEvidence, CheckpointOwnership, CheckpointValidationError,
+    ExecutionCheckpoint, RecoveryAttribution, RecoveryDecision,
+    CURRENT_EXECUTION_CHECKPOINT_VERSION,
 };
 pub use factory_types::{
     Attempt, AttemptId, BeadId, ConfirmedState, ContentHash, ContextManifest, Digest, Evaluation,

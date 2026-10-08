@@ -88,6 +88,11 @@ impl<'a> ExecutionCheckpointStore<'a> {
         if !mismatches.is_empty() {
             bail!("stale checkpoint ownership: {}", mismatches.join(", "));
         }
+        if let Some(ownership) = &record.ownership {
+            if ownership.actor != held.actor || ownership.revision != held.revision {
+                bail!("checkpoint ownership does not match the held claim identity");
+            }
+        }
         if live.claim_epoch != Some(record.claim_epoch.0) {
             bail!("stale checkpoint claim epoch");
         }
@@ -245,8 +250,9 @@ mod tests {
     use crate::sanitize::CustomPattern;
     use crate::types::BeadStatus;
     use needle_learning::{
-        AttemptId, CheckpointEvidence, ContentHash, EvidenceId, EvidenceRef, FencingEpoch,
-        RecoveryAttribution, SourceId, Timestamp, CURRENT_SCHEMA_VERSION,
+        AttemptId, CheckpointEvidence, CheckpointOwnership, ContentHash, EvidenceId, EvidenceRef,
+        FencingEpoch, RecoveryAttribution, RecoveryDecision, SourceId, Timestamp,
+        CURRENT_SCHEMA_VERSION,
     };
 
     fn sanitizer() -> Sanitizer {
@@ -265,11 +271,13 @@ mod tests {
             bead_id: needle_learning::BeadId::new("needle-test").unwrap(),
             attempt_id: AttemptId::new("attempt-1").unwrap(),
             claim_epoch: FencingEpoch(4),
+            ownership: None,
             timestamp: Timestamp::new("2026-10-07T12:00:00Z").unwrap(),
             intended_result: "Gate passes".into(),
             observable_result: "Gate failed on case 2".into(),
             rationale: Some("One assertion needs repair".into()),
             next_intervention: "Change the assertion".into(),
+            recovery_decision: None,
             evidence_refs: vec![CheckpointEvidence::UncommittedRecovery {
                 reference: EvidenceRef {
                     evidence_id: EvidenceId::new("diff-1").unwrap(),
@@ -366,6 +374,35 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("malformed checkpoint"));
+    }
+
+    #[test]
+    fn append_rejects_recovery_checkpoint_with_different_recorded_owner() {
+        let workspace = tempfile::tempdir().unwrap();
+        let bead_id = BeadId::from("needle-test");
+        let checkpoints =
+            ExecutionCheckpointStore::new(workspace.path(), &bead_id, "attempt-1").unwrap();
+        let mut value = record();
+        value.schema_version = needle_learning::CURRENT_EXECUTION_CHECKPOINT_VERSION;
+        value.recovery_decision = Some(RecoveryDecision::Retry);
+        value.ownership = Some(CheckpointOwnership {
+            actor: "worker-elsewhere".into(),
+            revision: Some(12),
+        });
+        value.evidence_refs = vec![CheckpointEvidence::RecoveryDecision {
+            reference: EvidenceRef {
+                evidence_id: EvidenceId::new("recovery-decision").unwrap(),
+                digest: ContentHash::new("sha256:decision").unwrap(),
+                source: SourceId::new("attempt-resolved-attempt-1").unwrap(),
+            },
+        }];
+        let (held, live) = claim(4);
+        assert!(checkpoints
+            .append_with_status(&value, &held, &live, &sanitizer())
+            .unwrap_err()
+            .to_string()
+            .contains("does not match the held claim identity"));
+        assert!(!checkpoints.attempt_dir().exists());
     }
 
     #[test]

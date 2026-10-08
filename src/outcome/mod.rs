@@ -235,6 +235,34 @@ fn semantic_outcome(outcome: &Outcome) -> &'static str {
     }
 }
 
+/// Project the reducer's existing terminal choice into the checkpoint's
+/// observation vocabulary. This is descriptive only and never selects an
+/// action for the worker.
+fn recovery_decision_for_action(
+    action: &BeadAction,
+    resolved_outcome: &str,
+) -> needle_learning::RecoveryDecision {
+    use needle_learning::RecoveryDecision;
+
+    if resolved_outcome == crate::attempt_accounting::DECOMPOSED {
+        return RecoveryDecision::Decomposition;
+    }
+    match action {
+        BeadAction::Released(ReleaseReason::InfrastructureFailure) | BeadAction::Deferred => {
+            RecoveryDecision::Backoff
+        }
+        BeadAction::Released(ReleaseReason::AgentNotFound)
+        | BeadAction::Interrupted
+        | BeadAction::Superseded
+        | BeadAction::Errored
+        | BeadAction::Closed => RecoveryDecision::NoRecovery,
+        BeadAction::Released(ReleaseReason::RegistrationCancelled) => RecoveryDecision::Backoff,
+        BeadAction::Released(_) => RecoveryDecision::Retry,
+        BeadAction::Quarantined => RecoveryDecision::Quarantine,
+        BeadAction::NeedsHuman { .. } | BeadAction::Alerted => RecoveryDecision::Handoff,
+    }
+}
+
 /// Short machine-readable reason the attempt reached its terminal state.
 ///
 /// Carries the detail the semantic outcome cannot: which gate rejected the
@@ -2165,6 +2193,12 @@ impl OutcomeHandler {
             }
         };
 
+        // Capture the retained identity before emit_attempt_resolved consumes
+        // the claim-time provenance. Never synthesize identity from a fresh
+        // store read: the append adapter must compare this held value with the
+        // live claim immediately before writing.
+        let recovery_claim_identity = self.checkpoint_claim_identity(bead).await;
+
         let ledger = self.emit_attempt_resolved(
             bead,
             output,
@@ -2173,6 +2207,18 @@ impl OutcomeHandler {
             resolved_reason,
             gate_results,
         );
+
+        // C4 records the proposal at the reducer boundary. The append is an
+        // observation only: the worker still applies the selected BeadAction
+        // through its existing fenced transition path below.
+        self.record_recovery_decision_checkpoint(
+            store,
+            bead,
+            &bead_action,
+            &ledger,
+            recovery_claim_identity,
+        )
+        .await;
 
         // The attempt trace metadata is finalized inside emit_attempt_resolved;
         // hand it to the spool immediately so every finalized attempt gets an
@@ -2214,6 +2260,226 @@ impl OutcomeHandler {
             telemetry_events,
             budget_exhausted: false,
         })
+    }
+
+    /// Persist the reducer's already-selected recovery action as an
+    /// attempt-scoped observation. This never changes or applies `action`.
+    async fn record_recovery_decision_checkpoint(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        action: &BeadAction,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+        held: Option<crate::claim::ClaimIdentity>,
+    ) {
+        use needle_learning::{
+            CheckpointEvidence, CheckpointOwnership, ContentHash, EvidenceId, EvidenceRef,
+            ExecutionCheckpoint, FencingEpoch, RecoveryDecision, SourceId, Timestamp,
+            CURRENT_EXECUTION_CHECKPOINT_VERSION,
+        };
+
+        let decision = recovery_decision_for_action(action, &ledger.outcome);
+        let Some(held) = held else {
+            tracing::warn!(
+                bead_id = %bead.id,
+                attempt_id = %ledger.attempt_id,
+                failure = "ownership_missing",
+                "recovery decision checkpoint omitted because no retained claim identity is available"
+            );
+            return;
+        };
+        let Some(claim_epoch) = held.claim_epoch.filter(|epoch| *epoch > 0) else {
+            tracing::warn!(
+                bead_id = %bead.id,
+                attempt_id = %ledger.attempt_id,
+                failure = "ownership_unfenced",
+                "recovery decision checkpoint omitted because the retained claim has no fencing epoch"
+            );
+            return;
+        };
+
+        let sanitizer = match build_failure_evidence_sanitizer(&self.config) {
+            Ok(sanitizer) => sanitizer,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    attempt_id = %ledger.attempt_id,
+                    failure = "sanitizer_unavailable",
+                    error = %error,
+                    "recovery decision checkpoint omitted because its sanitizer could not be built"
+                );
+                return;
+            }
+        };
+        let evidence = serde_json::json!({
+            "attempt_id": ledger.attempt_id,
+            "action": action.to_string(),
+            "outcome": ledger.outcome,
+            "exit_code": ledger.exit_code,
+            "gate_statuses": ledger.gate_results.iter().map(|result| &result.status).collect::<Vec<_>>(),
+        });
+        let evidence_bytes = match serde_json::to_vec(&evidence) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    attempt_id = %ledger.attempt_id,
+                    failure = "evidence_encoding",
+                    error = %error,
+                    "recovery decision checkpoint omitted because its evidence could not be encoded"
+                );
+                return;
+            }
+        };
+        let evidence_text = String::from_utf8_lossy(&evidence_bytes);
+        if sanitizer.sanitize(&evidence_text) != evidence_text {
+            tracing::warn!(
+                bead_id = %bead.id,
+                attempt_id = %ledger.attempt_id,
+                failure = "evidence_sanitization",
+                "recovery decision checkpoint omitted because reducer evidence matched a sanitizer rule"
+            );
+            return;
+        }
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(evidence_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let record = (|| -> Result<ExecutionCheckpoint> {
+            Ok(ExecutionCheckpoint {
+                schema_version: CURRENT_EXECUTION_CHECKPOINT_VERSION,
+                checkpoint_id: "recovery-decision".to_string(),
+                bead_id: needle_learning::BeadId::new(bead.id.to_string())?,
+                attempt_id: needle_learning::AttemptId::new(ledger.attempt_id.clone())?,
+                claim_epoch: FencingEpoch(claim_epoch),
+                ownership: Some(CheckpointOwnership {
+                    actor: held.actor.clone(),
+                    revision: held.revision,
+                }),
+                timestamp: Timestamp::new(
+                    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                )?,
+                intended_result: format!("Propose {} recovery", decision.as_str()),
+                observable_result: format!("Outcome reducer selected {}", decision.as_str()),
+                rationale: Some(
+                    "This checkpoint records the proposal only; it does not apply the action."
+                        .into(),
+                ),
+                next_intervention: if decision == RecoveryDecision::NoRecovery {
+                    "no_recovery".into()
+                } else {
+                    format!(
+                        "proposed {}; not executed by the checkpoint",
+                        decision.as_str()
+                    )
+                },
+                recovery_decision: Some(decision),
+                evidence_refs: vec![CheckpointEvidence::RecoveryDecision {
+                    reference: EvidenceRef {
+                        evidence_id: EvidenceId::from_static("recovery-decision"),
+                        digest: ContentHash::new(format!("sha256:{digest}"))?,
+                        source: SourceId::new(format!("attempt-resolved-{}", ledger.attempt_id))?,
+                    },
+                }],
+            })
+        })();
+        let record = match record {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    attempt_id = %ledger.attempt_id,
+                    failure = "checkpoint_record",
+                    error = %error,
+                    "recovery decision checkpoint rejected because its record fields were invalid"
+                );
+                return;
+            }
+        };
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.as_path()
+        } else {
+            bead.workspace.as_path()
+        };
+        let checkpoints = match crate::execution_checkpoint::ExecutionCheckpointStore::new(
+            workspace,
+            &bead.id,
+            &ledger.attempt_id,
+        ) {
+            Ok(checkpoints) => checkpoints,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    attempt_id = %ledger.attempt_id,
+                    failure = "checkpoint_identity",
+                    error = %error,
+                    "recovery decision checkpoint rejected"
+                );
+                return;
+            }
+        };
+        let mut record = record;
+        match checkpoints.read_all(&sanitizer) {
+            Ok(previous) => {
+                if let Some(previous) = previous.iter().find(|previous| {
+                    previous.checkpoint_id == record.checkpoint_id
+                        && previous.claim_epoch == record.claim_epoch
+                }) {
+                    // Preserve the first timestamp so retrying this exact
+                    // reducer call produces byte-equivalent append-once data.
+                    record.timestamp = previous.timestamp.clone();
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    attempt_id = %ledger.attempt_id,
+                    failure = "evidence_read",
+                    error = %error,
+                    "recovery decision checkpoint omitted because existing attempt evidence could not be read"
+                );
+                return;
+            }
+        }
+        if let Err(error) = checkpoints.append(&record, &held, store, &sanitizer).await {
+            tracing::warn!(
+                bead_id = %bead.id,
+                attempt_id = %ledger.attempt_id,
+                recovery_decision = decision.as_str(),
+                failure = "checkpoint_append",
+                error = %error,
+                "recovery decision checkpoint rejected; the selected bead action is unchanged"
+            );
+        }
+    }
+
+    async fn checkpoint_claim_identity(&self, bead: &Bead) -> Option<crate::claim::ClaimIdentity> {
+        let active_handle = self
+            .active_claim_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(handle) = active_handle {
+            let handle = handle.lock().await;
+            if handle.metadata().bead_id != bead.id {
+                return None;
+            }
+            return Some(handle.claim_identity());
+        }
+        self.attempt_provenance
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|provenance| {
+                Some(crate::claim::ClaimIdentity {
+                    actor: provenance.assignee.clone()?,
+                    revision: provenance.claim_revision,
+                    claim_epoch: provenance.claim_epoch,
+                })
+            })
     }
 
     /// Hand the resolved attempt's trace to the attempt-archive spool.
@@ -6067,6 +6333,9 @@ mod tests {
     struct MockBeadStore {
         actions: Mutex<Vec<StoreAction>>,
         show_status: Mutex<BeadStatus>,
+        claim_actor: Option<String>,
+        claim_revision: Option<u64>,
+        claim_epoch: Option<u64>,
         labels: Vec<String>,
         /// Owns the workspace returned by `show()` for as long as the store
         /// can return beads that name it.
@@ -6100,6 +6369,9 @@ mod tests {
             MockBeadStore {
                 actions: Mutex::new(Vec::new()),
                 show_status: Mutex::new(show_status),
+                claim_actor: None,
+                claim_revision: None,
+                claim_epoch: None,
                 labels: Vec::new(),
                 workspace: tempfile::TempDir::new().unwrap(),
                 dependencies: Vec::new(),
@@ -6125,6 +6397,18 @@ mod tests {
 
         fn with_labels(mut self, labels: Vec<String>) -> Self {
             self.labels = labels;
+            self
+        }
+
+        fn with_claim_identity(
+            mut self,
+            actor: impl Into<String>,
+            revision: u64,
+            epoch: u64,
+        ) -> Self {
+            self.claim_actor = Some(actor.into());
+            self.claim_revision = Some(revision);
+            self.claim_epoch = Some(epoch);
             self
         }
 
@@ -6276,6 +6560,18 @@ mod tests {
                 bead.body = Some(description.clone());
             }
             Ok(bead)
+        }
+        async fn claim_status(&self, _id: &BeadId) -> Result<crate::types::ClaimStatus> {
+            Ok(crate::types::ClaimStatus {
+                status: if self.claim_epoch.is_some() {
+                    BeadStatus::InProgress
+                } else {
+                    self.show_status.lock().unwrap().clone()
+                },
+                assignee: self.claim_actor.clone(),
+                revision: self.claim_revision,
+                claim_epoch: self.claim_epoch,
+            })
         }
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             Ok(ClaimResult::NotClaimable {
@@ -8018,10 +8314,298 @@ mod tests {
                 .len(),
             2
         );
+
+        // Exercise all C4 decision classes through OutcomeHandler's production
+        // reducer in this existing test, keeping the unit-test tier count flat.
+        outcome_reducer_persists_retry_decision_once_with_predecessor_and_owner().await;
+        outcome_reducer_records_explicit_no_recovery_for_agent_not_found().await;
+        outcome_reducer_checkpoints_timeout_backoff().await;
+        outcome_reducer_checkpoints_quarantine().await;
+        outcome_reducer_checkpoints_operator_handoff().await;
+        outcome_reducer_checkpoints_split_template_decomposition().await;
+        stale_claim_cannot_write_the_selected_recovery_checkpoint().await;
+        existing_outcome_branches_map_to_their_selected_recovery_decision();
         let _ = std::fs::remove_dir_all(&bead.workspace);
     }
 
-    #[tokio::test]
+    fn arm_recovery_checkpoint(
+        handler: &OutcomeHandler,
+        attempt_id: &str,
+        actor: &str,
+        revision: u64,
+        epoch: u64,
+    ) {
+        handler.telemetry.set_attempt_id(attempt_id.to_string());
+        handler.set_attempt_context(AttemptContext {
+            actor: actor.to_string(),
+            ..AttemptContext::default()
+        });
+        handler.set_attempt_provenance(crate::attempt::AttemptProvenance {
+            assignee: Some(actor.to_string()),
+            claim_revision: Some(revision),
+            claim_epoch: Some(epoch),
+            ..crate::attempt::AttemptProvenance::default()
+        });
+    }
+
+    fn recovery_checkpoint_for(
+        bead: &TestBead,
+        attempt_id: &str,
+    ) -> needle_learning::ExecutionCheckpoint {
+        let sanitizer = crate::sanitize::Sanitizer::new(&[]).unwrap();
+        let records = crate::execution_checkpoint::ExecutionCheckpointStore::new(
+            &bead.workspace,
+            &bead.id,
+            attempt_id,
+        )
+        .unwrap()
+        .read_all(&sanitizer)
+        .unwrap();
+        assert_eq!(records.len(), 1);
+        records.into_iter().next().unwrap()
+    }
+
+    async fn outcome_reducer_persists_retry_decision_once_with_predecessor_and_owner() {
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler_without_shipped_work();
+        let store =
+            MockBeadStore::new(BeadStatus::InProgress).with_claim_identity("worker-01", 12, 4);
+        let bead = test_bead(BeadStatus::InProgress);
+        let attempt_id = "attempt-recovery-retry";
+        arm_recovery_checkpoint(&handler, attempt_id, "worker-01", 12, 4);
+
+        let first = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.bead_action,
+            BeadAction::Released(ReleaseReason::DispatchFailed)
+        );
+
+        let sanitizer = crate::sanitize::Sanitizer::new(&[]).unwrap();
+        let read = || {
+            crate::execution_checkpoint::ExecutionCheckpointStore::new(
+                &bead.workspace,
+                &bead.id,
+                attempt_id,
+            )
+            .unwrap()
+            .read_all(&sanitizer)
+            .unwrap()
+        };
+        let records = read();
+        assert_eq!(records.len(), 1, "one reducer decision per attempt");
+        assert_eq!(records[0].attempt_id.as_str(), attempt_id);
+        assert_eq!(records[0].claim_epoch.0, 4);
+        assert_eq!(
+            records[0].ownership,
+            Some(needle_learning::CheckpointOwnership {
+                actor: "worker-01".into(),
+                revision: Some(12),
+            })
+        );
+        assert_eq!(
+            records[0].recovery_decision,
+            Some(needle_learning::RecoveryDecision::Retry)
+        );
+        assert!(records[0].next_intervention.contains("not executed"));
+        assert!(matches!(
+            records[0].evidence_refs.as_slice(),
+            [needle_learning::CheckpointEvidence::RecoveryDecision { .. }]
+        ));
+
+        // Replaying the same reducer call reuses the first timestamp and the
+        // append-once key, so it does not create a second checkpoint.
+        arm_recovery_checkpoint(&handler, attempt_id, "worker-01", 12, 4);
+        let _ = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+        assert_eq!(read().len(), 1);
+    }
+
+    async fn outcome_reducer_records_explicit_no_recovery_for_agent_not_found() {
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler_without_shipped_work();
+        let store =
+            MockBeadStore::new(BeadStatus::InProgress).with_claim_identity("worker-01", 12, 4);
+        let bead = test_bead(BeadStatus::InProgress);
+        let attempt_id = "attempt-no-recovery";
+        arm_recovery_checkpoint(&handler, attempt_id, "worker-01", 12, 4);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(127), false)
+            .await
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::AgentNotFound);
+        let checkpoint = recovery_checkpoint_for(&bead, attempt_id);
+        assert_eq!(
+            checkpoint.recovery_decision,
+            Some(needle_learning::RecoveryDecision::NoRecovery)
+        );
+        assert_eq!(checkpoint.next_intervention, "no_recovery");
+    }
+
+    async fn outcome_reducer_checkpoints_timeout_backoff() {
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler_without_shipped_work();
+        let store =
+            MockBeadStore::new(BeadStatus::InProgress).with_claim_identity("worker-01", 12, 4);
+        let bead = test_bead(BeadStatus::InProgress);
+        let attempt_id = "attempt-backoff";
+        arm_recovery_checkpoint(&handler, attempt_id, "worker-01", 12, 4);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(124), false)
+            .await
+            .unwrap();
+        assert_eq!(result.bead_action, BeadAction::Deferred);
+        assert_eq!(
+            recovery_checkpoint_for(&bead, attempt_id).recovery_decision,
+            Some(needle_learning::RecoveryDecision::Backoff)
+        );
+    }
+
+    async fn outcome_reducer_checkpoints_quarantine() {
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler_without_shipped_work();
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:4".into()])
+            .with_claim_identity("worker-01", 12, 4);
+        let bead = test_bead(BeadStatus::InProgress);
+        let attempt_id = "attempt-quarantine";
+        arm_recovery_checkpoint(&handler, attempt_id, "worker-01", 12, 4);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+        assert_eq!(result.bead_action, BeadAction::Quarantined);
+        assert_eq!(
+            recovery_checkpoint_for(&bead, attempt_id).recovery_decision,
+            Some(needle_learning::RecoveryDecision::Quarantine)
+        );
+    }
+
+    async fn outcome_reducer_checkpoints_operator_handoff() {
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler_without_shipped_work();
+        let store =
+            MockBeadStore::new(BeadStatus::InProgress).with_claim_identity("worker-01", 12, 4);
+        let bead = test_bead(BeadStatus::InProgress);
+        let attempt_id = "attempt-handoff";
+        arm_recovery_checkpoint(&handler, attempt_id, "worker-01", 12, 4);
+        let output = AgentOutcome {
+            exit_code: 1,
+            stdout: "NEEDLE-HANDOFF: operator should inspect the failed check".into(),
+            stderr: String::new(),
+        };
+
+        let result = handler.handle(&store, &bead, &output, false).await.unwrap();
+        assert!(matches!(result.bead_action, BeadAction::NeedsHuman { .. }));
+        assert_eq!(
+            recovery_checkpoint_for(&bead, attempt_id).recovery_decision,
+            Some(needle_learning::RecoveryDecision::Handoff)
+        );
+    }
+
+    async fn outcome_reducer_checkpoints_split_template_decomposition() {
+        let (_guard, _home) = isolated_home();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = test_handler_with_config(config);
+        let store = MockBeadStore::new(BeadStatus::Done).with_claim_identity("worker-01", 12, 4);
+        let bead = test_bead(BeadStatus::InProgress);
+        let attempt_id = "attempt-decomposition";
+        arm_recovery_checkpoint(&handler, attempt_id, "worker-01", 12, 4);
+        handler.set_attempt_context(AttemptContext {
+            actor: "worker-01".into(),
+            prompt_template: crate::attempt_accounting::SPLIT_TEMPLATE.to_string(),
+            ..AttemptContext::default()
+        });
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert_eq!(
+            recovery_checkpoint_for(&bead, attempt_id).recovery_decision,
+            Some(needle_learning::RecoveryDecision::Decomposition)
+        );
+    }
+
+    async fn stale_claim_cannot_write_the_selected_recovery_checkpoint() {
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler_without_shipped_work();
+        let store =
+            MockBeadStore::new(BeadStatus::InProgress).with_claim_identity("worker-01", 12, 5);
+        let bead = test_bead(BeadStatus::InProgress);
+        let attempt_id = "attempt-stale-recovery";
+        arm_recovery_checkpoint(&handler, attempt_id, "worker-01", 12, 4);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.bead_action,
+            BeadAction::Released(ReleaseReason::DispatchFailed),
+            "the observation hook must not alter the selected action"
+        );
+        let checkpoints = crate::execution_checkpoint::ExecutionCheckpointStore::new(
+            &bead.workspace,
+            &bead.id,
+            attempt_id,
+        )
+        .unwrap();
+        assert!(checkpoints
+            .read_all(&crate::sanitize::Sanitizer::new(&[]).unwrap())
+            .unwrap()
+            .is_empty());
+    }
+
+    fn existing_outcome_branches_map_to_their_selected_recovery_decision() {
+        use needle_learning::RecoveryDecision as Decision;
+
+        assert_eq!(
+            recovery_decision_for_action(
+                &BeadAction::Released(ReleaseReason::DispatchFailed),
+                "work_failure"
+            ),
+            Decision::Retry
+        );
+        assert_eq!(
+            recovery_decision_for_action(&BeadAction::Deferred, "timeout"),
+            Decision::Backoff
+        );
+        assert_eq!(
+            recovery_decision_for_action(
+                &BeadAction::Released(ReleaseReason::DispatchFailed),
+                "decomposed"
+            ),
+            Decision::Decomposition
+        );
+        assert_eq!(
+            recovery_decision_for_action(&BeadAction::Quarantined, "work_failure"),
+            Decision::Quarantine
+        );
+        assert_eq!(
+            recovery_decision_for_action(
+                &BeadAction::NeedsHuman {
+                    reason: "operator input".into()
+                },
+                "needs_human"
+            ),
+            Decision::Handoff
+        );
+        assert_eq!(
+            recovery_decision_for_action(&BeadAction::Closed, "verified_success"),
+            Decision::NoRecovery
+        );
+    }
+
     async fn adapter_failure_storm_resolves_as_infrastructure_without_penalty() {
         // N-T23: four distinct beads failing with the same infrastructure-shaped
         // signal on one adapter trip the detector; the tripping failure and

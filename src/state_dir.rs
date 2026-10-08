@@ -169,7 +169,7 @@ pub fn logs_dir_for(_configured: Option<&Path>, fallback_root: &Path) -> PathBuf
     {
         // Unit tests may call this helper with an explicitly owned fixture
         // root while another test has published a process-global config.
-        return fallback_root.join("logs");
+        fallback_root.join("logs")
     }
 
     #[cfg(not(test))]

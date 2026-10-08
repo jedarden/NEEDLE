@@ -29,6 +29,26 @@ layout, bundle inclusion, upload, and
 retention remain owned by the existing trace/archive work. This API does not
 activate any lifecycle producer or change the resolution gate.
 
+## Reducer recovery decisions (C4)
+
+Recovery-decision checkpoints use execution-checkpoint schema version 2; the
+reader continues to accept existing version 1 observations. The outcome
+handler writes one `recovery-decision` checkpoint after it has selected its
+terminal action and before backend resolution. `recovery_decision` is one of
+`retry`, `backoff`, `decomposition`, `quarantine`, `handoff`, or the explicit
+`no_recovery`. The checkpoint's `attempt_id` identifies the predecessor
+attempt that produced that decision. `ownership` records the retained actor
+and revision, while `claim_epoch` completes the claim identity.
+Recovery-decision evidence references the attempt's resolved outcome and its
+digest; it is kept distinct from both uncommitted recovery material and
+verified artifacts.
+
+The fields describe the reducer's proposal only. The checkpoint writer does not
+apply the action; the existing worker transition remains responsible for its
+fenced effect. Replays reuse the first timestamp and append the same immutable
+payload. Sanitization, missing identity, evidence-read, and stale-claim failures
+are reported and do not change the already-selected action.
+
 The claim read and local file publication are separate operations. The final
 attempt resolution still needs its fenced backend operation; local checkpoint
 persistence alone grants no ownership or verified outcome.

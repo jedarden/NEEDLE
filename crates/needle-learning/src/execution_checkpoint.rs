@@ -9,13 +9,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::factory_types::{
     AttemptId, BeadId, ContentHash, EvidenceRef, FencingEpoch, SchemaVersion, Timestamp,
-    CURRENT_SCHEMA_VERSION,
 };
 
 /// Maximum encoded checkpoint size, including all evidence references.
 pub const MAX_CHECKPOINT_BYTES: usize = 8 * 1024;
 /// Maximum number of evidence references attached to one observation.
 pub const MAX_CHECKPOINT_EVIDENCE: usize = 16;
+/// Current schema version for execution-checkpoint records. Version 1
+/// observations remain readable; reducer decisions use version 2 fields.
+pub const CURRENT_EXECUTION_CHECKPOINT_VERSION: SchemaVersion = 2;
 
 /// Attribution of recovery material captured before a verified artifact exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,11 +29,15 @@ pub enum RecoveryAttribution {
     Ambiguous,
 }
 
-/// The two evidence classes must not be confused by later recovery consumers.
+/// Evidence classes must not be confused by later recovery consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 pub enum CheckpointEvidence {
+    /// A reducer's proposed recovery action and the attempt-resolution record
+    /// that justified it. This records a decision only; it does not attest an
+    /// intervention or effect.
+    RecoveryDecision { reference: EvidenceRef },
     /// Uncommitted material; even owned material is not a verified artifact.
     UncommittedRecovery {
         reference: EvidenceRef,
@@ -44,6 +50,45 @@ pub enum CheckpointEvidence {
     },
 }
 
+/// Owner fields retained with a recovery-decision checkpoint. The epoch is
+/// stored in [`ExecutionCheckpoint::claim_epoch`] so the full identity remains
+/// `(actor, revision, claim_epoch)` without duplicating the fencing token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointOwnership {
+    pub actor: String,
+    pub revision: Option<u64>,
+}
+
+/// Recovery action selected by the existing outcome reducer.
+///
+/// These values describe proposals. They do not claim the action was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryDecision {
+    Retry,
+    Backoff,
+    Decomposition,
+    Quarantine,
+    Handoff,
+    /// The reducer selected no recovery action for this attempt.
+    NoRecovery,
+}
+
+impl RecoveryDecision {
+    /// Stable wire spelling for concise checkpoint summaries.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Backoff => "backoff",
+            Self::Decomposition => "decomposition",
+            Self::Quarantine => "quarantine",
+            Self::Handoff => "handoff",
+            Self::NoRecovery => "no_recovery",
+        }
+    }
+}
+
 /// One immutable, concise observation at a meaningful execution boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,12 +98,20 @@ pub struct ExecutionCheckpoint {
     pub bead_id: BeadId,
     pub attempt_id: AttemptId,
     pub claim_epoch: FencingEpoch,
+    /// Present on reducer-decision records; absent on earlier checkpoint
+    /// kinds that predate ownership identity capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<CheckpointOwnership>,
     pub timestamp: Timestamp,
     pub intended_result: String,
     pub observable_result: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
     pub next_intervention: String,
+    /// The outcome reducer's selected proposal, if this is a recovery
+    /// decision checkpoint. `NoRecovery` is an explicit recorded result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_decision: Option<RecoveryDecision>,
     #[serde(default)]
     pub evidence_refs: Vec<CheckpointEvidence>,
 }
@@ -98,11 +151,22 @@ pub fn validate_checkpoint(
 ) -> Result<(), CheckpointValidationError> {
     use CheckpointValidationError as Error;
 
-    if value.schema_version != CURRENT_SCHEMA_VERSION {
+    if !matches!(
+        value.schema_version,
+        1 | CURRENT_EXECUTION_CHECKPOINT_VERSION
+    ) {
         return Err(Error::UnsupportedVersion(value.schema_version));
     }
     if value.claim_epoch.0 == 0 {
         return Err(Error::InvalidField("claim_epoch"));
+    }
+    if value.recovery_decision.is_some() && value.ownership.is_none() {
+        return Err(Error::InvalidField("ownership"));
+    }
+    if value.recovery_decision.is_some()
+        && value.schema_version != CURRENT_EXECUTION_CHECKPOINT_VERSION
+    {
+        return Err(Error::InvalidField("schema_version"));
     }
     let mut check = |name: &'static str, text: &str, limit: usize, id: bool| {
         if text.is_empty()
@@ -136,12 +200,31 @@ pub fn validate_checkpoint(
         check("rationale", rationale, 512, false)?;
     }
     check("next_intervention", &value.next_intervention, 512, false)?;
+    if let Some(ownership) = &value.ownership {
+        check("owner_actor", &ownership.actor, 128, true)?;
+    }
     if value.evidence_refs.len() > MAX_CHECKPOINT_EVIDENCE {
         return Err(Error::Oversized("evidence_refs"));
     }
+    if value.recovery_decision.is_some()
+        && value
+            .evidence_refs
+            .iter()
+            .filter(|evidence| matches!(evidence, CheckpointEvidence::RecoveryDecision { .. }))
+            .count()
+            != 1
+    {
+        return Err(Error::InvalidField("recovery_decision_evidence"));
+    }
     for evidence in &value.evidence_refs {
+        if matches!(evidence, CheckpointEvidence::RecoveryDecision { .. })
+            != value.recovery_decision.is_some()
+        {
+            return Err(Error::InvalidField("recovery_decision_evidence"));
+        }
         let reference = match evidence {
-            CheckpointEvidence::UncommittedRecovery { reference, .. }
+            CheckpointEvidence::RecoveryDecision { reference }
+            | CheckpointEvidence::UncommittedRecovery { reference, .. }
             | CheckpointEvidence::VerifiedArtifact { reference, .. } => reference,
         };
         check("evidence_id", reference.evidence_id.as_str(), 128, true)?;
@@ -229,7 +312,7 @@ fn is_rfc3339(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factory_types::{EvidenceId, SourceId};
+    use crate::factory_types::{EvidenceId, SourceId, CURRENT_SCHEMA_VERSION};
 
     fn record() -> ExecutionCheckpoint {
         ExecutionCheckpoint {
@@ -239,10 +322,12 @@ mod tests {
             attempt_id: AttemptId::new("attempt-123").unwrap(),
             claim_epoch: FencingEpoch(7),
             timestamp: Timestamp::new("2026-10-07T12:00:00Z").unwrap(),
+            ownership: None,
             intended_result: "The focused test passes".into(),
             observable_result: "Test exited zero".into(),
             rationale: Some("The behavior is ready for review".into()),
             next_intervention: "Run the broader gate".into(),
+            recovery_decision: None,
             evidence_refs: vec![
                 CheckpointEvidence::UncommittedRecovery {
                     reference: EvidenceRef {
@@ -262,6 +347,33 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn validate_recovery_decision_owner_and_proposal_evidence() {
+        let mut value = record();
+        value.schema_version = CURRENT_EXECUTION_CHECKPOINT_VERSION;
+        value.recovery_decision = Some(RecoveryDecision::Retry);
+        assert_eq!(
+            validate_checkpoint(&value, |_| false),
+            Err(CheckpointValidationError::InvalidField("ownership"))
+        );
+
+        value.ownership = Some(CheckpointOwnership {
+            actor: "worker-1".into(),
+            revision: Some(12),
+        });
+        value.evidence_refs = vec![CheckpointEvidence::RecoveryDecision {
+            reference: EvidenceRef {
+                evidence_id: EvidenceId::new("recovery-attempt-123").unwrap(),
+                digest: ContentHash::new("sha256:decision").unwrap(),
+                source: SourceId::new("attempt-resolved-attempt-123").unwrap(),
+            },
+        }];
+        validate_checkpoint(&value, |_| false).unwrap();
+        let encoded = serde_json::to_vec(&value).unwrap();
+        let decoded: ExecutionCheckpoint = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, value);
+        assert_eq!(decoded.recovery_decision, Some(RecoveryDecision::Retry));
     }
 
     #[test]
@@ -285,6 +397,7 @@ mod tests {
             decoded.evidence_refs[1],
             CheckpointEvidence::VerifiedArtifact { .. }
         ));
+        validate_recovery_decision_owner_and_proposal_evidence();
     }
 
     #[test]
