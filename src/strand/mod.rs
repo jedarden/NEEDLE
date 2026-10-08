@@ -20,6 +20,7 @@ pub mod unravel;
 pub mod weave;
 pub mod weft;
 pub mod weft_client;
+pub mod weft_envelope;
 pub(crate) mod workspace_capacity;
 mod workspace_health;
 

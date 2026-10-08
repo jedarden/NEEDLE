@@ -1,6 +1,11 @@
 version = 1
 
 # These ceilings are deliberate review gates, not aspirational coverage goals.
+# +6 table-driven Weft capability, denial, and billing-safety contracts
+# (needle-6aa1ccf1): Claude capability/settings translation, scoped docs,
+# Codex read-only/no-network settings, unknown capability refusal, denied-path
+# overlap refusal, and serve_strands adapter-definition lint through config
+# validation. These pure boundary contracts belong in the unit tier.
 # Raise one only when a reviewer agrees that the named tier is the cheapest
 # correct home for the added behavior. Counts are literal Rust test attributes.
 [unit]
@@ -366,7 +371,7 @@ version = 1
 # +4 LOOM client contracts (needle-0ea049d0): request auth/query/body shape,
 # same-worker 409 claim recovery vs foreign contention, token rejection and
 # rotation recovery, and unsupported contract version terminal failure.
-max_tests = 4182
+max_tests = 4188
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
