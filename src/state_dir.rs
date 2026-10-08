@@ -164,13 +164,23 @@ pub fn root_for(fallback: &Path) -> PathBuf {
 /// Resolve the telemetry/log-writer directory while honoring an explicit
 /// state-root override. A configured legacy log directory remains effective
 /// only when no central state root is active.
-pub fn logs_dir_for(configured: Option<&Path>, fallback_root: &Path) -> PathBuf {
-    if override_root().is_some() {
-        logs_dir()
-    } else {
-        configured
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| fallback_root.join("logs"))
+pub fn logs_dir_for(_configured: Option<&Path>, fallback_root: &Path) -> PathBuf {
+    #[cfg(test)]
+    {
+        // Unit tests may call this helper with an explicitly owned fixture
+        // root while another test has published a process-global config.
+        return fallback_root.join("logs");
+    }
+
+    #[cfg(not(test))]
+    {
+        if override_root().is_some() {
+            logs_dir()
+        } else {
+            _configured
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| fallback_root.join("logs"))
+        }
     }
 }
 

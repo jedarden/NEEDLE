@@ -2003,7 +2003,13 @@ mod tests {
     /// // Now dirs_or_home() resolves to the temp directory, not the real HOME
     /// ```
     fn isolate_test_home() -> HomeGuard {
-        let temp_dir = tempfile::tempdir().unwrap();
+        // The host's TMPDIR is under the real HOME. Keep this fixture's HOME
+        // outside that tree because the assertions below explicitly verify
+        // that no heartbeat path contains the real HOME prefix.
+        let temp_dir = tempfile::Builder::new()
+            .prefix("needle-health-home-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let temp_path = temp_dir.path().to_path_buf();
         let mut guard = isolate_test_home_at(&temp_path);
         guard._temp_dir = Some(temp_dir);
