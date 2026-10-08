@@ -126,17 +126,28 @@ fn discover_workspaces_report(root: &Path) -> Result<(Vec<PathBuf>, u64)> {
     }
     let mut found = Vec::new();
     let mut errors = 0;
-    discover_from(root, &mut found, &mut errors)?;
+    // The configured scan root can itself be a workspace (for example the
+    // lab user's home bead store) while also containing sibling workspaces.
+    // Include the root and keep walking there; nested workspaces still stop
+    // descent so their internal directories are not treated as repositories.
+    discover_from(root, &mut found, &mut errors, true)?;
     found.sort();
     found.dedup();
     Ok((found, errors))
 }
 
-fn discover_from(path: &Path, found: &mut Vec<PathBuf>, errors: &mut u64) -> Result<()> {
+fn discover_from(
+    path: &Path,
+    found: &mut Vec<PathBuf>,
+    errors: &mut u64,
+    descend_into_workspace: bool,
+) -> Result<()> {
     let beads_dir = path.join(".beads");
     if is_real_dir(&beads_dir) && is_real_dir(&beads_dir.join("traces")) {
         found.push(path.to_path_buf());
-        return Ok(());
+        if !descend_into_workspace {
+            return Ok(());
+        }
     }
 
     let mut entries = match sorted_entries(path) {
@@ -156,7 +167,7 @@ fn discover_from(path: &Path, found: &mut Vec<PathBuf>, errors: &mut u64) -> Res
             continue;
         }
         if is_real_dir(&entry) {
-            discover_from(&entry, found, errors)?;
+            discover_from(&entry, found, errors, false)?;
         }
     }
     Ok(())
