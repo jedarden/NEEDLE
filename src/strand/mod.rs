@@ -18,6 +18,8 @@ pub mod reflect;
 pub mod splice;
 pub mod unravel;
 pub mod weave;
+pub mod weft;
+pub mod weft_client;
 pub(crate) mod workspace_capacity;
 mod workspace_health;
 
@@ -62,6 +64,8 @@ pub struct SelectOutcome {
     /// If set, this bead should be dispatched with a split prompt instead of
     /// the normal work prompt. Contains the consecutive failure count.
     pub split_failure_count: Option<u32>,
+    /// External work completed by a strand without a local bead.
+    pub work_performed: Option<(String, serde_json::Value)>,
 }
 
 pub use analyze::{AnalysisAgent, AnalyzeStrand};
@@ -75,6 +79,7 @@ pub use reflect::{CliReflectAgent, ReflectAgent, ReflectStrand};
 pub use splice::SpliceStrand;
 pub use unravel::{UnravelAgent, UnravelStrand};
 pub use weave::{CliWeaveAgent, FleetWeaveStrand, WeaveAgent, WeaveStrand};
+pub use weft::WeftStrand;
 
 /// A single selection strategy in the waterfall.
 #[async_trait::async_trait]
@@ -466,6 +471,7 @@ impl StrandRunner {
             StrandResult::NoWork => strand_results::NO_WORK,
             StrandResult::Error(_) => strand_results::ERROR,
             StrandResult::BeadFound(_) | StrandResult::Split(_, _) => strand_results::BEAD_FOUND,
+            StrandResult::WorkPerformed { .. } => "work_performed",
             StrandResult::Skipped { .. } => "skipped",
             StrandResult::FoundButExcluded => "found_but_excluded",
         };
@@ -535,6 +541,7 @@ impl StrandRunner {
                         )
                     }
                     StrandResult::WorkCreated => (strand_results::WORK_CREATED.to_string(), true),
+                    StrandResult::WorkPerformed { .. } => ("work_performed".to_string(), true),
                     StrandResult::NoWork => (strand_results::NO_WORK.to_string(), true),
                     StrandResult::Error(_) => (strand_results::ERROR.to_string(), true),
                     StrandResult::Skipped { reason } => (format!("skipped({})", reason), true),
@@ -623,6 +630,7 @@ impl StrandRunner {
                                 restart_triggers,
                                 strand_evaluations,
                                 split_failure_count: None,
+                                work_performed: None,
                             });
                         }
                         continue;
@@ -655,6 +663,32 @@ impl StrandRunner {
                             restart_triggers,
                             strand_evaluations,
                             split_failure_count: Some(failure_count),
+                            work_performed: None,
+                        });
+                    }
+                    StrandResult::WorkPerformed { summary, telemetry } => {
+                        if let Err(error) = self.telemetry.emit(
+                            crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand_name.clone(),
+                                result: "work_performed".to_string(),
+                                duration_ms: elapsed_ms,
+                            },
+                            chrono::Utc::now(),
+                        ) {
+                            tracing::warn!(strand = %strand_name, error = %error, "failed to emit strand evaluation telemetry");
+                        }
+                        self.emit_cycle_outcome(
+                            CycleOutcome::WorkPerformed,
+                            Some(strand_name.clone()),
+                            Some(summary.clone()),
+                        );
+                        return Ok(SelectOutcome {
+                            bead: None,
+                            waterfall_restarts: restarts,
+                            restart_triggers,
+                            strand_evaluations,
+                            split_failure_count: None,
+                            work_performed: Some((summary, telemetry)),
                         });
                     }
                     StrandResult::WorkCreated => {
@@ -811,6 +845,7 @@ impl StrandRunner {
                 restart_triggers,
                 strand_evaluations,
                 split_failure_count: None,
+                work_performed: None,
             });
         }
     }

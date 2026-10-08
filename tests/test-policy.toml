@@ -363,7 +363,10 @@ version = 1
 # +6 LOOM config contracts (needle-b47c228a): defaults and workspace layering,
 # empty/unknown adapter validation, courier without a model, private token-file
 # mode/read-at-use behavior, and Tier-C reload reporting.
-max_tests = 4178
+# +4 LOOM client contracts (needle-0ea049d0): request auth/query/body shape,
+# same-worker 409 claim recovery vs foreign contention, token rejection and
+# rotation recovery, and unsupported contract version terminal failure.
+max_tests = 4182
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

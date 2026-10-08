@@ -3831,6 +3831,9 @@ mod tests {
             StrandResult::WorkCreated => {
                 panic!("unexpected WorkCreated result");
             }
+            StrandResult::WorkPerformed { .. } => {
+                panic!("unexpected WorkPerformed result");
+            }
             StrandResult::Error(e) => {
                 panic!("unexpected Error result: {:?}", e);
             }
@@ -4019,6 +4022,9 @@ mod tests {
                 StrandResult::WorkCreated => {
                     panic!("unexpected WorkCreated result");
                 }
+                StrandResult::WorkPerformed { .. } => {
+                    panic!("unexpected WorkPerformed result");
+                }
                 StrandResult::Error(e) => {
                     panic!("unexpected Error result: {:?}", e);
                 }
@@ -4099,6 +4105,9 @@ mod tests {
                 }
                 StrandResult::WorkCreated => {
                     panic!("unexpected WorkCreated result");
+                }
+                StrandResult::WorkPerformed { .. } => {
+                    panic!("unexpected WorkPerformed result");
                 }
                 StrandResult::Error(e) => {
                     panic!("unexpected Error result: {:?}", e);
@@ -4214,6 +4223,9 @@ mod tests {
                 }
                 StrandResult::WorkCreated => {
                     panic!("unexpected WorkCreated result");
+                }
+                StrandResult::WorkPerformed { .. } => {
+                    panic!("unexpected WorkPerformed result");
                 }
                 StrandResult::Error(e) => {
                     panic!("unexpected Error result: {:?}", e);

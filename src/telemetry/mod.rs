@@ -1964,6 +1964,8 @@ pub enum CycleOutcome {
     Selected,
     /// A generator created real work and the waterfall restarted to claim it.
     Generated,
+    /// A strand completed external work without selecting a local bead.
+    WorkPerformed,
     /// A generator failed recoverably and the cycle fell through.
     CreatorFailed,
     /// Every strand ran, nothing was selected or generated, and no store
@@ -1980,6 +1982,7 @@ impl CycleOutcome {
         match self {
             CycleOutcome::Selected => "selected",
             CycleOutcome::Generated => "generated",
+            CycleOutcome::WorkPerformed => "work_performed",
             CycleOutcome::CreatorFailed => "creator_failed",
             CycleOutcome::TerminalIdle => "terminal_idle",
             CycleOutcome::TerminalStarvation => "terminal_starvation",

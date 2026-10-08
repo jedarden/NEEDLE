@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 197 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 198 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
@@ -92,6 +92,7 @@ NEEDLE's major design decisions, recorded as ADRs with status tracking.
 | [ADR-028](adr/028-renewable-fenced-claim-handle.md) | Renewable Fenced Claim Handle | Accepted |
 | [ADR-029](adr/029-measured-autonomous-improvement-loop.md) | Improvements Proposed from Ledger Evidence, Kept by Measured Impact | Accepted |
 | [ADR-030](adr/030-complete-attempt-accounting.md) | Complete Attempt Accounting | Accepted |
+| [ADR-031](adr/031-weft-work-performed-without-bead.md) | Weft Work Performed Without a Bead | Accepted |
 
 ---
 
@@ -305,8 +306,8 @@ See [Investigations & Post-Mortems](#investigations--post-mortems) for:
 
 ## File Count Summary
 
-- **Total markdown files:** 197
-- **ADRs:** 30
+- **Total markdown files:** 198
+- **ADRs:** 31
 - **Research documents:** 18
 - **Operational notes:** 33
 
