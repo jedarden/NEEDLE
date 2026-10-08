@@ -2742,6 +2742,13 @@ impl Worker {
             .map(|e| (e.strand_name.clone(), e.result.clone(), e.duration_ms))
             .collect();
 
+        if let Some((summary, telemetry)) = candidate.work_performed {
+            tracing::info!(summary = %summary, telemetry = %telemetry, "strand completed external work without a local bead");
+            // Keep the worker in SELECTING so this completed external turn is
+            // not classified as exhausted/idle. The next cycle polls again.
+            return Ok(());
+        }
+
         match candidate.bead {
             Some((bead, strand_name)) => {
                 tracing::debug!(bead_id = %bead.id, strand = %strand_name, "candidate found");

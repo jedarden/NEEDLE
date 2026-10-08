@@ -10351,12 +10351,30 @@ impl ConfigLoader {
                     ));
                 }
                 match loom_adapters.as_ref() {
-                    Some(Ok(adapters)) if !adapters.contains_key(&mapping.adapter) => {
-                        errors.push(ConfigError::new(
+                    Some(Ok(adapters)) => match adapters.get(&mapping.adapter) {
+                        None => errors.push(ConfigError::new(
                             format!("loom.serve_strands.{strand}.adapter"),
                             format!("unknown adapter '{}'", mapping.adapter),
-                        ))
-                    }
+                        )),
+                        Some(adapter) => {
+                            if let Err(message) =
+                                crate::strand::weft_envelope::harness_for_adapter(adapter)
+                            {
+                                errors.push(ConfigError::new(
+                                    format!("loom.serve_strands.{strand}.adapter"),
+                                    message,
+                                ));
+                            }
+                            if let Err(message) =
+                                crate::strand::weft_envelope::validate_loom_adapter(adapter)
+                            {
+                                errors.push(ConfigError::new(
+                                    format!("loom.serve_strands.{strand}.adapter"),
+                                    message,
+                                ));
+                            }
+                        }
+                    },
                     Some(Err(error)) => errors.push(ConfigError::new(
                         "agent.adapters_dir".to_string(),
                         format!("could not validate LOOM adapters: {error:#}"),

@@ -971,6 +971,11 @@ impl std::error::Error for StrandError {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum StrandResult {
+    /// A strand completed useful external work without creating or selecting a bead.
+    WorkPerformed {
+        summary: String,
+        telemetry: serde_json::Value,
+    },
     /// One or more candidate beads were found.
     BeadFound(Vec<Bead>),
     /// The strand synthesized new work (e.g., mitosis created child beads).
