@@ -353,6 +353,11 @@ impl GuardedApplier<'_> {
             interrupted: observation.interrupted,
             policy: self.resolution_policy(bead, false),
         });
+        let abnormal_exit_release = proposal == ResolutionProposal::Release
+            && !matches!(
+                Outcome::classify(observation.exit_code, observation.interrupted),
+                Outcome::Success | Outcome::Failure
+            );
         match proposal {
             ResolutionProposal::OwnershipLost => return Ok(AppliedDecision::OwnershipLost),
             ResolutionProposal::AdmissionFailure => {
@@ -371,23 +376,6 @@ impl GuardedApplier<'_> {
                     .fail_safely(store, bead, actor, "resolution evidence", error)
                     .await);
             }
-            ResolutionProposal::Release
-                if !matches!(
-                    Outcome::classify(observation.exit_code, observation.interrupted),
-                    Outcome::Success | Outcome::Failure
-                ) =>
-            {
-                return self
-                    .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
-                    .await
-                    .map(|released| {
-                        if released {
-                            AppliedDecision::Released(ReleaseCause::Unverifiable)
-                        } else {
-                            AppliedDecision::OwnershipLost
-                        }
-                    });
-            }
             ResolutionProposal::VerifyThenComplete
             | ResolutionProposal::Complete
             | ResolutionProposal::Release
@@ -401,6 +389,28 @@ impl GuardedApplier<'_> {
         // is used only for that action's note and evidence fields; a mismatch
         // fails closed instead of letting a second decision tree overrule it.
         let applied = match (proposal, decision) {
+            (_, _) if abnormal_exit_release && atomic => {
+                self.apply_atomic_simple(
+                    store,
+                    bead,
+                    actor,
+                    Some(observation),
+                    AtomicSimple {
+                        action: ResolutionAction::Release,
+                        outcome: "infrastructure_failure",
+                        reason: format!(
+                            "resolve released unverifiable process exit {} (interrupted={})",
+                            observation.exit_code, observation.interrupted
+                        ),
+                        applied: AppliedDecision::Released(ReleaseCause::Unverifiable),
+                    },
+                )
+                .await
+            }
+            (_, _) if abnormal_exit_release => self
+                .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                .await
+                .map(|released| release_result(released, ReleaseCause::Unverifiable)),
             (
                 ResolutionProposal::VerifyThenComplete | ResolutionProposal::Complete,
                 ResolveDecision::Complete {
@@ -571,8 +581,153 @@ impl GuardedApplier<'_> {
                 );
                 Ok(applied)
             }
+            Err(error)
+                if !atomic
+                    && matches!(
+                        proposal,
+                        ResolutionProposal::Complete
+                            | ResolutionProposal::VerifyThenComplete
+                            | ResolutionProposal::Release
+                            | ResolutionProposal::Quarantine
+                            | ResolutionProposal::Block
+                    ) =>
+            {
+                let applied = self
+                    .reconcile_compatibility_failure(store, bead, actor, decision, proposal, error)
+                    .await?;
+                let _ = self.telemetry.emit(
+                    EventKind::OutcomeHandled {
+                        bead_id: bead.id.clone(),
+                        outcome: format!("resolve:{}", decision.as_str()),
+                        action: applied.as_str().to_string(),
+                    },
+                    Utc::now(),
+                );
+                Ok(applied)
+            }
             Err(error) => Err(error),
         }
+    }
+
+    /// Reconcile an uncertain compatibility mutation before returning from
+    /// HANDLING. A failed CLI response may follow a committed write, so the
+    /// caller must inspect authoritative state before attempting recovery.
+    async fn reconcile_compatibility_failure(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        actor: &str,
+        decision: &ResolveDecision,
+        proposal: ResolutionProposal,
+        error: anyhow::Error,
+    ) -> Result<AppliedDecision> {
+        let current = match self
+            .op(store.show(&bead.id), "show after failed resolution")
+            .await
+        {
+            Ok(current) => current,
+            Err(read_error) => {
+                let context = format!(
+                    "compatibility resolution failed ({error:#}) and its authoritative reread failed ({read_error:#})"
+                );
+                return match self
+                    .mutation_failure(
+                        store,
+                        bead,
+                        actor,
+                        "compatibility reconciliation",
+                        anyhow::anyhow!(context.clone()),
+                    )
+                    .await?
+                {
+                    released @ AppliedDecision::Released(_) => Ok(released),
+                    _ => Err(anyhow::anyhow!(context)
+                        .context("resolution effect could not be confirmed")),
+                };
+            }
+        };
+
+        // A failed close response cannot earn completion credit, even when a
+        // subsequent read sees a terminal bead: without an atomic receipt the
+        // applier cannot attribute that close to this attempt. Pause the
+        // workspace so the ambiguous terminal effect is visible to operators.
+        if matches!(
+            proposal,
+            ResolutionProposal::Complete | ResolutionProposal::VerifyThenComplete
+        ) && matches!(decision, ResolveDecision::Complete { .. })
+            && current.status.is_done()
+        {
+            store.pause_workspace(format!(
+                "resolution close for {} returned an error after the bead became {}; completion was not credited",
+                bead.id, current.status
+            ));
+            return Err(error.context(
+                "compatibility close response was uncertain; authoritative state is closed and completion was refused",
+            ));
+        }
+
+        if proposal == ResolutionProposal::Block
+            && matches!(decision, ResolveDecision::Blocked { .. })
+        {
+            match self
+                .op(
+                    store.is_blocked(&bead.id),
+                    "is_blocked after failed resolution",
+                )
+                .await
+            {
+                Ok(true) => {
+                    return match self
+                        .finish_blocked(store, bead, actor, AppliedDecision::Blocked)
+                        .await
+                    {
+                        Ok(applied) => Ok(applied),
+                        Err(recovery_error) => {
+                            self.mutation_failure(
+                                store,
+                                bead,
+                                actor,
+                                "block reconciliation",
+                                recovery_error.context(format!("original block failed: {error:#}")),
+                            )
+                            .await
+                        }
+                    };
+                }
+                Ok(false) => {}
+                Err(read_error) => {
+                    return self
+                        .mutation_failure(
+                            store,
+                            bead,
+                            actor,
+                            "block reconciliation",
+                            error.context(format!("block state reread failed: {read_error:#}")),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        // A retry's guarded release can commit before its response is lost.
+        // The authoritative open state is enough to fail closed; retain the
+        // normal failure/quarantine accounting for the judged retry.
+        if matches!(
+            proposal,
+            ResolutionProposal::Release | ResolutionProposal::Quarantine
+        ) && current.status == BeadStatus::Open
+            && current.assignee.is_none()
+        {
+            return if matches!(decision, ResolveDecision::Retry { .. }) {
+                self.penalize_released_failure(store, bead, ReleaseCause::Retry)
+                    .await
+            } else {
+                Ok(AppliedDecision::Released(ReleaseCause::Unverifiable))
+            };
+        }
+
+        self.mutation_failure(store, bead, actor, "compatibility resolution", error)
+            .await
     }
 
     /// Atomic backend transition for a resolver retry or external block.
@@ -1096,10 +1251,11 @@ impl GuardedApplier<'_> {
                 );
                 Ok(AppliedDecision::Completed)
             }
-            Err(error) => {
+            Err(error) if atomic => {
                 self.mutation_failure(store, bead, actor, "close", error)
                     .await
             }
+            Err(error) => Err(error),
         }
     }
 
@@ -1179,14 +1335,61 @@ impl GuardedApplier<'_> {
             return Ok(AppliedDecision::OwnershipLost);
         }
 
-        // Same best-effort contract as retry: the block is the transition
-        // that stops the loop; the note is the operator-facing record.
         let note = format!(
             "resolve blocked on {}: {} (evidence: {})",
             concise(blocker_type, 80),
             concise(description, MAX_NOTE_CHARS),
             concise(evidence, MAX_NOTE_CHARS)
         );
+
+        // A protected compatibility claim can update its status under the
+        // retained revision and fencing credential. Do that before appending
+        // the explanatory note, since the note itself may advance revision.
+        if let Some(handle) = self.retained_claim.filter(|handle| handle.is_protected()) {
+            match self
+                .op(
+                    store.update_claim(handle, &serde_json::json!({"status": "deferred"})),
+                    "update_claim(block)",
+                )
+                .await
+            {
+                Ok(ClaimMutationResult::Applied) => {
+                    if let Err(error) = self
+                        .op(store.append_notes(&bead.id, &note), "append_notes")
+                        .await
+                    {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %error,
+                            "resolve blocked: could not record prerequisite note — block is confirmed"
+                        );
+                    }
+                    return self
+                        .finish_blocked(store, bead, actor, AppliedDecision::Blocked)
+                        .await;
+                }
+                Ok(ClaimMutationResult::LostOwnership) => {
+                    return Ok(AppliedDecision::OwnershipLost)
+                }
+                Ok(ClaimMutationResult::Unsupported) => {
+                    return self
+                        .mutation_failure(
+                            store,
+                            bead,
+                            actor,
+                            "guarded block unsupported",
+                            anyhow::anyhow!(
+                                "protected claim cannot apply a guarded compatibility block"
+                            ),
+                        )
+                        .await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        // Legacy claims lack guarded update support; retain the preflight plus
+        // immediate authoritative reconciliation compatibility sequence.
         if let Err(error) = self
             .op(store.append_notes(&bead.id, &note), "append_notes")
             .await
@@ -1211,10 +1414,7 @@ impl GuardedApplier<'_> {
                 self.finish_blocked(store, bead, actor, AppliedDecision::Blocked)
                     .await
             }
-            Err(error) => {
-                self.mutation_failure(store, bead, actor, "block", error)
-                    .await
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1830,6 +2030,9 @@ mod tests {
         dependencies: Mutex<Vec<(String, String)>>,
         fail_append_notes: bool,
         fail_release: bool,
+        release_response_lost_after_apply: bool,
+        close_response_lost_after_apply: bool,
+        block_response_lost_after_apply: bool,
         recovery_conflict: bool,
         fail_block: bool,
         fail_close: bool,
@@ -1842,6 +2045,8 @@ mod tests {
         atomic_response_lost_after_apply: bool,
         atomic_receipt_state: Option<&'static str>,
         atomic_calls: AtomicUsize,
+        guarded_update_calls: AtomicUsize,
+        guarded_update_reclaim_race: bool,
         /// `create_bead` fails once this many children already exist.
         fail_create_after: Option<usize>,
         /// A *parent* `add_label` fails once this many parent labels have
@@ -1904,6 +2109,9 @@ mod tests {
                 dependencies: Mutex::new(Vec::new()),
                 fail_append_notes: false,
                 fail_release: false,
+                release_response_lost_after_apply: false,
+                close_response_lost_after_apply: false,
+                block_response_lost_after_apply: false,
                 recovery_conflict: false,
                 fail_block: false,
                 fail_close: false,
@@ -1916,6 +2124,8 @@ mod tests {
                 atomic_response_lost_after_apply: false,
                 atomic_receipt_state: None,
                 atomic_calls: AtomicUsize::new(0),
+                guarded_update_calls: AtomicUsize::new(0),
+                guarded_update_reclaim_race: false,
                 fail_create_after: None,
                 fail_parent_label_after: None,
                 armed_failure: StateMutex::new(None),
@@ -1972,6 +2182,21 @@ mod tests {
             self
         }
 
+        fn with_close_response_lost_after_apply(mut self) -> Self {
+            self.close_response_lost_after_apply = true;
+            self
+        }
+
+        fn with_release_response_lost_after_apply(mut self) -> Self {
+            self.release_response_lost_after_apply = true;
+            self
+        }
+
+        fn with_block_response_lost_after_apply(mut self) -> Self {
+            self.block_response_lost_after_apply = true;
+            self
+        }
+
         fn with_authoritative_read_failure_after_close(mut self) -> Self {
             self.fail_show_after_done = true;
             self
@@ -2002,6 +2227,12 @@ mod tests {
 
         fn with_fenced_claim_without_atomic(mut self) -> Self {
             self.claim_identity_supported = true;
+            self
+        }
+
+        fn reclaim_during_guarded_update(mut self) -> Self {
+            self.claim_identity_supported = true;
+            self.guarded_update_reclaim_race = true;
             self
         }
 
@@ -2239,6 +2470,38 @@ mod tests {
                 reason: "mock".to_string(),
             })
         }
+        async fn update_claim(
+            &self,
+            handle: &ClaimHandle,
+            fields: &serde_json::Value,
+        ) -> Result<ClaimMutationResult> {
+            self.guarded_update_calls.fetch_add(1, Ordering::SeqCst);
+            if !self.claim_identity_supported || handle.bead_id.as_ref() != PARENT_ID {
+                return Ok(ClaimMutationResult::Unsupported);
+            }
+            let mut claim = self.claim.lock().unwrap();
+            if self.guarded_update_reclaim_race {
+                claim.revision += 2;
+                claim.claim_epoch += 1;
+            }
+            if handle.current_revision != Some(claim.revision)
+                || handle.claim_epoch != Some(claim.claim_epoch)
+                || claim.status != BeadStatus::InProgress
+                || claim.assignee.as_deref() != Some(handle.assignee.as_str())
+            {
+                return Ok(ClaimMutationResult::LostOwnership);
+            }
+            if fields.get("status").and_then(serde_json::Value::as_str) != Some("deferred") {
+                return Ok(ClaimMutationResult::Unsupported);
+            }
+            if self.manual_block_retains_claim {
+                claim.manual_blocked = true;
+            } else {
+                claim.status = BeadStatus::Deferred;
+            }
+            claim.revision += 1;
+            Ok(ClaimMutationResult::Applied)
+        }
         async fn release(&self, _id: &BeadId) -> Result<()> {
             if self.fail_release {
                 anyhow::bail!("release failed (injected)");
@@ -2247,6 +2510,10 @@ mod tests {
             let mut claim = self.claim.lock().unwrap();
             claim.status = BeadStatus::Open;
             claim.assignee = None;
+            drop(claim);
+            if self.release_response_lost_after_apply {
+                anyhow::bail!("simulated response loss after compatibility release");
+            }
             Ok(())
         }
         async fn release_recovery(
@@ -2273,6 +2540,10 @@ mod tests {
                 claim.manual_blocked = true;
             } else {
                 claim.status = BeadStatus::Deferred;
+            }
+            drop(claim);
+            if self.block_response_lost_after_apply {
+                anyhow::bail!("simulated response loss after compatibility block");
             }
             Ok(())
         }
@@ -2303,6 +2574,9 @@ mod tests {
             }
             let mut claim = self.claim.lock().unwrap();
             claim.status = BeadStatus::Done;
+            if self.close_response_lost_after_apply {
+                anyhow::bail!("simulated response loss after compatibility close");
+            }
             Ok(())
         }
         async fn append_notes(&self, _id: &BeadId, note: &str) -> Result<()> {
@@ -2482,6 +2756,10 @@ mod tests {
 
         complete_verified_success_resets_failure_accounting().await;
         compatibility_close_must_change_authoritative_state().await;
+        compatibility_close_response_loss_is_not_completion().await;
+        compatibility_release_response_loss_is_reconciled().await;
+        compatibility_block_response_loss_is_reconciled().await;
+        compatibility_block_fence_refuses_a_reclaimed_claim().await;
         compatibility_release_refuses_a_replaced_claim().await;
         compatibility_reclaim_by_same_actor_before_mutation_is_ownership_lost().await;
         compatibility_reclaim_by_same_actor_before_release_is_not_released().await;
@@ -2491,6 +2769,7 @@ mod tests {
         atomic_close_response_loss_after_effect_fails_quiet().await;
         authoritative_read_failure_after_close_fails_quiet().await;
         abnormal_process_exits_release_before_completion_checks().await;
+        abnormal_exit_release_uses_capability_and_reconciles().await;
         stale_revision_refuses_atomic_resolution().await;
         missing_observation_fails_safely().await;
         crate::resolve::reducer::test_contracts::complete_requires_authoritative_work_and_gate_acceptance();
@@ -2537,6 +2816,91 @@ mod tests {
             store.show(&store.bead().id).await.unwrap().status,
             BeadStatus::Open
         );
+    }
+
+    async fn compatibility_close_response_loss_is_not_completion() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .with_close_response_lost_after_apply();
+        let bead = store.bead();
+
+        let error = apply(&executor(), &store, &complete_decision())
+            .await
+            .expect_err("an unconfirmed compatibility close must not earn completion");
+
+        assert!(format!("{error:#}").contains("completion was refused"));
+        assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Done);
+        assert_eq!(store.closes_snapshot().len(), 1);
+        assert_eq!(store.released(), 0, "a terminal bead cannot be released");
+    }
+
+    async fn compatibility_release_response_loss_is_reconciled() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace).with_release_response_lost_after_apply();
+        let bead = store.bead();
+
+        let applied = apply(&executor(), &store, &retry_decision())
+            .await
+            .expect("a confirmed release remains a safe retry outcome");
+
+        assert_eq!(applied, AppliedDecision::Released(ReleaseCause::Retry));
+        assert_eq!(store.released(), 1);
+        assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Open);
+        assert!(store
+            .labels_snapshot()
+            .iter()
+            .any(|label| label == "failure-count:1"));
+    }
+
+    async fn compatibility_block_response_loss_is_reconciled() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace).with_block_response_lost_after_apply();
+        let bead = store.bead();
+
+        let applied = apply(&executor(), &store, &blocked_decision())
+            .await
+            .expect("an authoritative blocked state reconciles a lost response");
+
+        assert_eq!(applied, AppliedDecision::Blocked);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 1);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Deferred);
+        assert!(store.is_blocked(&bead.id).await.unwrap());
+    }
+
+    async fn compatibility_block_fence_refuses_a_reclaimed_claim() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace).reclaim_during_guarded_update();
+        let bead = store.bead();
+        let handle = protected_handle(&bead, 7);
+        let evidence =
+            crate::resolve::evidence::capture(&bead.workspace, &bead, 1, "", "", false).await;
+        let observation = ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 1,
+            interrupted: false,
+            attempt_id: "attempt-1",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor()
+            .apply_observed(
+                &store,
+                &bead,
+                &blocked_decision(),
+                "worker-a",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("a guarded update race leaves the lifecycle to the new claim");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.guarded_update_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+        assert_eq!(store.released(), 0);
+        assert_eq!(store.claim.lock().unwrap().claim_epoch, 4);
     }
 
     async fn compatibility_release_refuses_a_replaced_claim() {
@@ -2899,6 +3263,55 @@ mod tests {
         }
     }
 
+    async fn abnormal_exit_release_uses_capability_and_reconciles() {
+        for atomic in [true, false] {
+            let (_dir, workspace) = temp_workspace();
+            let store = if atomic {
+                RecordingStore::new(workspace).with_atomic_resolution(false)
+            } else {
+                RecordingStore::new(workspace)
+                    .with_fenced_claim_without_atomic()
+                    .with_release_response_lost_after_apply()
+            };
+            let bead = store.bead();
+            let handle = protected_handle(&bead, 7);
+            let evidence =
+                crate::resolve::evidence::capture(&bead.workspace, &bead, 124, "", "", false).await;
+            let observation = ResolutionObservation {
+                evidence: &evidence,
+                exit_code: 124,
+                interrupted: false,
+                attempt_id: "attempt-unverifiable-release",
+                claim_handle: Some(&handle),
+            };
+
+            let applied = executor()
+                .apply_observed(
+                    &store,
+                    &bead,
+                    &complete_decision(),
+                    "worker-a",
+                    None,
+                    Some(&observation),
+                )
+                .await
+                .expect("an unverifiable exit is safely released");
+
+            assert_eq!(
+                applied,
+                AppliedDecision::Released(ReleaseCause::Unverifiable)
+            );
+            assert_eq!(
+                store.atomic_calls.load(Ordering::SeqCst),
+                if atomic { 1 } else { 0 }
+            );
+            assert_eq!(store.released(), if atomic { 0 } else { 1 });
+            let current = store.show(&bead.id).await.unwrap();
+            assert_eq!(current.status, BeadStatus::Open);
+            assert!(current.assignee.is_none());
+        }
+    }
+
     async fn advertised_atomic_retry_and_block_have_one_lifecycle_effect() {
         for (decision, expected, expected_status) in [
             (
@@ -3014,7 +3427,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(applied, AppliedDecision::Blocked);
-        assert_eq!(store.blocks.load(Ordering::SeqCst), 1);
+        assert_eq!(store.guarded_update_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
         assert_eq!(store.released(), 1);
         let current = store.show(&bead.id).await.unwrap();
         assert_eq!(current.status, BeadStatus::Open);
