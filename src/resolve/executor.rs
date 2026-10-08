@@ -568,6 +568,19 @@ impl GuardedApplier<'_> {
                             )
                             .await?;
                     }
+                    // The close-specific read above confirms the close
+                    // operation. This second read reconciles the complete
+                    // guarded resolution, including compatibility effects;
+                    // wait for it before publishing lifecycle completion.
+                    if matches!(applied, AppliedDecision::Completed) {
+                        let _ = self.telemetry.emit(
+                            EventKind::BeadCompleted {
+                                bead_id: bead.id.clone(),
+                                duration_ms: 0,
+                            },
+                            Utc::now(),
+                        );
+                    }
                 }
                 // One terminal row per applied decision: what the resolver
                 // asked, what the lifecycle did.
@@ -1242,13 +1255,6 @@ impl GuardedApplier<'_> {
                          unverified",
                     ));
                 }
-                let _ = self.telemetry.emit(
-                    EventKind::BeadCompleted {
-                        bead_id: bead.id.clone(),
-                        duration_ms: 0,
-                    },
-                    Utc::now(),
-                );
                 Ok(AppliedDecision::Completed)
             }
             Err(error) if atomic => {
@@ -2063,6 +2069,8 @@ mod tests {
         fail_close: bool,
         noop_close: bool,
         fail_show_after_done: bool,
+        fail_show_after_done_nth: Option<usize>,
+        show_after_done_reads: AtomicUsize,
         manual_block_retains_claim: bool,
         atomic_resolution_supported: bool,
         atomic_capability_nested: bool,
@@ -2142,6 +2150,8 @@ mod tests {
                 fail_close: false,
                 noop_close: false,
                 fail_show_after_done: false,
+                fail_show_after_done_nth: None,
+                show_after_done_reads: AtomicUsize::new(0),
                 manual_block_retains_claim: false,
                 atomic_resolution_supported: false,
                 atomic_capability_nested: false,
@@ -2224,6 +2234,11 @@ mod tests {
 
         fn with_authoritative_read_failure_after_close(mut self) -> Self {
             self.fail_show_after_done = true;
+            self
+        }
+
+        fn with_second_authoritative_read_failure_after_close(mut self) -> Self {
+            self.fail_show_after_done_nth = Some(1);
             self
         }
 
@@ -2404,8 +2419,11 @@ mod tests {
         async fn show(&self, _id: &BeadId) -> Result<Bead> {
             let mut bead = self.bead();
             let claim = self.claim.lock().unwrap();
-            if self.fail_show_after_done && claim.status.is_done() {
-                anyhow::bail!("authoritative show failed after lifecycle mutation");
+            if claim.status.is_done() {
+                let read = self.show_after_done_reads.fetch_add(1, Ordering::SeqCst);
+                if self.fail_show_after_done || self.fail_show_after_done_nth == Some(read) {
+                    anyhow::bail!("authoritative show failed after lifecycle mutation");
+                }
             }
             bead.status = claim.status.clone();
             bead.assignee = claim.assignee.clone();
@@ -2794,6 +2812,7 @@ mod tests {
         atomic_close_receipt_must_confirm_a_closed_state().await;
         atomic_close_response_loss_after_effect_fails_quiet().await;
         authoritative_read_failure_after_close_fails_quiet().await;
+        later_reconciliation_failure_never_emits_completion().await;
         abnormal_process_exits_release_before_completion_checks().await;
         abnormal_exit_release_uses_capability_and_reconciles().await;
         stale_revision_refuses_atomic_resolution().await;
@@ -3286,6 +3305,32 @@ mod tests {
             .expect("an uncertain post-close read is a safe, non-completion outcome");
         assert_eq!(applied, AppliedDecision::OwnershipLost);
         assert_eq!(store.closes_snapshot().len(), 1);
+    }
+
+    async fn later_reconciliation_failure_never_emits_completion() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .with_second_authoritative_read_failure_after_close();
+        let helper = crate::telemetry::test_utils::TestHelper::new("resolve-reconcile-boundary");
+        let executor = DecisionExecutor::new(Config::default(), helper.telemetry().clone());
+
+        let applied = apply(&executor, &store, &complete_decision())
+            .await
+            .expect("a later reconciliation read failure must remain fail-quiet");
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.closes_snapshot().len(), 1);
+        assert_eq!(
+            store.show_after_done_reads.load(Ordering::SeqCst),
+            2,
+            "the close was confirmed once before the outer reconciliation read failed"
+        );
+
+        helper.sync().await;
+        assert!(
+            helper.events_by_type("bead.completed").is_empty(),
+            "the close read succeeded, but the full guarded reconciliation failed"
+        );
     }
 
     async fn abnormal_process_exits_release_before_completion_checks() {
