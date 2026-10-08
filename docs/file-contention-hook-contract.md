@@ -34,7 +34,8 @@ capabilities:
 Advertise it **only** when the harness really runs a pre-write hook before
 every create, edit, delete, and rename it performs, and honours the results
 below. Do not add it to a harness that lacks a pre-write lifecycle. No
-built-in adapter advertises it today. `tests/fixtures/file-contention-hook-adapter.yaml`
+built-in adapter advertises it; Claude Code adapters may, once the hook
+below is installed on their host. `tests/fixtures/file-contention-hook-adapter.yaml`
 is a test fixture, not a harness.
 
 A workspace opts in through its own `.needle.yaml`:
@@ -107,6 +108,38 @@ repo (`..`, an outside absolute path, or a symlink escape) and anything under
 
 Acquire lazily, on the **first** write intent for a path, never up front for
 a whole plan. A rename records both source and destination, or neither.
+
+## Claude Code integration
+
+`needle contention claude-hook` implements this contract for Claude Code
+(needle-804452c5). Register it as a PreToolUse hook for the file-writing
+tools in the user-level `~/.claude/settings.json` of the host that runs the
+workers:
+
+```json
+{"matcher": "Write|Edit|MultiEdit|NotebookEdit",
+ "hooks": [{"type": "command",
+            "command": "[ \"$NEEDLE_FILE_CONTENTION\" = enabled ] || exit 0; exec needle contention claude-hook"}]}
+```
+
+- The shell guard keeps every session without the dispatch contract
+  (interactive sessions, other workspaces) at zero cost: nothing is spawned.
+- The hook reads the event on stdin, acquires `tool_input.file_path`
+  (`notebook_path` for NotebookEdit) with the dispatch env, and on an active
+  conflict (exit 3) or needs-attention marker (exit 4) prints Claude Code's
+  `hookSpecificOutput` with `permissionDecision: "deny"` and a reason naming
+  the holder and telling the agent to continue with other files. The agent
+  sees the reason and moves on; the write it skipped is allowed once the
+  holder's attempt ends.
+- It always exits 0. Everything else — coverage not enabled, a path outside
+  the repo or under `.git/`/`.needle/`, degraded markers, malformed input —
+  allows the write as uncovered.
+- A `Write` to a file that does not exist yet records intent `create`.
+- Only after the hook is installed on a host may that host's Claude Code
+  adapters declare `capabilities: [file_contention_hook/v1]`.
+
+Bash writes (`sed -i`, redirections, generators) are not intercepted and
+remain uncovered.
 
 ## Response: exit code and `--json`
 

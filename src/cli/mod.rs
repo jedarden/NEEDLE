@@ -9538,6 +9538,168 @@ mod tests {
         assert!(!repo.path().join(".needle/locks/src/lib.rs.lock").exists());
     }
 
+    // ── Claude Code pre-write hook (needle-804452c5) ──
+
+    fn claude_hook_env(repo: &Path, who: &str) -> HashMap<String, String> {
+        [
+            ("NEEDLE_FILE_CONTENTION", "enabled".to_string()),
+            ("NEEDLE_FILE_CONTENTION_REPO", repo.display().to_string()),
+            ("NEEDLE_BEAD_ID", format!("needle-{who}")),
+            ("NEEDLE_ATTEMPT_ID", format!("attempt-{who}")),
+            ("NEEDLE_WORKER_ID", who.to_string()),
+            ("NEEDLE_FILE_CONTENTION_PID", std::process::id().to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
+
+    fn claude_hook(
+        env: &HashMap<String, String>,
+        event: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let lookup = |name: &str| env.get(name).cloned();
+        file_contention::claude_hook_decision(
+            &event.to_string(),
+            &lookup,
+            &ContentionFixtureStatus,
+            Utc::now(),
+        )
+        .map(|out| serde_json::from_str(&out).expect("hook output is JSON"))
+    }
+
+    fn claude_event(tool: &str, key: &str, path: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": { key: path.display().to_string(), "old_string": "a", "new_string": "b" },
+        })
+    }
+
+    #[test]
+    fn file_contention_claude_hook_denies_second_worker_and_allows_other_files() {
+        let repo = contention_repo(true);
+        let lib = repo.path().join("src/lib.rs");
+        let alpha = claude_hook_env(repo.path(), "alpha");
+        let bravo = claude_hook_env(repo.path(), "bravo");
+
+        // First writer is allowed and now holds the file.
+        assert!(claude_hook(&alpha, claude_event("Edit", "file_path", &lib)).is_none());
+        assert!(repo.path().join(".needle/locks/src/lib.rs.lock").exists());
+        // The holder's later edits renew instead of conflicting.
+        assert!(claude_hook(&alpha, claude_event("MultiEdit", "file_path", &lib)).is_none());
+
+        // A second worker is denied with the holder named.
+        let out = claude_hook(&bravo, claude_event("Edit", "file_path", &lib)).expect("deny");
+        let hook = &out["hookSpecificOutput"];
+        assert_eq!(hook["hookEventName"], "PreToolUse");
+        assert_eq!(hook["permissionDecision"], "deny");
+        let reason = hook["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("src/lib.rs"), "{reason}");
+        assert!(reason.contains("worker alpha"), "{reason}");
+        assert!(reason.contains("bead needle-alpha"), "{reason}");
+        assert!(reason.contains("Continue with other files"), "{reason}");
+
+        // ...but proceeds on a different file in the same checkout.
+        let other = repo.path().join("src/other.rs");
+        assert!(claude_hook(&bravo, claude_event("Write", "file_path", &other)).is_none());
+        let marker: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.path().join(".needle/locks/src/other.rs.lock")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            marker["intent"], "create",
+            "a Write to a new file records create"
+        );
+        assert_eq!(marker["worker_id"], "bravo");
+    }
+
+    #[test]
+    fn file_contention_claude_hook_is_inert_unless_enabled() {
+        let repo = contention_repo(true);
+        let lib = repo.path().join("src/lib.rs");
+        let alpha = claude_hook_env(repo.path(), "alpha");
+        assert!(claude_hook(&alpha, claude_event("Edit", "file_path", &lib)).is_none());
+
+        // An interactive session (no dispatch contract) never consults markers.
+        let mut plain = claude_hook_env(repo.path(), "bravo");
+        plain.remove("NEEDLE_FILE_CONTENTION");
+        assert!(claude_hook(&plain, claude_event("Edit", "file_path", &lib)).is_none());
+
+        // A workspace that has not opted in records nothing.
+        let off = contention_repo(false);
+        let env = claude_hook_env(off.path(), "alpha");
+        assert!(claude_hook(
+            &env,
+            claude_event("Edit", "file_path", &off.path().join("src/lib.rs"))
+        )
+        .is_none());
+        assert!(!off.path().join(".needle").exists());
+    }
+
+    #[test]
+    fn file_contention_claude_hook_fails_open_on_anything_unclear() {
+        let repo = contention_repo(true);
+        let env = claude_hook_env(repo.path(), "alpha");
+        let lookup = |name: &str| env.get(name).cloned();
+        let decide = |raw: &str| {
+            file_contention::claude_hook_decision(
+                raw,
+                &lookup,
+                &ContentionFixtureStatus,
+                Utc::now(),
+            )
+        };
+        assert!(decide("not json").is_none());
+        assert!(decide(r#"{"tool_name":"Edit"}"#).is_none());
+        assert!(decide(&claude_event("Bash", "command", Path::new("ls")).to_string()).is_none());
+        let outside = tempfile::tempdir().unwrap();
+        assert!(decide(
+            &claude_event("Write", "file_path", &outside.path().join("x.rs")).to_string()
+        )
+        .is_none());
+        assert!(decide(
+            &claude_event("Edit", "file_path", &repo.path().join(".git/config")).to_string()
+        )
+        .is_none());
+        assert!(
+            !repo.path().join(".needle/locks").exists(),
+            "nothing unclear may write a marker"
+        );
+    }
+
+    #[test]
+    fn file_contention_claude_hook_covers_notebooks_and_relative_paths() {
+        let repo = contention_repo(true);
+        std::fs::write(repo.path().join("nb.ipynb"), "{}").unwrap();
+        let alpha = claude_hook_env(repo.path(), "alpha");
+        let bravo = claude_hook_env(repo.path(), "bravo");
+        assert!(claude_hook(
+            &alpha,
+            claude_event(
+                "NotebookEdit",
+                "notebook_path",
+                &repo.path().join("nb.ipynb")
+            )
+        )
+        .is_none());
+        assert!(claude_hook(
+            &bravo,
+            claude_event(
+                "NotebookEdit",
+                "notebook_path",
+                &repo.path().join("nb.ipynb")
+            )
+        )
+        .is_some());
+
+        // A relative path resolves against the event's cwd.
+        let mut event = claude_event("Edit", "file_path", Path::new("src/lib.rs"));
+        event["cwd"] = serde_json::json!(repo.path().display().to_string());
+        assert!(claude_hook(&alpha, event.clone()).is_none());
+        assert!(claude_hook(&bravo, event).is_some());
+    }
+
     // ── doctor file-contention row (Phase 20, needle-0d2df6d5) ──
 
     /// Workers named `dead-*` are dead; everyone else is live.
