@@ -10224,6 +10224,27 @@ impl Worker {
         // Check if we should use SPLIT mode.
         let threshold = self.config.strands.pluck.split_after_failures;
         if split_threshold_reached(failure_count, threshold) {
+            let mut current = bead.clone();
+            current.labels = labels;
+            let reason =
+                match crate::mitosis::prior_split::inspect(self.store.as_ref(), &current).await {
+                    Ok(Some(prior)) => Some(prior.reason().to_string()),
+                    Ok(None) => None,
+                    Err(error) => Some(format!(
+                    "prior split inventory unavailable; refusing another decomposition: {error:#}"
+                )),
+                };
+            if let Some(reason) = reason {
+                tracing::info!(bead_id = %bead.id, %reason, "using PLUCK for parent acceptance");
+                let _ = self.telemetry.emit(
+                    EventKind::SplitSkipped {
+                        bead_id: bead.id.clone(),
+                        reason,
+                    },
+                    chrono::Utc::now(),
+                );
+                return ("pluck", failure_count);
+            }
             tracing::info!(
                 bead_id = %bead.id,
                 failure_count,
@@ -10520,6 +10541,24 @@ mod tests {
         assert!(!split_threshold_reached(2, 3));
         assert!(split_threshold_reached(3, 3));
         assert!(split_threshold_reached(4, 3));
+    }
+
+    #[tokio::test]
+    async fn prior_split_uses_parent_acceptance_instead_of_forced_decomposition() {
+        for status in [BeadStatus::Open, BeadStatus::Closed] {
+            let mut parent = make_test_bead("prior-split-parent");
+            parent.labels = vec!["failure-count:124".to_string()];
+            let mut child = make_test_bead("prior-split-child");
+            child.labels = vec![format!("parent-{}", parent.id)];
+            child.status = status;
+            let store = Arc::new(MockStore::new(vec![parent.clone(), child]));
+            let worker = make_worker(store);
+            assert_eq!(worker.check_split_mode(&parent).await, ("pluck", 124));
+        }
+        let mut fresh = make_test_bead("never-split");
+        fresh.labels = vec!["failure-count:3".to_string()];
+        let worker = make_worker(Arc::new(MockStore::new(vec![fresh.clone()])));
+        assert_eq!(worker.check_split_mode(&fresh).await, ("split", 3));
     }
 
     // ── Tests for truncate_for_display ──

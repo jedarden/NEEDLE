@@ -3546,39 +3546,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn split_dedupes_against_existing_children() {
+    async fn split_refuses_novel_titles_when_an_existing_split_is_present() {
         let (_dir, workspace) = temp_workspace();
         let lock_dir = tempfile::tempdir().expect("lock tempdir");
-        // An existing child of this parent already covers one of the two
-        // proposals; only the uncovered one may be created.
+        // Renaming part of the old plan must not authorize another chain.
         let store = RecordingStore::new(workspace).with_existing_child(existing_parser_child());
 
-        let applied = apply(
+        let error = apply(
             &executor_with_mitosis(lock_dir.path()),
             &store,
             &split_decision("needle-exec", &["Add the parser", "Add the serializer"]),
         )
         .await
-        .expect("split with partial dedup applies");
+        .expect_err("an existing split is retained without new children");
 
-        match applied {
-            AppliedDecision::Split { created, deduped } => {
-                assert_eq!(created, 1, "only the uncovered child is created");
-                assert_eq!(deduped, 1, "the covered proposal is deduped");
-            }
-            other => panic!("expected Split, got {other:?}"),
-        }
-        let children = store.children_snapshot();
-        assert_eq!(children, vec!["Add the serializer".to_string()]);
+        assert!(error.to_string().contains("split refused"));
+        assert!(store.children_snapshot().is_empty());
         assert_eq!(
             store.dependencies.lock().unwrap().len(),
-            1,
-            "the created child blocks the parent"
+            0,
+            "the old dependency graph is preserved"
         );
         assert_eq!(
             store.blocks.load(Ordering::SeqCst),
-            1,
-            "parent blocked pending children"
+            0,
+            "no new split is applied"
         );
     }
 

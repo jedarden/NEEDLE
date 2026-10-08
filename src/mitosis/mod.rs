@@ -9,6 +9,7 @@
 //!
 //! Depends on: `bead_store`, `config`, `dispatch`, `prompt`, `telemetry`, `types`, `claim`.
 
+pub(crate) mod prior_split;
 pub mod timeout_context;
 pub mod timeout_eligibility;
 
@@ -325,6 +326,27 @@ pub struct MitosisEvaluator {
 }
 
 impl MitosisEvaluator {
+    async fn skip_prior_split(
+        &self,
+        store: &dyn BeadStore,
+        parent: &Bead,
+    ) -> Result<Option<MitosisResult>> {
+        let Some(prior) = prior_split::inspect(store, parent).await? else {
+            return Ok(None);
+        };
+        tracing::info!(parent_id = %parent.id, reason = prior.reason(), "mitosis skipped");
+        self.telemetry.emit(
+            EventKind::MitosisSkipped {
+                parent_id: parent.id.clone(),
+                existing_children: u32::try_from(prior.children).unwrap_or(u32::MAX),
+            },
+            chrono::Utc::now(),
+        )?;
+        Ok(Some(MitosisResult::Skipped {
+            reason: prior.reason().to_string(),
+        }))
+    }
+
     pub fn new(config: MitosisConfig, telemetry: Telemetry, lock_dir: PathBuf) -> Self {
         MitosisEvaluator {
             config,
@@ -461,6 +483,10 @@ impl MitosisEvaluator {
             }
         }
 
+        if let Some(skipped) = self.skip_prior_split(store, bead).await? {
+            return Ok(skipped);
+        }
+
         // Resolve the agent adapter.
         let adapter = match dispatcher.adapter(agent_name) {
             Some(a) => a,
@@ -527,6 +553,11 @@ impl MitosisEvaluator {
                     chrono::Utc::now(),
                 )?;
 
+                // Re-read after analysis: another decomposition may have
+                // completed while this unclaimed analysis was running.
+                if let Some(skipped) = self.skip_prior_split(store, bead).await? {
+                    return Ok(skipped);
+                }
                 self.create_children(store, bead, &resp.children).await
             }
             Some(resp) if resp.splittable => {
@@ -698,6 +729,10 @@ impl MitosisEvaluator {
             });
         }
 
+        if let Some(skipped) = self.skip_prior_split(store, bead).await? {
+            return Ok(skipped);
+        }
+
         // Step 5: Resolve the agent adapter
         let adapter = match dispatcher.adapter(agent_name) {
             Some(a) => a,
@@ -790,6 +825,9 @@ impl MitosisEvaluator {
                     chrono::Utc::now(),
                 )?;
 
+                if let Some(skipped) = self.skip_prior_split(store, bead).await? {
+                    return Ok(skipped);
+                }
                 self.create_children(store, bead, &resp.children).await
             }
             Some(resp) if resp.splittable => {
@@ -1188,6 +1226,15 @@ impl MitosisEvaluator {
                 "resolve split: every proposed child is already covered"
             );
             return Ok(SplitApplication::FullyDeduplicated { covered: deduped });
+        }
+
+        // Fully covered proposals above remain a safe no-op. Novel titles
+        // must not extend an existing split: retries can rephrase the same
+        // acceptance indefinitely, defeating title-based deduplication.
+        if let Some(prior) = prior_split::inspect(store, parent).await? {
+            return Ok(SplitApplication::Refused {
+                reason: prior.reason().to_string(),
+            });
         }
 
         // The resolver proposes titles only; each child still needs a body
@@ -2251,6 +2298,7 @@ mod tests {
 
     struct MockStore {
         labels: Vec<String>,
+        fail_inventory: bool,
         /// Existing child beads returned by `list_all()` for dedup testing.
         existing_children: Vec<Bead>,
         /// Mutable full inventory used by split-parent reconciliation tests.
@@ -2278,6 +2326,7 @@ mod tests {
         fn new() -> Self {
             MockStore {
                 labels: vec!["failure-count:1".to_string()],
+                fail_inventory: false,
                 existing_children: Vec::new(),
                 reconciliation_inventory: Mutex::new(None),
                 closed: Mutex::new(Vec::new()),
@@ -2385,6 +2434,9 @@ mod tests {
             })
         }
         async fn list_all(&self) -> Result<Vec<Bead>> {
+            if self.fail_inventory {
+                anyhow::bail!("inventory unavailable");
+            }
             if let Some(inventory) = self.reconciliation_inventory.lock().unwrap().as_ref() {
                 return Ok(inventory.clone());
             }
@@ -3460,6 +3512,144 @@ End of response."#;
     // ── MitosisEvaluator precondition tests ──
 
     #[tokio::test]
+    async fn prior_split_blocks_repeat_analysis_and_novel_resolver_children() {
+        for status in [BeadStatus::Open, BeadStatus::Closed] {
+            let (evaluator, _ws) = proposal_evaluator("prior-split");
+            let parent = test_bead();
+            let mut child = existing_child("Original plan", parent.id.as_ref());
+            child.status = status.clone();
+            let store = MockStore::new().with_existing_children(vec![child]);
+            let dispatcher = create_test_dispatcher();
+            let prompt = PromptBuilder::new(&crate::config::PromptConfig::default());
+
+            let result = evaluator
+                .evaluate(
+                    &store,
+                    &parent,
+                    Path::new("/tmp/test"),
+                    &dispatcher,
+                    &prompt,
+                    "missing",
+                )
+                .await
+                .unwrap();
+            let expected = if status.is_done() {
+                "reconciliation"
+            } else {
+                "unfinished"
+            };
+            assert!(
+                matches!(result, MitosisResult::Skipped { reason } if reason.contains(expected))
+            );
+
+            let result = evaluator
+                .apply_split_proposals(
+                    &store,
+                    &parent,
+                    &["Completely different wording".to_string()],
+                    "retry",
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(result, SplitApplication::Refused { reason } if reason.contains(expected))
+            );
+            assert!(store.created.lock().unwrap().is_empty());
+            assert!(store.deps_added.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn prior_split_blocks_productive_timeout_analysis() {
+        let (mut evaluator, _ws) = proposal_evaluator("prior-split-timeout");
+        evaluator.config.timeout_triggered.enabled = true;
+        evaluator.config.timeout_triggered.agent_wallclock_timeout = true;
+        let parent = test_bead();
+        let store = MockStore::new()
+            .with_existing_children(vec![existing_child("Original plan", parent.id.as_ref())]);
+        let outcome = AgentOutcome {
+            exit_code: 124,
+            stdout: "tool_use_id: call-1\ntool_result: success".to_string(),
+            stderr: String::new(),
+        };
+        let result = evaluator
+            .evaluate_timeout(
+                &store,
+                &parent,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "missing",
+                &outcome,
+                Duration::from_secs(3540),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, MitosisResult::Skipped { reason } if reason.contains("unfinished"))
+        );
+        assert!(store.created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prior_split_inventory_failure_does_not_authorize_decomposition() {
+        let (evaluator, _ws) = proposal_evaluator("prior-split-unavailable");
+        let mut store = MockStore::new();
+        store.fail_inventory = true;
+        let parent = test_bead();
+        assert!(evaluator
+            .evaluate(
+                &store,
+                &parent,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "missing"
+            )
+            .await
+            .is_err());
+        assert!(evaluator
+            .apply_split_proposals(&store, &parent, &["Novel work".to_string()], "retry")
+            .await
+            .is_err());
+        assert!(store.created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prior_split_ignores_self_scope_but_preserves_parent_provenance() {
+        let mut parent = test_bead();
+        parent.labels.push(format!("parent-{}", parent.id));
+        let store = MockStore::new().with_reconciliation_inventory(vec![parent.clone()]);
+        assert!(prior_split::inspect(&store, &parent)
+            .await
+            .unwrap()
+            .is_none());
+        parent.labels.push(AUTO_SPLIT_PARENT_LABEL.to_string());
+        assert!(prior_split::inspect(&store, &parent)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn prior_split_recognizes_legacy_umbrella_without_parent_scope() {
+        let parent = reconciliation_bead(
+            "legacy-parent",
+            BeadStatus::Open,
+            &["umbrella"],
+            Some("legacy-child"),
+        );
+        let child = reconciliation_bead("legacy-child", BeadStatus::Closed, &["split-child"], None);
+        let store = MockStore::new().with_reconciliation_inventory(vec![parent.clone(), child]);
+        let prior = prior_split::inspect(&store, &parent)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prior.children, 1);
+        assert_eq!(prior.unfinished, 0);
+    }
+
+    #[tokio::test]
     async fn evaluate_skips_when_disabled() {
         let config = MitosisConfig {
             child_count_warning_threshold: 24,
@@ -3578,13 +3768,14 @@ End of response."#;
     }
 
     #[tokio::test]
-    async fn apply_split_dedupes_then_chains_the_survivor_under_an_umbrella() {
+    async fn apply_split_dedupes_lineage_then_chains_the_survivor_under_an_umbrella() {
         let (evaluator, _ws) = proposal_evaluator("split-apply-dedup-chain");
         let parent = test_bead();
-        // One proposed title already exists as a child, and a second is the
-        // same title in a different case — both fold away before creation.
-        let store = MockStore::new()
-            .with_existing_children(vec![existing_child("Add the parser", "parent-001")]);
+        // A sibling in the same lineage covers one proposed title. This
+        // parent has never split, so a novel child can still be created.
+        let mut sibling = existing_child("Add the parser", "another-parent");
+        sibling.labels.push("root-parent-001".to_string());
+        let store = MockStore::new().with_existing_children(vec![sibling]);
 
         let application = evaluator
             .apply_split_proposals(
@@ -5974,9 +6165,8 @@ End of response."#;
         let ws_tmp = tempfile::tempdir().unwrap();
         let evaluator =
             MitosisEvaluator::new(warning_config(2), telemetry, ws_tmp.path().to_path_buf());
-        // One existing child; two novel proposals push the parent to 3.
-        let store = MockStore::new()
-            .with_existing_children(vec![existing_child("Add endpoint", "parent-001")]);
+        // A first split crosses the threshold at two children.
+        let store = MockStore::new();
         let parent = test_bead();
 
         let result = evaluator
@@ -5984,7 +6174,7 @@ End of response."#;
                 &store,
                 &parent,
                 &["Write migration".to_string(), "Update tests".to_string()],
-                "the parent bundles three unrelated deliverables",
+                "the parent bundles two unrelated deliverables",
             )
             .await
             .unwrap();
@@ -6014,7 +6204,7 @@ End of response."#;
         );
         assert_eq!(
             warnings[0].get("child_count").and_then(|v| v.as_u64()),
-            Some(3)
+            Some(2)
         );
         assert_eq!(
             warnings[0].get("threshold").and_then(|v| v.as_u64()),

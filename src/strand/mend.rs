@@ -34,6 +34,8 @@ use crate::types::{Bead, BeadId, BeadStatus, ClaimStatus, StrandError, StrandRes
 /// Scan all in-progress beads in a store and apply the shared legacy recovery
 /// policy. Mend uses its private exact-identity path; Explore remains on this
 /// qualified-assignee projection until its own identity contract is enrolled.
+/// A live heartbeat naming idle or other work is ambiguous and cannot release
+/// a claim through this projection; only positive process-death evidence can.
 ///
 /// This is a store-scoped function for Explore's remote workspace recovery.
 /// Mend uses its private exact-identity gate below.
@@ -267,9 +269,6 @@ enum DeadProcessEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ClaimOwnership {
     ConfirmedCurrent,
-    ConfirmedSuperseded {
-        named: Option<BeadId>,
-    },
     ConfirmedDead {
         evidence: DeadProcessEvidence,
     },
@@ -326,8 +325,12 @@ fn classify_claim_ownership(
         ExecutorLookup::Present(execution) if execution.current_bead.as_ref() == Some(bead_id) => {
             ClaimOwnership::ConfirmedCurrent
         }
-        ExecutorLookup::Present(execution) => ClaimOwnership::ConfirmedSuperseded {
-            named: execution.current_bead.clone(),
+        // This heartbeat may predate the claim or belong to a reused worker
+        // name. Without claim-bound session/attempt identity, idle or other
+        // work cannot prove that the live worker relinquished this claim.
+        ExecutorLookup::Present(_) => ClaimOwnership::Unknown {
+            heartbeat: UndeterminedHeartbeat::ClaimIdentityUnknown,
+            registry,
         },
     }
 }
@@ -617,9 +620,6 @@ fn classify_claim_with_policy(
             let projected = legacy_executor_lookup(heartbeat, heartbeat_ttl, now);
             match classify_claim_ownership(&bead.id, projected.as_ref(), registry, now) {
                 ClaimOwnership::ConfirmedCurrent => ClaimIdentityVerdict::Current,
-                ClaimOwnership::ConfirmedSuperseded { named } => {
-                    ClaimIdentityVerdict::Superseded { named }
-                }
                 ClaimOwnership::ConfirmedDead { evidence } => {
                     ClaimIdentityVerdict::Dead { evidence }
                 }
@@ -3969,31 +3969,26 @@ mod tests {
             );
         }
 
-        // ── ConfirmedSuperseded: a fresh live heartbeat from the same
-        // qualified worker verifiably moved on — naming another bead…
-        let superseded_bead = hb(Some(&other), now, true, true);
-        assert_eq!(
-            classify_claim_ownership(
-                &claim,
-                superseded_bead.as_ref(),
+        // Fresh idle/other-work heartbeats are not bound to this claim. Even
+        // a dead registry entry cannot override positive heartbeat liveness.
+        for current_bead in [None, Some(&other)] {
+            for registry in [
                 RegistryLiveness::RegisteredAlive,
-                now
-            ),
-            ClaimOwnership::ConfirmedSuperseded {
-                named: Some(other.clone())
+                RegistryLiveness::RegisteredDead,
+                RegistryLiveness::Unregistered,
+                RegistryLiveness::Unread,
+            ] {
+                let evidence = hb(current_bead, now, true, true);
+                assert_eq!(
+                    classify_claim_ownership(&claim, evidence.as_ref(), registry, now),
+                    ClaimOwnership::Unknown {
+                        heartbeat: UndeterminedHeartbeat::ClaimIdentityUnknown,
+                        registry,
+                    },
+                    "live nonmatching heartbeat must stay Unknown: {current_bead:?}, {registry:?}"
+                );
             }
-        );
-        // …or reporting idle between beads.
-        let superseded_idle = hb(None, now, true, true);
-        assert_eq!(
-            classify_claim_ownership(
-                &claim,
-                superseded_idle.as_ref(),
-                RegistryLiveness::RegisteredAlive,
-                now
-            ),
-            ClaimOwnership::ConfirmedSuperseded { named: None }
-        );
+        }
 
         // ── ConfirmedDead: positive process evidence ────────────────────────
         // A dead heartbeat PID is authoritative regardless of the heartbeat's
@@ -4181,6 +4176,65 @@ mod tests {
             ClaimOwnership::ConfirmedCurrent,
             "small forward skew stays decidable evidence"
         );
+    }
+
+    #[tokio::test]
+    async fn shared_recovery_preserves_live_claims_with_nonmatching_heartbeats() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let heartbeat_dir = state_dir.path().join("heartbeats");
+        std::fs::create_dir(&heartbeat_dir).unwrap();
+        let registry = Registry::new(state_dir.path());
+        let now = Utc::now();
+        let cases = [
+            ("nd-preclaim-idle", "idle-worker", None, std::process::id()),
+            (
+                "nd-reused-worker",
+                "reused-worker",
+                Some("nd-other-work"),
+                std::process::id(),
+            ),
+            ("nd-dead-worker", "dead-worker", None, 99_999_999),
+        ];
+        let mut beads = Vec::new();
+        for (id, assignee, current_bead, pid) in cases {
+            let mut heartbeat = make_stale_heartbeat(assignee, pid, current_bead);
+            heartbeat.qualified_id = assignee.to_string();
+            // The latest heartbeat can still advertise pre-claim idle/other
+            // work when Explore observes the newly acquired claim.
+            heartbeat.last_heartbeat = now - chrono::Duration::seconds(2);
+            write_heartbeat(&heartbeat_dir, &heartbeat);
+            let mut bead = make_recent_in_progress_bead(id, assignee);
+            bead.updated_at = now;
+            beads.push(bead);
+        }
+        let (store, release_count, _) = MockBeadStore::new(beads);
+        let telemetry = TestHelper::new("shared-recovery-claim-race");
+
+        let released = cleanup_orphaned_in_progress(
+            &store,
+            &registry,
+            telemetry.telemetry(),
+            Some(Duration::ZERO),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            released, 1,
+            "only the positively dead worker is recoverable"
+        );
+        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+        let remaining = store.all_beads.lock().unwrap();
+        for bead in remaining.iter() {
+            if bead.id == BeadId::from("nd-dead-worker") {
+                assert_eq!(bead.status, BeadStatus::Open);
+                assert_eq!(bead.assignee, None);
+            } else {
+                assert_eq!(bead.status, BeadStatus::InProgress);
+                assert!(bead.assignee.is_some(), "live claim must remain assigned");
+            }
+        }
     }
 
     #[tokio::test]
