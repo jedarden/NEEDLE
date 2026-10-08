@@ -465,6 +465,75 @@ async fn post_pluck_complete_resolution_closes_the_claimed_bead() {
 }
 
 #[tokio::test]
+async fn post_pluck_completion_event_requires_a_new_confirmed_close() {
+    let roots = IsolatedRoots::new();
+    let store = ScenarioStore::new(roots.workspace());
+    let bead = store.bead();
+    let (telemetry, events) = telemetry();
+    let executor = executor(telemetry.clone());
+
+    let applied = apply_observed_resolution(&executor, &store, &bead, &complete(), "worker-a", 0)
+        .await
+        .expect("accepted work should close the bead");
+    assert_eq!(applied, AppliedDecision::Completed);
+    telemetry
+        .force_flush_async(Duration::from_secs(1))
+        .await
+        .expect("completion telemetry should flush");
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.event_type == "bead.completed")
+            .count(),
+        1,
+        "one completion follows the newly confirmed close"
+    );
+
+    // Replaying the same stale dispatch observes the already closed bead and
+    // must not manufacture a second lifecycle completion.
+    let replay = apply_observed_resolution(&executor, &store, &bead, &complete(), "worker-a", 0)
+        .await
+        .expect("replay should be a safe no-op");
+    assert_eq!(replay, AppliedDecision::OwnershipLost);
+
+    // A timeout is a failure-path observation even if the resolver payload
+    // asks for completion; it must release/admit failure without an event.
+    let failed_store = ScenarioStore::new(roots.workspace());
+    let failed_bead = failed_store.bead();
+    let failed = apply_observed_resolution(
+        &executor,
+        &failed_store,
+        &failed_bead,
+        &complete(),
+        "worker-a",
+        124,
+    )
+    .await
+    .expect("timeout should resolve without claiming completion");
+    assert!(
+        matches!(failed, AppliedDecision::Released(_)),
+        "timeout must release or quarantine, got {failed:?}"
+    );
+
+    telemetry
+        .force_flush_async(Duration::from_secs(1))
+        .await
+        .expect("failure telemetry should flush");
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.event_type == "bead.completed")
+            .count(),
+        1,
+        "replay and failure paths emit no additional completion"
+    );
+}
+
+#[tokio::test]
 async fn post_pluck_retry_resolution_releases_for_retry() {
     let roots = IsolatedRoots::new();
     let store = ScenarioStore::new(roots.workspace());
@@ -506,13 +575,13 @@ async fn post_pluck_split_resolution_creates_children_and_blocks_parent() {
     let roots = IsolatedRoots::new();
     let store = ScenarioStore::new(roots.workspace());
     let bead = store.bead();
-    let (telemetry, _) = telemetry();
+    let (telemetry, events) = telemetry();
     let mitosis = MitosisEvaluator::new(
         MitosisConfig::default(),
         telemetry.clone(),
         roots.home.path().join("mitosis-locks"),
     );
-    let executor = executor(telemetry).with_mitosis(mitosis);
+    let executor = executor(telemetry.clone()).with_mitosis(mitosis);
     let applied =
         apply_observed_resolution(&executor, &store, &bead, &split(&bead.id), "worker-a", 1)
             .await
@@ -520,6 +589,18 @@ async fn post_pluck_split_resolution_creates_children_and_blocks_parent() {
     assert!(matches!(applied, AppliedDecision::Split { created: 2, .. }));
     assert_eq!(store.bead().status, BeadStatus::Blocked);
     assert_eq!(store.children().len(), 2);
+    telemetry
+        .force_flush_async(Duration::from_secs(1))
+        .await
+        .expect("split telemetry should flush");
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.event_type != "bead.completed"),
+        "a split composite blocks the parent and never emits completion"
+    );
 }
 
 #[tokio::test]

@@ -503,7 +503,8 @@ contract = 218
 # +13 managed GLM-5.3-Flash profile contracts (needle-0810eb14) in
 # adapter_smoke: static validation, installer rollback, min-CLI probing, and
 # fake-Claude dispatch/timeout/signal coverage.
-e2e = 883
+
+e2e = 884
 soak = 0
 fuzz = 0
 
@@ -623,7 +624,8 @@ tier = "e2e"
 # (needle-e13204d9).
 # +1 GenAI semantic-convention matrix across the supported built-in adapters
 # (needle-758bfd1d).
-max_tests = 386
+
+max_tests = 387
 owner = "component:weave-unravel-pulse"
 
 [[harness]]
