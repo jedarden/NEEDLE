@@ -180,9 +180,11 @@ worker, unfinished capture metadata, or any symlink in the trace tree. Actual
 pruning/deletion is delegated to the same cleanup and `attempt_archive`
 spooled-marker gate used by Mend. Successful captures retain `metadata.json`.
 
-Install or converge with `./fleet/lab/apply-lab-fleet.sh`; it installs and
-enables the timer without restarting workers. Review the JSON result and exit
-status with:
+Deploy a NEEDLE build containing `trace-retention` to
+`/home/coding/.local/bin/needle` first; the fleet script installs and enables
+the systemd units but does not update that binary. Then install or converge
+with `./fleet/lab/apply-lab-fleet.sh`; it enables the timer without restarting
+workers. Review the JSON result and exit status with:
 
 ```text
 systemctl --user status trace-retention.timer
