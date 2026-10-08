@@ -91,6 +91,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
         ref attempt_archive,
         ref transitions,
         ref audit,
+        ref loom,
 
         // Tier A: read once per `needle improve` invocation, so a change is
         // live for the next run with no restart (ADR-029, N-T53-N-T56).
@@ -111,6 +112,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
     let _ = stop.reload_tier();
     let _ = audit.reload_tier();
     let _ = improvements.reload_tier();
+    let _ = loom.reload_tier();
 
     // Verify tier B assignments
     let _ = telemetry.reload_tier();
@@ -262,6 +264,17 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         ReloadTier::Live,
     ),
     ("agent.routing.strict", ReloadTier::Live),
+    // LOOM endpoint and credential path require a process restart; Weft
+    // routing and worker tuning can be changed at a cycle boundary.
+    ("loom.enabled", ReloadTier::Live),
+    ("loom.worker_name", ReloadTier::Live),
+    ("loom.position", ReloadTier::Live),
+    ("loom.poll_interval_secs", ReloadTier::Live),
+    ("loom.lease_secs", ReloadTier::Live),
+    ("loom.heartbeat_secs", ReloadTier::Live),
+    ("loom.workspace_root", ReloadTier::Live),
+    ("loom.scratch_dir", ReloadTier::Live),
+    ("loom.serve_strands", ReloadTier::Live),
     // Worker configuration (mostly live)
     ("worker.idle_timeout", ReloadTier::Live),
     ("worker.idle_action", ReloadTier::Live),
@@ -518,6 +531,8 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("health.heartbeat_dir", ReloadTier::RestartRequired),
     // Tsnet (Tier C - embed-level, subprocess-facing)
     ("tsnet", ReloadTier::RestartRequired),
+    ("loom.base_url", ReloadTier::RestartRequired),
+    ("loom.token_file", ReloadTier::RestartRequired),
     // Self-modification (Tier C - controls hot-reload itself)
     ("self_modification", ReloadTier::RestartRequired),
     // Supervisor (Tier C - daemon lifecycle)

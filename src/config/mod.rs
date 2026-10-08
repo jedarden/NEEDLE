@@ -13,6 +13,7 @@
 //! Leaf module — depends only on `types`.
 
 pub mod key_path;
+pub mod loom;
 pub mod tiers;
 
 pub use crate::config::tiers::ReloadTier;
@@ -45,6 +46,7 @@ use sha2::{Digest, Sha256};
 use crate::cost::{BudgetConfig, PricingConfig};
 use crate::types::{HardDeadline, IdentifierScheme, IdleAction};
 use crate::validation::GateConfig;
+pub use loom::{LoomConfig, LoomPosition, LoomServeStrand};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Sub-structs
@@ -7671,6 +7673,9 @@ pub struct WorkspaceOverrides {
     /// the rest of `validation` stays host-level.
     #[serde(default)]
     pub validation: Option<WorkspaceValidationOverrides>,
+    /// Workspace overrides for LOOM Weft settings.
+    #[serde(default)]
+    pub loom: Option<WorkspaceLoomOverrides>,
     /// Phase 20 checkout-local file-contention markers (opt-in). Like
     /// `validation.fallback_gate`, this is resolved from the BEAD's workspace
     /// at dispatch time (`file_contention_for_workspace`), never merged into
@@ -7678,6 +7683,22 @@ pub struct WorkspaceOverrides {
     /// checkout.
     #[serde(default)]
     pub file_contention: Option<FileContentionConfig>,
+}
+
+/// Fields of the LOOM block that can be overridden per workspace.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkspaceLoomOverrides {
+    pub enabled: Option<bool>,
+    pub base_url: Option<String>,
+    pub token_file: Option<PathBuf>,
+    pub worker_name: Option<String>,
+    pub position: Option<LoomPosition>,
+    pub poll_interval_secs: Option<u64>,
+    pub lease_secs: Option<u64>,
+    pub heartbeat_secs: Option<u64>,
+    pub workspace_root: Option<PathBuf>,
+    pub scratch_dir: Option<PathBuf>,
+    pub serve_strands: Option<BTreeMap<String, LoomServeStrand>>,
 }
 
 /// Capability string an adapter advertises in its `capabilities:` list when
@@ -8217,6 +8238,9 @@ pub struct Config {
     /// Measured improvement loop (ADR-029, N-T53-N-T56).
     #[serde(default)]
     pub improvements: ImprovementsConfig,
+    /// LOOM Weft worker settings.
+    #[serde(default)]
+    pub loom: LoomConfig,
 }
 
 impl Config {
@@ -8273,6 +8297,11 @@ impl Config {
 
         // agent section
         self.agent.adapters_dir = expand_tilde(&self.agent.adapters_dir);
+
+        // LOOM/Weft paths.
+        self.loom.token_file = expand_tilde(&self.loom.token_file);
+        self.loom.workspace_root = expand_tilde(&self.loom.workspace_root);
+        self.loom.scratch_dir = expand_tilde(&self.loom.scratch_dir);
 
         // bead_cli section
         self.bead_cli.path = expand_tilde_option(&self.bead_cli.path);
@@ -8416,6 +8445,7 @@ impl Config {
         hashes.insert("budget".to_string(), hash_section(&self.budget));
         hashes.insert("pricing".to_string(), hash_section(&self.pricing));
         hashes.insert("post_push_ci".to_string(), hash_section(&self.post_push_ci));
+        hashes.insert("loom".to_string(), hash_section(&self.loom));
 
         // Tier B sections (component rebuild)
         hashes.insert("telemetry".to_string(), hash_section(&self.telemetry));
@@ -8572,6 +8602,12 @@ impl Config {
             "paths.state_dir",
             self.paths.state_dir,
             other.paths.state_dir
+        );
+        check!("loom.base_url", self.loom.base_url, other.loom.base_url);
+        check!(
+            "loom.token_file",
+            self.loom.token_file,
+            other.loom.token_file
         );
 
         // These sections are process-scoped as a whole, so report their
@@ -8756,6 +8792,7 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "attempt_archive",
         "transitions",
         "audit",
+        "loom",
     ];
 
     if !valid_top_level.contains(&root) {
@@ -8784,12 +8821,54 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "paths" => validate_paths_field(second, key_path),
         "attempt_archive" => validate_attempt_archive_field(second, &segments[2..], key_path),
         "transitions" => validate_transitions_field(second, &segments[2..], key_path),
+        "loom" => validate_loom_field(second, &segments[2..], key_path),
         _ => {
             // For other top-level configs, accept any nested field for now
             // This can be extended later with specific validation
             Ok(())
         }
     }
+}
+
+/// Validate LOOM config paths. Strand names under `serve_strands` are user-defined.
+fn validate_loom_field(field: &str, rest: &[&str], key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = [
+        "enabled",
+        "base_url",
+        "token_file",
+        "worker_name",
+        "position",
+        "poll_interval_secs",
+        "lease_secs",
+        "heartbeat_secs",
+        "workspace_root",
+        "scratch_dir",
+        "serve_strands",
+    ];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(str::to_string).to_vec(),
+            "loom".to_string(),
+        ));
+    }
+    if field == "serve_strands" {
+        if rest.len() <= 2 {
+            return Ok(());
+        }
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            "serve_strands entries accept only adapter and model".to_string(),
+        ));
+    }
+    if !rest.is_empty() {
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!("loom.{field} does not support nested access"),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate the versioned authority-transition switches.
@@ -9705,6 +9784,44 @@ impl ConfigLoader {
             sources.insert("post_push_ci".to_string(), source.clone());
         }
 
+        if let Some(ref loom) = overrides.loom {
+            if let Some(enabled) = loom.enabled {
+                config.loom.enabled = enabled;
+            }
+            if let Some(ref value) = loom.base_url {
+                config.loom.base_url = value.clone();
+            }
+            if let Some(ref value) = loom.token_file {
+                config.loom.token_file = value.clone();
+            }
+            if let Some(ref value) = loom.worker_name {
+                config.loom.worker_name = value.clone();
+            }
+            if let Some(value) = loom.position {
+                config.loom.position = value;
+            }
+            if let Some(value) = loom.poll_interval_secs {
+                config.loom.poll_interval_secs = value;
+            }
+            if let Some(value) = loom.lease_secs {
+                config.loom.lease_secs = value;
+            }
+            if let Some(value) = loom.heartbeat_secs {
+                config.loom.heartbeat_secs = value;
+            }
+            if let Some(ref value) = loom.workspace_root {
+                config.loom.workspace_root = value.clone();
+            }
+            if let Some(ref value) = loom.scratch_dir {
+                config.loom.scratch_dir = value.clone();
+            }
+            if let Some(ref value) = loom.serve_strands {
+                config.loom.serve_strands = value.clone();
+            }
+            config.loom.expand_tildes();
+            sources.insert("loom".to_string(), source.clone());
+        }
+
         if let Some(ref ws) = overrides.workspace {
             if !ws.labels.is_empty() {
                 config.workspace.labels = ws.labels.clone();
@@ -10187,6 +10304,67 @@ impl ConfigLoader {
     /// Returns a list of errors (empty = valid).
     pub fn validate(config: &Config) -> Vec<ConfigError> {
         let mut errors = Vec::new();
+
+        if config.loom.enabled && config.loom.serve_strands.is_empty() {
+            errors.push(ConfigError::new(
+                "loom.serve_strands".to_string(),
+                "must contain at least one strand when loom.enabled is true".to_string(),
+            ));
+        }
+        let loom_adapters = if config
+            .loom
+            .serve_strands
+            .values()
+            .any(|m| !m.adapter.trim().is_empty() && m.adapter != "none")
+        {
+            Some(crate::dispatch::load_adapters(
+                &config.agent.adapters_dir,
+                &crate::dispatch::builtin_adapters(),
+            ))
+        } else {
+            None
+        };
+        for (strand, mapping) in &config.loom.serve_strands {
+            if mapping.adapter.trim().is_empty() {
+                errors.push(ConfigError::new(
+                    format!("loom.serve_strands.{strand}.adapter"),
+                    "must not be empty".to_string(),
+                ));
+                continue;
+            }
+            if mapping.adapter == "none" {
+                if mapping.model.is_some() {
+                    errors.push(ConfigError::new(
+                        format!("loom.serve_strands.{strand}.model"),
+                        "must be omitted when adapter is 'none'".to_string(),
+                    ));
+                }
+            } else {
+                if mapping
+                    .model
+                    .as_ref()
+                    .is_none_or(|model| model.trim().is_empty())
+                {
+                    errors.push(ConfigError::new(
+                        format!("loom.serve_strands.{strand}.model"),
+                        "must be set for an adapter-backed strand".to_string(),
+                    ));
+                }
+                match loom_adapters.as_ref() {
+                    Some(Ok(adapters)) if !adapters.contains_key(&mapping.adapter) => {
+                        errors.push(ConfigError::new(
+                            format!("loom.serve_strands.{strand}.adapter"),
+                            format!("unknown adapter '{}'", mapping.adapter),
+                        ))
+                    }
+                    Some(Err(error)) => errors.push(ConfigError::new(
+                        "agent.adapters_dir".to_string(),
+                        format!("could not validate LOOM adapters: {error:#}"),
+                    )),
+                    _ => {}
+                }
+            }
+        }
 
         if config.agent.default.is_empty() {
             errors.push(ConfigError::new(

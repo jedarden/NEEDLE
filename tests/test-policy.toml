@@ -360,7 +360,10 @@ version = 1
 # dispatch enabled coverage, fail open on unclear input or paths, and
 # notebook/relative-path coverage. Injected env lookup; real-git fixture via
 # git_safety::test_support.
-max_tests = 4172
+# +6 LOOM config contracts (needle-b47c228a): defaults and workspace layering,
+# empty/unknown adapter validation, courier without a model, private token-file
+# mode/read-at-use behavior, and Tier-C reload reporting.
+max_tests = 4178
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -81,6 +81,24 @@ This guide covers the most commonly used configuration options.
 
 **Stop command:**
 - `stop.grace_period_secs` — Grace period for killed processes to exit
+- `loom.serve_strands` — Live-reloadable strand-to-adapter/model assignments for a Weft worker
+
+### LOOM (Weft) Configuration
+
+The `loom:` block may appear in the global config or a workspace `.needle.yaml`;
+workspace values override matching global fields. The default is disabled. Set
+the token file to mode `0600` and provision it through the operator's secret
+workflow. Config loading stores and expands the path only. A client reads the
+file when authenticating, and token contents must never be logged.
+
+See [`docs/examples/loom.yaml`](examples/loom.yaml) for a complete example.
+
+When enabled, `serve_strands` must contain at least one mapping. Adapter names
+must resolve to a built-in or configured adapter; `adapter: none` is the
+adapter-free courier mapping and omits `model`. `loom.serve_strands` is Tier A
+and takes effect at a cycle boundary. Changing `loom.base_url` or
+`loom.token_file` is Tier C and emits `config.reload.restart_required` until
+the worker is restarted. Other Loom settings are Tier A.
 
 ### Tier B (Rebuild) — Component Reconstruction
 

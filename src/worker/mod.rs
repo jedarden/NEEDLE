@@ -8039,6 +8039,43 @@ impl Worker {
         replace!("agent.timeout", next.agent.timeout, candidate.agent.timeout);
         replace!("agent.routing", next.agent.routing, candidate.agent.routing);
         replace!("post_push_ci", next.post_push_ci, candidate.post_push_ci);
+        replace!("loom.enabled", next.loom.enabled, candidate.loom.enabled);
+        replace!(
+            "loom.worker_name",
+            next.loom.worker_name,
+            candidate.loom.worker_name
+        );
+        replace!("loom.position", next.loom.position, candidate.loom.position);
+        replace!(
+            "loom.poll_interval_secs",
+            next.loom.poll_interval_secs,
+            candidate.loom.poll_interval_secs
+        );
+        replace!(
+            "loom.lease_secs",
+            next.loom.lease_secs,
+            candidate.loom.lease_secs
+        );
+        replace!(
+            "loom.heartbeat_secs",
+            next.loom.heartbeat_secs,
+            candidate.loom.heartbeat_secs
+        );
+        replace!(
+            "loom.workspace_root",
+            next.loom.workspace_root,
+            candidate.loom.workspace_root
+        );
+        replace!(
+            "loom.scratch_dir",
+            next.loom.scratch_dir,
+            candidate.loom.scratch_dir
+        );
+        replace!(
+            "loom.serve_strands",
+            next.loom.serve_strands,
+            candidate.loom.serve_strands
+        );
 
         // Worker fields declared Tier A. Identity, launch, and reload-poller
         // settings are Tier C and therefore intentionally excluded.
@@ -11066,6 +11103,8 @@ mod tests {
         let running_max_workers = worker.config.worker.max_workers;
         let running_workspace_home = worker.config.workspace.home.clone();
         let running_telemetry_enabled = worker.config.telemetry.file_sink.enabled;
+        let running_loom_base_url = worker.config.loom.base_url.clone();
+        let running_loom_token_file = worker.config.loom.token_file.clone();
 
         let mut candidate = worker.config.clone();
         candidate.agent.timeout += 1;
@@ -11075,6 +11114,16 @@ mod tests {
         candidate.worker.max_workers = running_max_workers + 1;
         candidate.workspace.home = PathBuf::from("/tmp/reloaded-home");
         candidate.telemetry.file_sink.enabled = !running_telemetry_enabled;
+        candidate.loom.enabled = true;
+        candidate.loom.base_url.push_str("/reload");
+        candidate.loom.token_file.push("-reload");
+        candidate.loom.serve_strands.insert(
+            "advisor".to_string(),
+            crate::config::LoomServeStrand {
+                adapter: "claude-print".to_string(),
+                model: Some("claude-sonnet-5".to_string()),
+            },
+        );
 
         let changed_keys = worker.apply_tier_a_config(&candidate);
 
@@ -11084,6 +11133,14 @@ mod tests {
         assert!(changed_keys.contains(&"agent.timeout".to_string()));
         assert!(changed_keys.contains(&"worker.idle_timeout".to_string()));
         assert!(changed_keys.contains(&"budget.warn_usd".to_string()));
+        assert!(changed_keys.contains(&"loom.serve_strands".to_string()));
+        assert!(worker.config.loom.enabled);
+        assert_eq!(
+            worker.config.loom.serve_strands,
+            candidate.loom.serve_strands
+        );
+        assert_eq!(worker.config.loom.base_url, running_loom_base_url);
+        assert_eq!(worker.config.loom.token_file, running_loom_token_file);
         assert_eq!(worker.config.agent.adapters_dir, running_adapters_dir);
         assert_eq!(worker.config.worker.max_workers, running_max_workers);
         assert_eq!(worker.config.workspace.home, running_workspace_home);

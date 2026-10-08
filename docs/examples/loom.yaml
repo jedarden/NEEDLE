@@ -1,0 +1,18 @@
+# Optional LOOM Weft config for either config.yaml or .needle.yaml.
+# Provision token_file through the secret workflow as a mode-0600 file.
+loom:
+  enabled: false
+  base_url: https://loom.ardenone.com
+  token_file: ~/.config/needle/loom.token
+  worker_name: "" # Empty uses this NEEDLE worker's name.
+  position: after_pluck
+  poll_interval_secs: 2
+  lease_secs: 120
+  heartbeat_secs: 30
+  workspace_root: /home/coding
+  scratch_dir: ~/.cache/needle/weft
+  serve_strands:
+    advisor: { adapter: claude-print, model: claude-sonnet-5 }
+    scribe: { adapter: claude-print, model: claude-sonnet-5 }
+    reflect: { adapter: claude-print, model: claude-opus-5 }
+    courier: { adapter: none }
