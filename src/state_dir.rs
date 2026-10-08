@@ -65,7 +65,13 @@ pub const TEST_HARNESS_ENV: &str = "NEEDLE_TEST_HARNESS";
 /// A mutex rather than a `OnceLock` because config loads are repeatable
 /// (process start, and the restart-required reload path re-reads the file);
 /// the value is a whole-path replacement, so last load wins.
-static CONFIGURED: Mutex<Option<PathBuf>> = Mutex::new(None);
+#[derive(Debug, Clone)]
+struct ConfiguredRoot {
+    path: PathBuf,
+    home: Option<PathBuf>,
+}
+
+static CONFIGURED: Mutex<Option<ConfiguredRoot>> = Mutex::new(None);
 
 /// Publish the configured `paths.state_dir` value.
 ///
@@ -76,7 +82,10 @@ pub fn set_configured(state_dir: Option<PathBuf>) {
     let mut configured = CONFIGURED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *configured = state_dir;
+    *configured = state_dir.map(|path| ConfiguredRoot {
+        path,
+        home: current_home(),
+    });
 }
 
 /// The configured `paths.state_dir` value, if one was published.
@@ -84,7 +93,24 @@ pub fn configured() -> Option<PathBuf> {
     CONFIGURED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+        .as_ref()
+        .map(|configured| configured.path.clone())
+}
+
+fn current_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+fn configured_for_current_home() -> Option<PathBuf> {
+    let current_home = current_home();
+    CONFIGURED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|configured| configured.home == current_home)
+        .map(|configured| configured.path.clone())
 }
 
 /// Expand a leading `~` using the current `HOME`, and normalize an empty
@@ -107,7 +133,7 @@ fn expanded(raw: std::ffi::OsString) -> Option<PathBuf> {
 pub fn override_root() -> Option<PathBuf> {
     std::env::var_os(STATE_DIR_ENV)
         .and_then(expanded)
-        .or_else(configured)
+        .or_else(configured_for_current_home)
 }
 
 /// The historical default root: `$HOME/.needle` (temp dir when `HOME` is
