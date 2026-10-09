@@ -825,6 +825,8 @@ pub struct TraceCleanupSummary {
     pub traces_pruned: u32,
     /// Number of traces fully deleted.
     pub traces_deleted: u32,
+    /// Captures with metadata that is not a NEEDLE TraceMetadata record.
+    pub skipped_noncanonical: u32,
 }
 
 /// Archive-related retention gates. The default preserves the historical
@@ -951,22 +953,24 @@ fn apply_retention_to_dir(
 ) {
     // Check metadata.json to determine outcome and age.
     let metadata_path = path.join("metadata.json");
-    let metadata: Option<TraceMetadata> = metadata_path
-        .exists()
-        .then(|| {
-            let content = std::fs::read_to_string(&metadata_path).ok()?;
-            serde_json::from_str(&content).ok()
-        })
-        .flatten();
+    let metadata = match std::fs::read(&metadata_path) {
+        Ok(bytes) => match serde_json::from_slice::<TraceMetadata>(&bytes) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                summary.skipped_noncanonical += 1;
+                return;
+            }
+        },
+        Err(_) => return,
+    };
 
-    let age_days = metadata
-        .as_ref()
-        .and_then(|m| now.checked_sub(m.captured_at.timestamp() as u64))
+    let age_days = now
+        .checked_sub(metadata.captured_at.timestamp().max(0) as u64)
         .map(|secs| secs / 86400)
-        .unwrap_or(u64::MAX);
+        .unwrap_or(0);
 
-    let is_failed = metadata.as_ref().map(|m| m.exit_code != 0).unwrap_or(false);
-    let is_pruned = metadata.as_ref().map(|m| m.pruned).unwrap_or(false);
+    let is_failed = metadata.exit_code != 0;
+    let is_pruned = metadata.pruned;
 
     // Check if trace data files actually exist before attempting to prune.
     // This prevents counting a trace as "pruned" when the data files were
@@ -2780,6 +2784,77 @@ mod tests {
         assert!(bead_dir.join("metadata.json").exists());
         assert!(!attempt.join(STDOUT_FILE).exists());
         assert!(attempt.join("metadata.json").exists());
+
+        // A scheduled sweep must preserve noncanonical captures without
+        // holding valid expired captures in the same workspace.
+        let invalid_metadata = b"{\"captured_at\":\"2020-01-01T00:00:00Z\"}";
+        let write_invalid = |path: &Path| {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("metadata.json"), invalid_metadata).unwrap();
+            std::fs::write(path.join("trace.jsonl"), b"preserve this trace").unwrap();
+        };
+        let invalid_attempt = bead_dir.join("attempt-noncanonical");
+        write_invalid(&invalid_attempt);
+        let valid_flat = traces_dir.join("needle-valid-flat");
+        std::fs::create_dir_all(&valid_flat).unwrap();
+        std::fs::write(valid_flat.join("trace.jsonl"), b"valid trace").unwrap();
+        std::fs::write(
+            valid_flat.join("metadata.json"),
+            serde_json::to_vec(&retention_metadata("needle-valid-flat", 0, 8)).unwrap(),
+        )
+        .unwrap();
+        let invalid_flat = traces_dir.join("needle-invalid-flat");
+        write_invalid(&invalid_flat);
+        let failed_attempt = stage_attempt(&invalid_flat, "attempt-valid", 1, 31);
+
+        let preview =
+            crate::trace_retention::sweep_traces(&traces_dir, 30, 7, false, false, true).unwrap();
+        assert_eq!(
+            (
+                preview.traces_pruned,
+                preview.traces_deleted,
+                preview.skipped_noncanonical
+            ),
+            (1, 1, 2)
+        );
+        assert_eq!(
+            std::fs::read(invalid_attempt.join("trace.jsonl")).unwrap(),
+            b"preserve this trace"
+        );
+
+        let actual =
+            crate::trace_retention::sweep_traces(&traces_dir, 30, 7, false, false, false).unwrap();
+        assert_eq!(
+            (
+                actual.traces_pruned,
+                actual.traces_deleted,
+                actual.skipped_noncanonical
+            ),
+            (1, 1, 2)
+        );
+        assert!(!valid_flat.join("trace.jsonl").exists());
+        assert!(!failed_attempt.exists());
+        for path in [&invalid_attempt, &invalid_flat] {
+            assert_eq!(
+                std::fs::read(path.join("metadata.json")).unwrap(),
+                invalid_metadata
+            );
+            assert_eq!(
+                std::fs::read(path.join("trace.jsonl")).unwrap(),
+                b"preserve this trace"
+            );
+        }
+
+        // Default discovery excludes forensic backups, while a direct
+        // workspace path can still be supplied to the sweep explicitly.
+        let active = temp_dir.path().join("project");
+        let backup = temp_dir.path().join("backups/history/worktree/project");
+        std::fs::create_dir_all(active.join(".beads/traces")).unwrap();
+        std::fs::create_dir_all(backup.join(".beads/traces")).unwrap();
+        assert_eq!(
+            crate::trace_retention::discover_workspaces(temp_dir.path()).unwrap(),
+            vec![active]
+        );
     }
 
     #[test]

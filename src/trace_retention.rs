@@ -46,6 +46,7 @@ pub struct SweepSummary {
     pub workspaces_swept: u64,
     pub workspaces_skipped_active: u64,
     pub workspaces_skipped_live_capture: u64,
+    pub skipped_noncanonical: u64,
     pub traces_pruned: u64,
     pub traces_deleted: u64,
     pub bytes_reclaimed: u64,
@@ -53,10 +54,11 @@ pub struct SweepSummary {
 }
 
 #[derive(Debug, Default)]
-struct WorkspacePlan {
+pub(crate) struct WorkspacePlan {
     active_capture: bool,
-    traces_pruned: u64,
-    traces_deleted: u64,
+    pub(crate) skipped_noncanonical: u64,
+    pub(crate) traces_pruned: u64,
+    pub(crate) traces_deleted: u64,
     bytes_reclaimable: u64,
 }
 
@@ -100,6 +102,7 @@ pub fn sweep(root: &Path, explicit_workspaces: &[PathBuf], dry_run: bool) -> Res
                 summary.workspaces_swept += 1;
                 summary.traces_pruned += plan.traces_pruned;
                 summary.traces_deleted += plan.traces_deleted;
+                summary.skipped_noncanonical += plan.skipped_noncanonical;
                 summary.bytes_reclaimed = summary
                     .bytes_reclaimed
                     .saturating_add(plan.bytes_reclaimable);
@@ -162,7 +165,8 @@ fn discover_from(
         let name = entry.file_name();
         let name = name.and_then(|name| name.to_str());
         if name.is_some_and(|name| {
-            name.starts_with('.') || matches!(name, "target" | "node_modules" | "scratch")
+            name.starts_with('.')
+                || matches!(name, "target" | "node_modules" | "scratch" | "backups")
         }) {
             continue;
         }
@@ -213,7 +217,7 @@ fn sweep_workspace(workspace: &Path, dry_run: bool) -> Result<WorkspacePlan> {
     )
 }
 
-fn sweep_traces(
+pub(crate) fn sweep_traces(
     traces_dir: &Path,
     retention_days_failed: u32,
     retention_days_success: u32,
@@ -264,6 +268,7 @@ fn sweep_traces(
         active_capture: false,
         traces_pruned: u64::from(cleanup.traces_pruned),
         traces_deleted: u64::from(cleanup.traces_deleted),
+        skipped_noncanonical: u64::from(cleanup.skipped_noncanonical),
         bytes_reclaimable: before.saturating_sub(after),
     })
 }
@@ -350,10 +355,14 @@ fn inspect_capture(
         }
         return Ok(());
     }
-    let metadata: TraceMetadata = serde_json::from_slice(
-        &fs::read(&metadata_path).with_context(|| "failed to read trace metadata")?,
-    )
-    .context("failed to parse trace metadata")?;
+    let metadata_bytes = fs::read(&metadata_path).context("failed to read trace metadata")?;
+    let metadata: TraceMetadata = match serde_json::from_slice(&metadata_bytes) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            plan.skipped_noncanonical += 1;
+            return Ok(());
+        }
+    };
 
     // Dispatch writes metadata before outcome handling adds finished_at.  A
     // scheduled sweep must never touch that live capture, even if its worker
