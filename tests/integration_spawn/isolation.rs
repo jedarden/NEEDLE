@@ -21,6 +21,7 @@ pub fn needle_binary_path() -> std::ffi::OsString {
 }
 
 /// Runtime-relocatable path for the Claude event transformer binary.
+#[allow(dead_code)] // Used by the integration_spawn transformer tests.
 pub fn needle_transform_claude_binary_path() -> std::ffi::OsString {
     std::env::var_os("NEXTEST_BIN_EXE_needle_transform_claude")
         .unwrap_or_else(|| std::ffi::OsString::from(env!("CARGO_BIN_EXE_needle-transform-claude")))
@@ -97,10 +98,12 @@ impl IsolatedChildEnv {
 }
 
 /// A spawned child that is killed and reaped if a test exits early or panics.
+#[allow(dead_code)] // Used by process-lifecycle tests in integration_spawn.
 pub struct ChildGuard {
     child: Option<Child>,
 }
 
+#[allow(dead_code)] // Used by process-lifecycle tests in integration_spawn.
 impl ChildGuard {
     pub fn new(child: Child) -> Self {
         Self { child: Some(child) }
