@@ -95,6 +95,12 @@ mod workspace_tilde_expansion_tests;
 // HOME and Explore-root requirements merely by living outside integration_spawn.
 #[path = "integration_spawn/subprocess_isolation.rs"]
 mod subprocess_isolation;
+// Run the filesystem-level subprocess regression in the main integration
+// target too. The source guard above proves launch-site configuration, while
+// this fixture proves an isolated child cannot discover or mutate an outside
+// bead store when integration_tests is run on its own.
+#[path = "integration_spawn/isolation.rs"]
+mod subprocess_fixture_isolation;
 
 use chrono::{DateTime, Duration, Utc};
 use needle::bead_store::{BeadStore, Filters};
