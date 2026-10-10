@@ -55,6 +55,7 @@ fn important_profile() -> WorkspaceImpactProfile {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_contract_represents_objective_affected_severity_urgency_fit_and_visibility() {
     let profile = important_profile();
     let contract = ImpactContract::assemble("NEEDLE", Some(&profile), producer(), at(14));
@@ -76,6 +77,7 @@ fn the_contract_represents_objective_affected_severity_urgency_fit_and_visibilit
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn application_value_is_built_only_from_operator_owned_bands() {
     let profile = important_profile();
     let top = ImpactContract::assemble("NEEDLE", Some(&profile), producer(), at(14));
@@ -97,6 +99,7 @@ fn application_value_is_built_only_from_operator_owned_bands() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn public_visibility_is_not_a_component_of_application_value() {
     let mut private = important_profile();
     private.public_visibility = false;
@@ -119,6 +122,7 @@ fn public_visibility_is_not_a_component_of_application_value() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn producer_evidence_carries_no_weight_field_and_cannot_change_a_band() {
     let profile = important_profile();
 
@@ -151,6 +155,7 @@ fn producer_evidence_carries_no_weight_field_and_cannot_change_a_band() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn bands_are_bounded_so_an_out_of_range_weight_cannot_be_expressed() {
     assert_eq!(Band::new(200).get(), 4, "a band clamps into 0..=4");
     assert_eq!(Band::new(4), Band::MAX);
@@ -165,6 +170,7 @@ fn bands_are_bounded_so_an_out_of_range_weight_cannot_be_expressed() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn unprofiled_work_receives_a_neutral_bounded_default_rather_than_starvation() {
     let contract = ImpactContract::assemble("brand-new-repo", None, producer(), at(14));
 
@@ -204,6 +210,7 @@ fn unprofiled_work_receives_a_neutral_bounded_default_rather_than_starvation() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_expired_profile_degrades_to_neutral_rather_than_keeping_its_bands() {
     let profile = important_profile(); // expires at day 30
     let contract = ImpactContract::assemble("NEEDLE", Some(&profile), producer(), after_expiry());
@@ -222,6 +229,7 @@ fn an_expired_profile_degrades_to_neutral_rather_than_keeping_its_bands() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_expired_low_profile_also_degrades_up_to_neutral() {
     // Expiry moves towards neutral in both directions — a lapsed judgement
     // must not keep suppressing a workspace either.
@@ -241,6 +249,7 @@ fn an_expired_low_profile_also_degrades_up_to_neutral() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_profile_without_an_expiry_never_lapses() {
     let mut permanent = important_profile();
     permanent.review_expiry = None;
@@ -255,6 +264,7 @@ fn a_profile_without_an_expiry_never_lapses() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_profile_round_trips_and_defaults_its_schema_version() {
     let json = r#"{
         "workspace": "NEEDLE",
@@ -281,6 +291,7 @@ fn a_profile_round_trips_and_defaults_its_schema_version() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn producer_summary_text_is_bounded() {
     let evidence = ProducerEvidence::new(
         Confidence::Low,
@@ -296,6 +307,7 @@ fn producer_summary_text_is_bounded() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn confidence_and_effort_are_ordered_and_bounded() {
     assert!(Confidence::Low < Confidence::Medium);
     assert!(Confidence::Medium < Confidence::High);

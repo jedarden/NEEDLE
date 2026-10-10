@@ -379,6 +379,7 @@ fn live() -> AdmissionPolicy {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn the_unchanged_retry_class_resolves_to_its_existing_owners_and_creates_nothing() {
     let harness = Harness::new(Vec::new());
     let summary = harness
@@ -409,6 +410,7 @@ async fn the_unchanged_retry_class_resolves_to_its_existing_owners_and_creates_n
 }
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn a_new_evidence_class_creates_exactly_one_bead_across_two_submissions() {
     let harness = Harness::new(Vec::new());
 
@@ -452,6 +454,7 @@ async fn a_new_evidence_class_creates_exactly_one_bead_across_two_submissions() 
 }
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn an_l3_proposal_without_a_controller_is_refused_without_spending_the_l4_budget() {
     let harness = Harness::new(Vec::new());
     let rows = unverified_spend_rows();
@@ -478,6 +481,7 @@ async fn an_l3_proposal_without_a_controller_is_refused_without_spending_the_l4_
 }
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn unfinished_admissions_in_the_journal_engage_backpressure() {
     let harness = Harness::new(Vec::new());
     for rank in 0..AdmissionPolicy::default().max_open_admitted {
@@ -508,6 +512,7 @@ async fn unfinished_admissions_in_the_journal_engage_backpressure() {
 }
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn budget_exhaustion_is_refused_with_a_recorded_decision() {
     let harness = Harness::new(Vec::new());
 
@@ -544,6 +549,7 @@ async fn budget_exhaustion_is_refused_with_a_recorded_decision() {
 }
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn shadow_mode_records_decisions_and_files_nothing() {
     let harness = Harness::new(Vec::new());
     let summary = harness
@@ -568,6 +574,7 @@ async fn shadow_mode_records_decisions_and_files_nothing() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn the_filed_bead_carries_provenance_the_acceptance_measure_and_its_signature() {
     let harness = Harness::new(Vec::new());
     harness
@@ -615,6 +622,7 @@ async fn the_filed_bead_carries_provenance_the_acceptance_measure_and_its_signat
 }
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn the_budget_survives_a_restart_because_it_is_read_from_the_journal() {
     let harness = Harness::new(Vec::new());
 

@@ -438,7 +438,9 @@ push = 684
 # +1 durable deduplicated alert-note occurrence contract (needle-8e4d8484).
 # +1 N-T16 provisional-row learning exclusion contract (needle-96dec90b).
 # +3 aligned/durable checkpoint dispatch contracts (needle-260cae5d).
-contract = 218
+# +28 the N-T45, N-T50, both N-T51 and N-T52 e2e harnesses folded into the
+# nt_contracts contract harness with their ceilings (needle-1f31332d).
+contract = 246
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -503,8 +505,10 @@ contract = 218
 # +13 managed GLM-5.3-Flash profile contracts (needle-0810eb14) in
 # adapter_smoke: static validation, installer rollback, min-CLI probing, and
 # fake-Claude dispatch/timeout/signal coverage.
+# -28 the N-T45, N-T50, both N-T51 and N-T52 harnesses folded into the
+# nt_contracts contract harness with their ceilings (needle-1f31332d).
 
-e2e = 884
+e2e = 856
 soak = 0
 fuzz = 0
 
@@ -649,151 +653,31 @@ max_tests = 3
 owner = "component:escalation-ladder"
 
 [[harness]]
-name = "nt45_failure_evidence_capture"
-path = "tests/nt45_failure_evidence_capture.rs"
-tier = "e2e"
-max_tests = 4
-owner = "component:attempt-history"
-
-[[harness]]
-name = "nt50_exception_lessons"
-path = "tests/nt50_exception_lessons.rs"
-tier = "e2e"
-max_tests = 6
-owner = "component:attempt-history"
-
-[[harness]]
-name = "nt51_adapter_usage_capture"
-path = "tests/nt51_adapter_usage_capture.rs"
-tier = "e2e"
-max_tests = 4
-owner = "component:attempt-accounting"
-
-[[harness]]
-name = "nt51_gateway_health"
-path = "tests/nt51_gateway_health.rs"
-tier = "e2e"
-max_tests = 4
-owner = "component:provider-health"
-
-[[harness]]
-name = "nt52_state_dir_isolation"
-path = "tests/nt52_state_dir_isolation.rs"
-tier = "e2e"
-max_tests = 10
-owner = "component:state-isolation"
-
-[[harness]]
-name = "nt07_proposal_contract"
-path = "tests/nt07_proposal_contract.rs"
+name = "nt_contracts"
+path = "tests/nt_contracts.rs"
 tier = "contract"
-max_tests = 20
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt10_policy_precedence"
-path = "tests/nt10_policy_precedence.rs"
-tier = "contract"
-max_tests = 3
-owner = "component:policy-resolver"
-
-[[harness]]
-name = "nt10_policy_hashing"
-path = "tests/nt10_policy_hashing.rs"
-tier = "contract"
-max_tests = 3
-owner = "component:policy-resolver"
-
-[[harness]]
-name = "nt10_context_manifest"
-path = "tests/nt10_context_manifest.rs"
-tier = "contract"
-max_tests = 2
-owner = "component:context-manifest"
-
-[[harness]]
-name = "nt10_context_adapter_parity"
-path = "tests/nt10_context_adapter_parity.rs"
-tier = "contract"
-max_tests = 2
-owner = "component:policy-resolver"
-
-[[harness]]
-name = "nt10_policy_doctor"
-path = "tests/nt10_policy_doctor.rs"
-tier = "contract"
-max_tests = 2
-owner = "component:policy-resolver"
-
-[[harness]]
-name = "nt10_policy_admission"
-path = "tests/nt10_policy_admission.rs"
-tier = "contract"
-max_tests = 3
-owner = "component:policy-resolver"
-
-[[harness]]
-name = "nt07_impact_contract"
-path = "tests/nt07_impact_contract.rs"
-tier = "contract"
-max_tests = 12
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt07_impact_scoring"
-path = "tests/nt07_impact_scoring.rs"
-tier = "contract"
-max_tests = 10
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt07_executable_admission"
-path = "tests/nt07_executable_admission.rs"
-tier = "contract"
-max_tests = 11
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt07_admission_policy"
-path = "tests/nt07_admission_policy.rs"
-tier = "contract"
-max_tests = 13
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt07_admission_budgets"
-path = "tests/nt07_admission_budgets.rs"
-tier = "contract"
-max_tests = 11
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt53_improvement_proposals"
-path = "tests/nt53_improvement_proposals.rs"
-tier = "contract"
-# +1 provisional-attempt exclusion acceptance contract (needle-96dec90b).
-max_tests = 15
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt54_proposal_admission"
-path = "tests/nt54_proposal_admission.rs"
-tier = "contract"
-max_tests = 8
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt55_impact_receipts"
-path = "tests/nt55_impact_receipts.rs"
-tier = "contract"
-max_tests = 17
-owner = "component:improvement-loop"
-
-[[harness]]
-name = "nt56_improvements_cli"
-path = "tests/nt56_improvements_cli.rs"
-tier = "contract"
-max_tests = 10
+# Folded from 21 dedicated N-T targets (needle-1f31332d): one module per former
+# target under tests/nt_contracts/, test names prefixed by that module. The
+# former targets' ceilings sum to this one; the five that were e2e-tier
+# (nt45, nt50, both nt51, nt52: 28) moved their budget here with them.
+# Per-module ceilings and component owners, kept so a module's growth still
+# has a named reviewer:
+#   nt07_proposal_contract 20, nt07_impact_contract 12, nt07_impact_scoring 10,
+#   nt07_executable_admission 11, nt07_admission_policy 13,
+#   nt07_admission_budgets 11, nt53_improvement_proposals 15 (+1
+#   provisional-attempt exclusion acceptance contract, needle-96dec90b),
+#   nt54_proposal_admission 8, nt55_impact_receipts 17,
+#   nt56_improvements_cli 10 -- component:improvement-loop (127);
+#   nt10_policy_precedence 3, nt10_policy_hashing 3,
+#   nt10_context_adapter_parity 2, nt10_policy_doctor 2,
+#   nt10_policy_admission 3 -- component:policy-resolver (13);
+#   nt10_context_manifest 2 -- component:context-manifest;
+#   nt45_failure_evidence_capture 4, nt50_exception_lessons 6 --
+#   component:attempt-history (10);
+#   nt51_adapter_usage_capture 4 -- component:attempt-accounting;
+#   nt51_gateway_health 4 -- component:provider-health;
+#   nt52_state_dir_isolation 10 -- component:state-isolation.
+max_tests = 170
 owner = "component:improvement-loop"
 
 # These are strict ceilings on existing debt. A new occurrence fails the fast
@@ -1095,14 +979,6 @@ owner = "component:cargo-target-policy"
 [[artifact]]
 pattern = "tests/adapter-cargo-environment/*"
 owner = "component:shell-verification"
-
-# Shared fixtures for the two admission harnesses. A plain module, not a
-# declared Cargo target: autotests = false means only the explicit [[test]]
-# inventory is built, so this is included by both harnesses rather than
-# discovered as a third.
-[[artifact]]
-pattern = "tests/admission_support/*"
-owner = "component:improvement-loop"
 
 [[artifact]]
 pattern = "tests/nextest-shard-plan/*"

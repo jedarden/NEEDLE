@@ -13,12 +13,12 @@ use needle::cost::default_pricing;
 use needle::dispatch::{AgentAdapter, TokenUsage, UsageFormat};
 use tempfile::tempdir;
 
-const CODEX: &str = include_str!("fixtures/adapter-usage/codex.jsonl");
-const OPENCODE: &str = include_str!("fixtures/adapter-usage/opencode.jsonl");
-const OMP: &str = include_str!("fixtures/adapter-usage/omp.jsonl");
+const CODEX: &str = include_str!("../fixtures/adapter-usage/codex.jsonl");
+const OPENCODE: &str = include_str!("../fixtures/adapter-usage/opencode.jsonl");
+const OMP: &str = include_str!("../fixtures/adapter-usage/omp.jsonl");
 // The adapter smoke matrix and this usage replay share the same recorded
 // summary, so invocation and accounting cannot silently drift apart.
-const AIDER: &str = include_str!("fixtures/adapter-usage/aider-summary.txt");
+const AIDER: &str = include_str!("../fixtures/adapter-usage/aider-summary.txt");
 
 fn resolved(format: UsageFormat, output: &str) -> needle::attempt_accounting::AttemptUsage {
     resolve_usage(
@@ -32,6 +32,7 @@ fn resolved(format: UsageFormat, output: &str) -> needle::attempt_accounting::At
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn each_adapter_fixture_extracts_tokens_and_estimates_cost() {
     let cases = [
         (UsageFormat::CodexJsonl, CODEX, 600, 500),
@@ -59,6 +60,7 @@ fn each_adapter_fixture_extracts_tokens_and_estimates_cost() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn unknown_usage_format_is_not_costed() {
     let resolved = resolved(UsageFormat::Unknown, CODEX);
     assert_eq!(resolved.tokens_in, None);
@@ -68,6 +70,7 @@ fn unknown_usage_format_is_not_costed() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn adapter_definition_selects_declared_usage_format() {
     let adapter: AgentAdapter = serde_yaml::from_str(
         "name: codex-fixture\nagent_cli: codex\ninvoke_template: codex\nusage_format: codex_jsonl\n",
@@ -84,6 +87,7 @@ fn adapter_definition_selects_declared_usage_format() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn stats_by_adapter_reads_costed_codex_fixture_row() {
     let root = tempdir().expect("temporary fixture root");
     let home = root.path().join("home");

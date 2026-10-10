@@ -1,7 +1,9 @@
 //! Focused behavioral contracts for N-T52 (ADR-030 decision 5): one
 //! configured state directory for every persistent state writer.
 //!
-//! The bead's acceptance command is this target. Three behaviors live here:
+//! The bead's acceptance command is this module
+//! (`cargo test --test nt_contracts nt52_state_dir_isolation::`). Three
+//! behaviors live here:
 //!
 //! 1. With `NEEDLE_STATE_DIR` set, every listed writer resolves beneath the
 //!    override and a spawned fixture writes nothing beneath a read-only fake
@@ -22,7 +24,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use tempfile::TempDir;
 
-/// The single process-wide lock guarding the environment this harness swaps.
+/// The lock guarding the environment this module swaps. Each test here is
+/// also `serial(nt_process_env)`, which orders it against every other module
+/// sharing the `nt_contracts` process.
 ///
 /// Every test takes it for its whole body: the resolver reads `HOME` and
 /// `NEEDLE_STATE_DIR` at call time, and one test's leftover override would
@@ -116,6 +120,7 @@ fn today_suffix() -> String {
 // ─── Resolution beneath the override ─────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn every_listed_writer_resolves_beneath_the_override() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -199,6 +204,7 @@ fn every_listed_writer_resolves_beneath_the_override() {
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn override_precedence_is_env_then_config_then_home() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -239,6 +245,7 @@ fn override_precedence_is_env_then_config_then_home() {
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn journal_roundtrip_under_the_override_stays_inside_it() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -288,6 +295,7 @@ fn journal_roundtrip_under_the_override_stays_inside_it() {
 // ─── Spawned fixture vs a read-only fake home ────────────────────────────────
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn spawned_fixture_writes_nothing_under_a_read_only_fake_home() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -342,6 +350,7 @@ fn spawned_fixture_writes_nothing_under_a_read_only_fake_home() {
 // ─── The harness guard ───────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn spawned_test_without_the_override_fails_fast_with_a_clear_message() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -374,6 +383,7 @@ fn spawned_test_without_the_override_fails_fast_with_a_clear_message() {
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn spawned_test_beneath_the_real_home_is_refused() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -408,6 +418,7 @@ fn spawned_test_beneath_the_real_home_is_refused() {
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn harness_guard_contract_matches_the_spawned_behavior() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -447,6 +458,7 @@ fn harness_guard_contract_matches_the_spawned_behavior() {
 // ─── Fixture rows out of the ledger consumers ────────────────────────────────
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn routing_evidence_skips_fixture_rows() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -484,6 +496,7 @@ fn routing_evidence_skips_fixture_rows() {
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn stats_skip_fixture_rows() {
     let _env = EnvGuard::take();
     let fixture = TempDir::new().unwrap();
@@ -516,6 +529,7 @@ fn stats_skip_fixture_rows() {
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn fixture_row_predicate_matches_the_contaminated_shapes() {
     // Pure predicate coverage, no environment: both shapes the 2026-09-12..14
     // ledger actually held.

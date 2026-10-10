@@ -10,6 +10,7 @@ fn source(id: &str, kind: PolicyKind, scope: PolicyScope, content: &str) -> Poli
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn precedence_is_derived_from_the_typed_registry_and_scope_is_deterministic() {
     let fixture = tempfile::tempdir().expect("isolated fixture directory");
     let repository = fixture.path().join("repository");
@@ -111,6 +112,7 @@ fn precedence_is_derived_from_the_typed_registry_and_scope_is_deterministic() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn resolution_excludes_sources_outside_the_target_or_adapter_scope() {
     let fixture = tempfile::tempdir().expect("isolated fixture directory");
     let repository = fixture.path().join("repository");
@@ -151,6 +153,7 @@ fn resolution_excludes_sources_outside_the_target_or_adapter_scope() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn equal_authority_and_scope_conflicts_fail_with_stable_source_order() {
     let fixture = tempfile::tempdir().expect("isolated fixture directory");
     let repository = fixture.path().join("repository");

@@ -44,6 +44,7 @@ fn effective_sources(content: &str) -> Vec<PolicySource> {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn canonical_policy_inputs_are_order_independent_and_hashable() {
     let mut forward = effective_sources("preserve shared checkout changes");
     let mut reverse = forward.clone();
@@ -60,6 +61,7 @@ fn canonical_policy_inputs_are_order_independent_and_hashable() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn only_effective_policy_changes_affect_the_canonical_hash() {
     let mut with_irrelevant = effective_sources("preserve shared checkout changes");
     with_irrelevant.push(source(
@@ -84,6 +86,7 @@ fn only_effective_policy_changes_affect_the_canonical_hash() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn conflicting_effective_inputs_fail_deterministically_before_hashing() {
     let build_registry = |first: &str, second: &str| {
         let mut registry = AuthorityRegistry::new();

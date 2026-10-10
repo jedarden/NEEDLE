@@ -2,9 +2,11 @@
 //! 4.9–4.10; ADR-029, ADR-030): provider health keyed by the adapter's
 //! gateway.
 //!
-//! The bead's acceptance command is this target. The ledger evidence behind
-//! it (2026-09-12..14): `claude-code-glm-5.3`, `claude-code-glm-5.3-flash`,
-//! `opencode-glm-5.3-flash` and `omp-glm-5.3-flash` all talk through
+//! The bead's acceptance command is this module
+//! (`cargo test --test nt_contracts nt51_gateway_health::`). The ledger
+//! evidence behind it (2026-09-12..14): `claude-code-glm-5.3`,
+//! `claude-code-glm-5.3-flash`, `opencode-glm-5.3-flash` and
+//! `omp-glm-5.3-flash` all talk through
 //! `zai-proxy`, but health was keyed per adapter, so a storm on one left its
 //! siblings routable. Three behaviors live here:
 //!
@@ -43,7 +45,9 @@ const COUSIN: &str = "omp-glm-5.3-flash";
 /// An adapter on a different gateway entirely.
 const OUTSIDER: &str = "codex";
 
-/// The single process-wide lock guarding the environment this harness swaps.
+/// The lock guarding the environment this module swaps. Each test here is
+/// also `serial(nt_process_env)`, which orders it against every other module
+/// sharing the `nt_contracts` process.
 ///
 /// Provider health resolves its state root from the environment at call
 /// time, so one test's leftover `HOME` would decide another test's result.
@@ -130,6 +134,7 @@ fn storm(adapter: &str, provider: Option<&str>, reason: &str, config: &DetectorC
 // ─── One gateway, one fate ───────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn a_storm_on_one_gateway_adapter_degrades_its_siblings_and_not_codex() {
     let (_env, _home) = EnvGuard::take();
     let config = quick_config();
@@ -234,6 +239,7 @@ fn a_storm_on_one_gateway_adapter_degrades_its_siblings_and_not_codex() {
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn adapters_without_a_provider_keep_per_adapter_health() {
     let (_env, _home) = EnvGuard::take();
     let config = quick_config();
@@ -267,6 +273,7 @@ fn adapters_without_a_provider_keep_per_adapter_health() {
 // ─── The keying ships off by default ─────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn gateway_keying_ships_off_by_default() {
     // The Default and a config section that predates the flag both leave it
     // off, so the shipped behavior stays per-adapter (N-T23) until the
@@ -281,6 +288,7 @@ fn gateway_keying_ships_off_by_default() {
 // ─── Migration of adapter-keyed state files ──────────────────────────────────
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn adapter_keyed_state_migrates_to_the_gateway_key_without_losing_degradation() {
     let (_env, _home) = EnvGuard::take();
     let config = quick_config();

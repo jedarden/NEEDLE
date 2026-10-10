@@ -100,6 +100,7 @@ fn decide_with_exposure(
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_improved_cohort_promotes() {
     let receipt = decide_with_exposure(
         &proposal(),
@@ -125,6 +126,7 @@ fn an_improved_cohort_promotes() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_missing_applied_exposure_holds_even_when_the_cohort_would_promote() {
     let receipt = decide_receipt(
         &proposal(),
@@ -152,6 +154,7 @@ fn a_missing_applied_exposure_holds_even_when_the_cohort_would_promote() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_unchanged_cohort_withdraws_and_emits_exactly_one_revert_proposal() {
     let original = proposal();
     let receipt = decide_with_exposure(
@@ -189,6 +192,7 @@ fn an_unchanged_cohort_withdraws_and_emits_exactly_one_revert_proposal() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_promoted_receipt_emits_no_revert_proposal() {
     let original = proposal();
     let receipt = decide_with_exposure(
@@ -204,6 +208,7 @@ fn a_promoted_receipt_emits_no_revert_proposal() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_contaminated_cohort_holds_rather_than_deciding() {
     let original = proposal();
     // The measures would otherwise promote — contamination must override that,
@@ -231,6 +236,7 @@ fn a_contaminated_cohort_holds_rather_than_deciding() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_concurrent_proposal_on_the_same_cohort_also_holds() {
     let receipt = decide_with_exposure(
         &proposal(),
@@ -250,6 +256,7 @@ fn a_concurrent_proposal_on_the_same_cohort_also_holds() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_cohort_too_small_to_decide_holds() {
     let receipt = decide_with_exposure(
         &proposal(),
@@ -269,6 +276,7 @@ fn a_cohort_too_small_to_decide_holds() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_decrease_measure_is_judged_in_its_own_direction() {
     let mut recurrence = proposal();
     recurrence.acceptance = AcceptanceMeasure {
@@ -329,6 +337,7 @@ fn row(workspace: &str, outcome: &str, worker: &str, costed: bool, cost: f64) ->
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn measures_are_computed_only_from_costed_non_decomposed_non_fixture_rows() {
     let rows = vec![
         // Counted: four costed, authoritative live rows, two verified.
@@ -369,6 +378,7 @@ fn measures_are_computed_only_from_costed_non_decomposed_non_fixture_rows() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn fingerprint_recurrence_counts_only_the_target_reason() {
     let mut rows = vec![row("NEEDLE", "work_failure", "w1", true, 1.0)];
     let mut other = row("NEEDLE", "work_failure", "w2", true, 1.0);
@@ -386,6 +396,7 @@ fn fingerprint_recurrence_counts_only_the_target_reason() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn false_close_rate_is_reopened_closures_over_closures() {
     let rows = vec![
         row("NEEDLE", "verified_success", "w1", true, 1.0),
@@ -400,6 +411,7 @@ fn false_close_rate_is_reopened_closures_over_closures() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_empty_cohort_measures_zero_rather_than_dividing_by_zero() {
     let measures = measure_cohort(&[], &cohort(), None, &[]);
     assert_eq!(measures, CohortMeasures::default());
@@ -407,6 +419,7 @@ fn an_empty_cohort_measures_zero_rather_than_dividing_by_zero() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_cohort_naming_nothing_matches_nothing_rather_than_the_whole_fleet() {
     let rows = vec![row("NEEDLE", "verified_success", "w1", true, 1.0)];
     let empty = Cohort::default();
@@ -422,6 +435,7 @@ fn a_cohort_naming_nothing_matches_nothing_rather_than_the_whole_fleet() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn receipts_survive_a_restart_unchanged_and_are_never_rewritten() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("improvements/receipts.jsonl");
@@ -483,6 +497,7 @@ fn receipts_survive_a_restart_unchanged_and_are_never_rewritten() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn applied_exposure_records_are_persisted_and_read_for_receipt_decisions() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("improvements/exposures.jsonl");
@@ -510,6 +525,7 @@ fn applied_exposure_records_are_persisted_and_read_for_receipt_decisions() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn reading_a_missing_receipts_file_is_empty_rather_than_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let receipts = read_receipts(&dir.path().join("nothing/here.jsonl")).expect("ok");
@@ -517,6 +533,7 @@ fn reading_a_missing_receipts_file_is_empty_rather_than_an_error() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn one_malformed_line_does_not_make_the_other_receipts_unreadable() {
     use std::io::Write;
     let dir = tempfile::tempdir().expect("tempdir");

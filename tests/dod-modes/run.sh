@@ -168,14 +168,14 @@ else
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
-assert_lines "target table lists 30 names" 30 needle_slow_targets
+assert_lines "target table lists 10 names" 10 needle_slow_targets
 
 # Exact set, asserted literally: a renamed or dropped target must be caught
 # here rather than silently accepted by every consumer of the table.
-WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture nt10_policy_precedence nt10_policy_hashing nt10_context_manifest nt10_context_adapter_parity nt10_policy_doctor nt10_policy_admission nt51_gateway_health nt52_state_dir_isolation nt07_admission_policy nt07_admission_budgets nt53_improvement_proposals nt54_proposal_admission nt55_impact_receipts nt56_improvements_cli nt07_proposal_contract nt07_impact_contract nt07_impact_scoring nt07_executable_admission adapter_smoke installer)"
+WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt_contracts adapter_smoke installer)"
 GOT_TABLE="$(needle_slow_targets)"
 if [[ "$GOT_TABLE" == "$WANT_TABLE" ]]; then
-  ok "target table is exactly the 29 cargo targets plus installer"
+  ok "target table is exactly the 9 cargo targets plus installer"
 else
   bad "target table drifted (got: $(echo "$GOT_TABLE" | tr '\n' ' '))"
 fi
@@ -189,18 +189,9 @@ assert_selector "p2 selects its target" "--test p2_integration_tests" p2_integra
 assert_selector "p3 selects its target" "--test p3_integration_tests" p3_integration_tests
 assert_selector "real_br selects its target" "--test real_br_integration_tests" real_br_integration_tests
 assert_selector "escalation ladder selects its target" "--test escalation_ladder" escalation_ladder
-assert_selector "N-T10 selects its target" "--test nt10_policy_precedence" nt10_policy_precedence
-assert_selector "N-T10 canonical hashing selects its target" "--test nt10_policy_hashing" nt10_policy_hashing
-assert_selector "N-T10 ContextManifest selects its target" "--test nt10_context_manifest" nt10_context_manifest
-assert_selector "N-T10 context adapter parity selects its target" "--test nt10_context_adapter_parity" nt10_context_adapter_parity
-assert_selector "N-T10 policy doctor selects its target" "--test nt10_policy_doctor" nt10_policy_doctor
-assert_selector "N-T10 policy admission selects its target" "--test nt10_policy_admission" nt10_policy_admission
-assert_selector "N-T45 selects its target" "--test nt45_failure_evidence_capture" nt45_failure_evidence_capture
-assert_selector "N-T50 selects its target" "--test nt50_exception_lessons" nt50_exception_lessons
-assert_selector "N-T51 usage selects its target" "--test nt51_adapter_usage_capture" nt51_adapter_usage_capture
-assert_selector "N-T51 selects its target" "--test nt51_gateway_health" nt51_gateway_health
-assert_selector "N-T52 selects its target" "--test nt52_state_dir_isolation" nt52_state_dir_isolation
+assert_selector "focused N-T contracts select their shared target" "--test nt_contracts" nt_contracts
 assert_fails "unknown target has no selector" needle_cargo_selector nope
+assert_fails "a folded N-T target has no selector of its own" needle_cargo_selector nt52_state_dir_isolation
 assert_fails "installer is not a cargo target" needle_cargo_selector installer
 
 # ── needle_nextest_filter ────────────────────────────────────────────────────
@@ -211,24 +202,15 @@ assert_nextest_filter "integration_tests has an exact nextest binary ID" "binary
 assert_nextest_filter "p2 has an exact nextest binary ID" "binary_id(=needle::p2_integration_tests)" p2_integration_tests
 assert_nextest_filter "p3 has an exact nextest binary ID" "binary_id(=needle::p3_integration_tests)" p3_integration_tests
 assert_nextest_filter "real_br has an exact nextest binary ID" "binary_id(=needle::real_br_integration_tests)" real_br_integration_tests
-assert_nextest_filter "N-T10 has an exact nextest binary ID" "binary_id(=needle::nt10_policy_precedence)" nt10_policy_precedence
-assert_nextest_filter "N-T10 hashing has an exact nextest binary ID" "binary_id(=needle::nt10_policy_hashing)" nt10_policy_hashing
-assert_nextest_filter "N-T10 ContextManifest has an exact nextest binary ID" "binary_id(=needle::nt10_context_manifest)" nt10_context_manifest
-assert_nextest_filter "N-T10 context adapter parity has an exact nextest binary ID" "binary_id(=needle::nt10_context_adapter_parity)" nt10_context_adapter_parity
-assert_nextest_filter "N-T10 policy doctor has an exact nextest binary ID" "binary_id(=needle::nt10_policy_doctor)" nt10_policy_doctor
-assert_nextest_filter "N-T10 policy admission has an exact nextest binary ID" "binary_id(=needle::nt10_policy_admission)" nt10_policy_admission
 assert_nextest_filter "escalation ladder has an exact nextest binary ID" "binary_id(=needle::escalation_ladder)" escalation_ladder
-assert_nextest_filter "N-T45 has an exact nextest binary ID" "binary_id(=needle::nt45_failure_evidence_capture)" nt45_failure_evidence_capture
-assert_nextest_filter "N-T50 has an exact nextest binary ID" "binary_id(=needle::nt50_exception_lessons)" nt50_exception_lessons
-assert_nextest_filter "N-T51 usage has an exact nextest binary ID" "binary_id(=needle::nt51_adapter_usage_capture)" nt51_adapter_usage_capture
-assert_nextest_filter "N-T51 has an exact nextest binary ID" "binary_id(=needle::nt51_gateway_health)" nt51_gateway_health
-assert_nextest_filter "N-T52 has an exact nextest binary ID" "binary_id(=needle::nt52_state_dir_isolation)" nt52_state_dir_isolation
+assert_nextest_filter "focused N-T contracts have an exact nextest binary ID" "binary_id(=needle::nt_contracts)" nt_contracts
 assert_fails "unknown target has no nextest filter" needle_nextest_filter nope
+assert_fails "a folded N-T target has no nextest filter of its own" needle_nextest_filter nt52_state_dir_isolation
 assert_fails "installer has no nextest filter" needle_nextest_filter installer
 
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
-assert_lines "default selection is all 29 cargo targets" 29 selected_cargo_targets
+assert_lines "default selection is all 9 cargo targets" 9 selected_cargo_targets
 
 WANT_DEFAULT="$(needle_expected_slow_targets | grep -vx installer)"
 GOT_DEFAULT="$(selected_cargo_targets)"
@@ -253,18 +235,8 @@ if (
       p3_integration_tests \
       real_br_integration_tests \
       escalation_ladder \
-      nt45_failure_evidence_capture \
-      nt50_exception_lessons \
-      nt51_adapter_usage_capture \
-      nt51_gateway_health \
-      nt52_state_dir_isolation \
-      nt07_admission_policy \
-      nt07_admission_budgets \
-      nt53_improvement_proposals \
-      nt07_proposal_contract \
-      nt07_impact_contract \
-      nt07_impact_scoring \
-      nt07_executable_admission \
+      nt_contracts \
+      adapter_smoke \
       installer
   }
   needle_validate_slow_target_coverage
@@ -355,27 +327,7 @@ WANT_HARNESSES="$(printf '%s\t%s\n' \
   p3_integration_tests tests/p3_integration_tests.rs \
   real_br_integration_tests tests/real_br_integration_tests.rs \
   escalation_ladder tests/escalation_ladder.rs \
-  nt45_failure_evidence_capture tests/nt45_failure_evidence_capture.rs \
-  nt50_exception_lessons tests/nt50_exception_lessons.rs \
-  nt51_adapter_usage_capture tests/nt51_adapter_usage_capture.rs \
-  nt10_policy_precedence tests/nt10_policy_precedence.rs \
-  nt10_policy_hashing tests/nt10_policy_hashing.rs \
-  nt10_context_manifest tests/nt10_context_manifest.rs \
-  nt10_context_adapter_parity tests/nt10_context_adapter_parity.rs \
-  nt10_policy_doctor tests/nt10_policy_doctor.rs \
-  nt10_policy_admission tests/nt10_policy_admission.rs \
-  nt51_gateway_health tests/nt51_gateway_health.rs \
-  nt52_state_dir_isolation tests/nt52_state_dir_isolation.rs \
-  nt07_admission_policy tests/nt07_admission_policy.rs \
-  nt07_admission_budgets tests/nt07_admission_budgets.rs \
-  nt53_improvement_proposals tests/nt53_improvement_proposals.rs \
-  nt54_proposal_admission tests/nt54_proposal_admission.rs \
-  nt55_impact_receipts tests/nt55_impact_receipts.rs \
-  nt56_improvements_cli tests/nt56_improvements_cli.rs \
-  nt07_proposal_contract tests/nt07_proposal_contract.rs \
-  nt07_impact_contract tests/nt07_impact_contract.rs \
-  nt07_impact_scoring tests/nt07_impact_scoring.rs \
-  nt07_executable_admission tests/nt07_executable_admission.rs \
+  nt_contracts tests/nt_contracts.rs \
   adapter_smoke tests/adapter_smoke.rs)"
 GOT_HARNESSES="$(needle_declared_test_harnesses)"
 if [[ "$GOT_HARNESSES" == "$WANT_HARNESSES" ]]; then

@@ -124,6 +124,7 @@ fn report() -> ImprovementsReport {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn both_formats_render_deterministically_from_fixture_state() {
     let report = report();
 
@@ -140,6 +141,7 @@ fn both_formats_render_deterministically_from_fixture_state() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_operator_view_leads_with_the_trend_and_names_every_section() {
     let rendered = render_human(&report());
 
@@ -168,6 +170,7 @@ fn the_operator_view_leads_with_the_trend_and_names_every_section() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_cost_per_verified_closure_of_none_reads_as_unknown_not_zero() {
     let mut report = report();
     report.trend.verified = 0;
@@ -182,6 +185,7 @@ fn a_cost_per_verified_closure_of_none_reads_as_unknown_not_zero() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_empty_report_renders_rather_than_failing() {
     let empty = ImprovementsReport {
         collected_at: at(21),
@@ -205,6 +209,7 @@ fn an_empty_report_renders_rather_than_failing() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_json_report_round_trips() {
     let report = report();
     let encoded = render_json(&report).expect("json");
@@ -217,6 +222,7 @@ fn the_json_report_round_trips() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_large_proposal_set_is_summarized_rather_than_listed_in_full() {
     // At fleet scale this class runs to dozens; the live ledger produced 116.
     // A view that prints all of them is one nobody reads to the end.
@@ -252,6 +258,7 @@ fn a_large_proposal_set_is_summarized_rather_than_listed_in_full() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn decisions_round_trip_through_the_journal_after_a_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(DECISIONS_FILE);
@@ -281,6 +288,7 @@ fn decisions_round_trip_through_the_journal_after_a_restart() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn reading_journals_that_do_not_exist_creates_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let decisions = dir.path().join("improvements/decisions.jsonl");
@@ -300,6 +308,7 @@ fn reading_journals_that_do_not_exist_creates_nothing() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn one_malformed_decision_does_not_hide_the_others() {
     use std::io::Write;
     let dir = tempfile::tempdir().expect("tempdir");
@@ -326,6 +335,7 @@ fn one_malformed_decision_does_not_hide_the_others() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_journal_path_lives_under_the_state_directory() {
     let path = decisions_path();
     assert!(

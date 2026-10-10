@@ -64,6 +64,7 @@ fn complete_registry(repository: &Path) -> AuthorityRegistry {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn missing_required_authority_rejects_execution() {
     let fixture = tempfile::tempdir().expect("isolated policy fixture");
     let repository = fixture.path().join("repository");
@@ -121,6 +122,7 @@ fn missing_required_authority_rejects_execution() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn ambiguous_required_authority_rejects_execution_deterministically() {
     let fixture = tempfile::tempdir().expect("isolated policy fixture");
     let repository = fixture.path().join("repository");
@@ -170,6 +172,7 @@ fn ambiguous_required_authority_rejects_execution_deterministically() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn complete_required_authority_set_admits_execution() {
     let fixture = tempfile::tempdir().expect("isolated policy fixture");
     let repository = fixture.path().join("repository");

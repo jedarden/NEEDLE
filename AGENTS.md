@@ -154,6 +154,9 @@ compile") still blocks: it may be yours. CI keeps running the unscoped lane —
 - `cargo test --test p2_integration_tests` (Pluck, Mend, Explore, and Knot)
 - `cargo test --test p3_integration_tests` (Weave, Unravel, and Pulse)
 - `cargo test --test real_br_integration_tests` (real bead-rs strand backend)
+- `cargo test --test nt_contracts` (focused N-T contracts, one module per
+  former per-bead target; `cargo test --test nt_contracts nt52_state_dir_isolation::`
+  selects one)
 
 **Full verification** (CI runs on push to main):
 - Both fast and slow lanes together

@@ -213,6 +213,7 @@ fn candidate() -> needle::learning::CandidateLesson {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn fail_then_success_produces_one_sanitized_unevaluated_candidate() {
     let lesson = candidate();
 
@@ -244,6 +245,7 @@ fn fail_then_success_produces_one_sanitized_unevaluated_candidate() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn success_only_and_decomposed_resolutions_produce_no_candidate() {
     assert!(build_candidate_lesson(
         &[success_record("verified_success")],
@@ -266,6 +268,7 @@ fn success_only_and_decomposed_resolutions_produce_no_candidate() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn local_journal_and_bead_data_shape_are_idempotent() {
     let root = tempfile::tempdir().expect("fixture workspace");
     let bead_id = needle::types::BeadId::from("needle-nt50-fixture");
@@ -286,6 +289,7 @@ fn local_journal_and_bead_data_shape_are_idempotent() {
 }
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn candidate_is_mirrored_to_bead_data_once() {
     let root = tempfile::tempdir().expect("fixture workspace");
     let bead_id = BeadId::from("needle-nt50-fixture");
@@ -303,6 +307,7 @@ async fn candidate_is_mirrored_to_bead_data_once() {
 }
 
 #[tokio::test]
+#[serial_test::parallel(nt_process_env)]
 async fn retrieval_stub_receives_local_candidate_and_labels_returned_hit() {
     let lesson = candidate();
     let request = RetrievalRequest {
@@ -343,6 +348,7 @@ esac"#
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn candidate_production_is_disabled_by_default() {
     assert!(!Config::default().strands.learning.candidate_lessons.enabled);
 }

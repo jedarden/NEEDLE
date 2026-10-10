@@ -296,7 +296,7 @@ fn execution_plan(proposal: &ImprovementProposal) -> ExecutionPlan {
     ExecutionPlan {
         // Every generated class is judged from the ledger, so the acceptance
         // command is the one that recomputes it.
-        acceptance_command: "cargo test --test nt55_impact_receipts".to_string(),
+        acceptance_command: "cargo test --test nt_contracts nt55_impact_receipts::".to_string(),
         overlap_scope: if proposal.scope.workspaces.is_empty() {
             vec!["src/".to_string()]
         } else {

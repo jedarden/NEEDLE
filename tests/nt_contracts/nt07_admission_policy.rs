@@ -5,15 +5,14 @@
 //! drop, because an operator has to be able to tell "seen and refused" from
 //! "never generated".
 
-mod admission_support;
-
-use admission_support::*;
+use crate::admission_support::*;
 use needle::learning::improvement::{
     AdmissionDecision, AdmissionPolicy, AdmissionRoute, AuthorityLevel, EvidenceClass,
     RefusalReason,
 };
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn every_proposal_receives_a_decision_and_none_is_silently_dropped() {
     let proposals = vec![
         proposal(EvidenceClass::RedBaselineWorkspace, "NEEDLE"),
@@ -36,6 +35,7 @@ fn every_proposal_receives_a_decision_and_none_is_silently_dropped() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_l4_proposal_is_admitted_as_an_implementation_bead_in_its_owning_workspace() {
     let proposals = vec![proposal(EvidenceClass::RedBaselineWorkspace, "NEEDLE")];
     let records = run(&proposals, &live_policy(), World::default());
@@ -52,6 +52,7 @@ fn an_l4_proposal_is_admitted_as_an_implementation_bead_in_its_owning_workspace(
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_l1_proposal_is_admitted_to_its_owning_controller_rather_than_a_bead() {
     // Workspace adapter regret tops out at L1 — a routing change the evidence
     // routing controller applies itself.
@@ -69,6 +70,7 @@ fn an_l1_proposal_is_admitted_to_its_owning_controller_rather_than_a_bead() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_controller_route_without_a_consumer_is_refused_before_budget_accounting() {
     let proposals = vec![proposal(EvidenceClass::WorkspaceAdapterRegret, "pdftract")];
     let world = World {
@@ -90,6 +92,7 @@ fn a_controller_route_without_a_consumer_is_refused_before_budget_accounting() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_l5_proposal_is_refused_until_gate_d() {
     let proposals = vec![l5_proposal()];
 
@@ -116,6 +119,7 @@ fn an_l5_proposal_is_refused_until_gate_d() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn authority_is_checked_before_budget_so_a_full_budget_cannot_mask_an_l5() {
     let proposals = vec![l5_proposal()];
     let world = World {
@@ -136,6 +140,7 @@ fn authority_is_checked_before_budget_so_a_full_budget_cannot_mask_an_l5() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_owned_evidence_class_creates_nothing_and_names_its_owner() {
     let proposals = vec![proposal(EvidenceClass::RepeatedIdenticalFailures, "NEEDLE")];
     let world = World {
@@ -156,6 +161,7 @@ fn an_owned_evidence_class_creates_nothing_and_names_its_owner() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_non_executable_proposal_is_refused_with_the_executability_reason() {
     let proposals = vec![proposal(EvidenceClass::RedBaselineWorkspace, "NEEDLE")];
     let world = World {
@@ -176,6 +182,7 @@ fn a_non_executable_proposal_is_refused_with_the_executability_reason() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn shadow_mode_decides_everything_and_admits_nothing() {
     let proposals = vec![
         proposal(EvidenceClass::RedBaselineWorkspace, "NEEDLE"),
@@ -200,6 +207,7 @@ fn shadow_mode_decides_everything_and_admits_nothing() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn shadow_mode_is_the_default_policy() {
     assert!(
         AdmissionPolicy::default().shadow,
@@ -212,6 +220,7 @@ fn shadow_mode_is_the_default_policy() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn shadow_mode_still_reports_which_proposal_would_have_been_admitted() {
     // Shadow is checked last, after ownership and executability, so a shadow
     // run distinguishes "would have been admitted" from "would have been
@@ -253,6 +262,7 @@ fn shadow_mode_still_reports_which_proposal_would_have_been_admitted() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn every_refusal_reason_carries_a_stable_wire_tag() {
     let tags = [
         RefusalReason::AlreadyOwned {
@@ -296,6 +306,7 @@ fn every_refusal_reason_carries_a_stable_wire_tag() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_decision_records_the_rank_it_was_made_at() {
     let proposals = vec![
         proposal(EvidenceClass::RedBaselineWorkspace, "a"),

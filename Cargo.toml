@@ -195,111 +195,13 @@ name = "escalation_ladder"
 path = "tests/escalation_ladder.rs"
 harness = true
 
+# Focused N-T contracts (N-T07, N-T10, N-T45, N-T50..N-T56), one module per
+# former dedicated target. Each target linked the whole crate again, so they
+# share one binary (needle-1f31332d); select one with
+# `cargo test --test nt_contracts <module>::`.
 [[test]]
-name = "nt45_failure_evidence_capture"
-path = "tests/nt45_failure_evidence_capture.rs"
-harness = true
-
-[[test]]
-name = "nt50_exception_lessons"
-path = "tests/nt50_exception_lessons.rs"
-harness = true
-
-[[test]]
-name = "nt51_adapter_usage_capture"
-path = "tests/nt51_adapter_usage_capture.rs"
-harness = true
-
-[[test]]
-name = "nt10_policy_precedence"
-path = "tests/nt10_policy_precedence.rs"
-harness = true
-
-# Canonical effective-policy input hashing contract.
-[[test]]
-name = "nt10_policy_hashing"
-path = "tests/nt10_policy_hashing.rs"
-harness = true
-
-# Resolved-policy ContextManifest materialization contract.
-[[test]]
-name = "nt10_context_manifest"
-path = "tests/nt10_context_manifest.rs"
-harness = true
-
-[[test]]
-name = "nt10_context_adapter_parity"
-path = "tests/nt10_context_adapter_parity.rs"
-harness = true
-
-[[test]]
-name = "nt10_policy_doctor"
-path = "tests/nt10_policy_doctor.rs"
-harness = true
-
-[[test]]
-name = "nt10_policy_admission"
-path = "tests/nt10_policy_admission.rs"
-harness = true
-
-[[test]]
-name = "nt51_gateway_health"
-path = "tests/nt51_gateway_health.rs"
-harness = true
-
-[[test]]
-name = "nt52_state_dir_isolation"
-path = "tests/nt52_state_dir_isolation.rs"
-harness = true
-
-[[test]]
-name = "nt07_admission_policy"
-path = "tests/nt07_admission_policy.rs"
-harness = true
-
-[[test]]
-name = "nt07_admission_budgets"
-path = "tests/nt07_admission_budgets.rs"
-harness = true
-
-[[test]]
-name = "nt53_improvement_proposals"
-path = "tests/nt53_improvement_proposals.rs"
-harness = true
-
-[[test]]
-name = "nt54_proposal_admission"
-path = "tests/nt54_proposal_admission.rs"
-harness = true
-
-[[test]]
-name = "nt55_impact_receipts"
-path = "tests/nt55_impact_receipts.rs"
-harness = true
-
-[[test]]
-name = "nt56_improvements_cli"
-path = "tests/nt56_improvements_cli.rs"
-harness = true
-
-[[test]]
-name = "nt07_proposal_contract"
-path = "tests/nt07_proposal_contract.rs"
-harness = true
-
-[[test]]
-name = "nt07_impact_contract"
-path = "tests/nt07_impact_contract.rs"
-harness = true
-
-[[test]]
-name = "nt07_impact_scoring"
-path = "tests/nt07_impact_scoring.rs"
-harness = true
-
-[[test]]
-name = "nt07_executable_admission"
-path = "tests/nt07_executable_admission.rs"
+name = "nt_contracts"
+path = "tests/nt_contracts.rs"
 harness = true
 
 # Isolated support-matrix smoke tests for the documented built-in adapters.
@@ -321,8 +223,9 @@ codegen-units = 1
 opt-level = 0
 # Keep symbolic function names and source line tables for panic backtraces
 # without embedding full type- and variable-level DWARF in every test binary.
-# The nextest archive carries eleven binaries, so full debug data is repeated
-# across the transient artifact and dominates its transfer critical path.
+# Every test binary in the nextest archive statically links the whole crate,
+# so full debug data is repeated across the transient artifact and dominates
+# its transfer critical path.
 debug = "line-tables-only"
 
 # Keep the stable dependency graph optimized while making the frequently

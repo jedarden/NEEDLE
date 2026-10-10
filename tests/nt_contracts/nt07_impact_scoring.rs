@@ -67,6 +67,7 @@ fn producer(confidence: Confidence, effort: EffortEstimate, observed: u32) -> Pr
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_score_exposes_its_components_and_policy_version() {
     let proposal = proposal_named("NEEDLE", "a", 13);
     let profile = profile("NEEDLE", Band::MAX, false);
@@ -95,6 +96,7 @@ fn a_score_exposes_its_components_and_policy_version() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn scoring_is_deterministic_across_runs() {
     let proposal = proposal_named("NEEDLE", "a", 13);
     let profile = profile("NEEDLE", Band::new(3), false);
@@ -118,6 +120,7 @@ fn scoring_is_deterministic_across_runs() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn no_producer_input_can_raise_a_score_above_the_operators_own_value() {
     let proposal = proposal_named("NEEDLE", "a", 13);
     let profile = profile("NEEDLE", Band::new(2), false);
@@ -154,6 +157,7 @@ fn no_producer_input_can_raise_a_score_above_the_operators_own_value() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn higher_confidence_and_lower_effort_move_the_score_in_the_expected_direction() {
     let proposal = proposal_named("NEEDLE", "a", 13);
     let profile = profile("NEEDLE", Band::MAX, false);
@@ -190,6 +194,7 @@ fn higher_confidence_and_lower_effort_move_the_score_in_the_expected_direction()
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn evidence_older_than_the_window_caps_confidence_and_cannot_raise_rank() {
     let policy = ScoringPolicy::default(); // 30 days
     let profile = profile("NEEDLE", Band::MAX, false);
@@ -230,6 +235,7 @@ fn evidence_older_than_the_window_caps_confidence_and_cannot_raise_rank() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn staleness_caps_confidence_but_never_raises_it() {
     let policy = ScoringPolicy::default();
     let profile = profile("NEEDLE", Band::MAX, false);
@@ -254,6 +260,7 @@ fn staleness_caps_confidence_but_never_raises_it() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_expired_profile_is_reported_in_the_score_components() {
     let mut expiring = profile("NEEDLE", Band::MAX, false);
     expiring.review_expiry = Some(at(20));
@@ -274,6 +281,7 @@ fn an_expired_profile_is_reported_in_the_score_components() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_unprofiled_workspace_scores_between_important_and_unimportant_ones() {
     let policy = ScoringPolicy::default();
     let proposal = proposal_named("new-repo", "a", 13);
@@ -318,6 +326,7 @@ fn an_unprofiled_workspace_scores_between_important_and_unimportant_ones() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn public_visibility_breaks_a_tie_but_never_outranks_higher_value() {
     let policy = ScoringPolicy::default();
     let evidence = producer(Confidence::Medium, EffortEstimate::Small, 13);
@@ -387,6 +396,7 @@ fn public_visibility_breaks_a_tie_but_never_outranks_higher_value() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn ranking_is_a_total_order_even_when_everything_ties() {
     let policy = ScoringPolicy::default();
     let evidence = producer(Confidence::Medium, EffortEstimate::Small, 13);

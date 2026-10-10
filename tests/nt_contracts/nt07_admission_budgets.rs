@@ -1,15 +1,14 @@
 //! Focused behavioral contracts for admission budgets, deduplication and
 //! backpressure (N-T07, `needle-f754b4cb`).
 
-mod admission_support;
-
-use admission_support::*;
+use crate::admission_support::*;
 use needle::learning::improvement::{
     AdmissionDecision, AdmissionPolicy, EvidenceClass, RefusalReason, DEFAULT_ADMISSION_PER_DAY,
     DEFAULT_MAX_OPEN_ADMITTED,
 };
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_default_budget_is_one_admitted_proposal_per_day() {
     assert_eq!(
         DEFAULT_ADMISSION_PER_DAY, 1,
@@ -26,6 +25,7 @@ fn the_default_budget_is_one_admitted_proposal_per_day() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_budget_admits_the_highest_ranked_and_refuses_the_rest_with_a_reason() {
     let proposals = vec![
         proposal(EvidenceClass::RedBaselineWorkspace, "a"),
@@ -56,6 +56,7 @@ fn the_budget_admits_the_highest_ranked_and_refuses_the_rest_with_a_reason() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_budget_already_spent_today_admits_nothing_further() {
     let proposals = vec![proposal(EvidenceClass::RedBaselineWorkspace, "a")];
     let world = World {
@@ -74,6 +75,7 @@ fn a_budget_already_spent_today_admits_nothing_further() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_raised_budget_admits_more() {
     let proposals = vec![
         proposal(EvidenceClass::RedBaselineWorkspace, "a"),
@@ -97,6 +99,7 @@ fn a_raised_budget_admits_more() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_new_evidence_class_creates_exactly_one_bead_across_two_concurrent_submissions() {
     // The same proposal submitted twice in one run: the second is a duplicate
     // of the first, not a second thing to admit.
@@ -126,6 +129,7 @@ fn a_new_evidence_class_creates_exactly_one_bead_across_two_concurrent_submissio
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn deduplication_against_the_estate_beats_the_budget_check() {
     // An owned proposal must not consume a budget slot: it was never going to
     // become work, and spending the day's budget on it would starve a
@@ -162,6 +166,7 @@ fn deduplication_against_the_estate_beats_the_budget_check() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_non_executable_proposal_does_not_consume_the_budget_either() {
     let proposals = vec![proposal(EvidenceClass::RedBaselineWorkspace, "a")];
     let world = World {
@@ -183,6 +188,7 @@ fn a_non_executable_proposal_does_not_consume_the_budget_either() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn backpressure_refuses_while_admitted_work_is_still_open() {
     let proposals = vec![proposal(EvidenceClass::RedBaselineWorkspace, "a")];
     let world = World {
@@ -204,6 +210,7 @@ fn backpressure_refuses_while_admitted_work_is_still_open() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn backpressure_lifts_as_admitted_work_finishes() {
     let proposals = vec![proposal(EvidenceClass::RedBaselineWorkspace, "a")];
     let world = World {
@@ -215,6 +222,7 @@ fn backpressure_lifts_as_admitted_work_finishes() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn backpressure_is_checked_before_the_budget() {
     // Both would refuse; the reported reason must be the one that is actually
     // blocking, or an operator raising the budget would see no change.
@@ -238,6 +246,7 @@ fn backpressure_is_checked_before_the_budget() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn admission_is_deterministic_over_the_same_inputs() {
     let proposals = vec![
         proposal(EvidenceClass::RedBaselineWorkspace, "a"),

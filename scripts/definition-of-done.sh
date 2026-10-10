@@ -162,7 +162,8 @@ done
 # suite with no cargo target. Both are extracted and unit-tested by
 # tests/dod-modes/run.sh rather than copied, so they cannot drift from what
 # actually runs.
-## N-T10 hashing is independently selectable for the focused contract.
+## The focused N-T contracts share the nt_contracts target (needle-1f31332d);
+## select one of them with `cargo test --test nt_contracts <module>::`.
 needle_slow_targets() {
   printf '%s
 ' lib \
@@ -172,27 +173,7 @@ needle_slow_targets() {
     p3_integration_tests \
     real_br_integration_tests \
     escalation_ladder \
-    nt45_failure_evidence_capture \
-    nt50_exception_lessons \
-    nt51_adapter_usage_capture \
-    nt10_policy_precedence \
-    nt10_policy_hashing \
-    nt10_context_manifest \
-    nt10_context_adapter_parity \
-    nt10_policy_doctor \
-    nt10_policy_admission \
-    nt51_gateway_health \
-    nt52_state_dir_isolation \
-    nt07_admission_policy \
-    nt07_admission_budgets \
-    nt53_improvement_proposals \
-    nt54_proposal_admission \
-    nt55_impact_receipts \
-    nt56_improvements_cli \
-    nt07_proposal_contract \
-    nt07_impact_contract \
-    nt07_impact_scoring \
-    nt07_executable_admission \
+    nt_contracts \
     adapter_smoke \
     installer
 }
@@ -214,47 +195,12 @@ needle_cargo_selector() {
 ' --test real_br_integration_tests ;;
     escalation_ladder) printf '%s
 ' --test escalation_ladder ;;
-    nt45_failure_evidence_capture) printf '%s
-' --test nt45_failure_evidence_capture ;;
-    nt50_exception_lessons) printf '%s
-' --test nt50_exception_lessons ;;
-    nt51_adapter_usage_capture) printf '%s
-' --test nt51_adapter_usage_capture ;;
-    nt10_policy_hashing) printf '%s\n' --test nt10_policy_hashing ;;
-    nt10_context_manifest) printf '%s\n' --test nt10_context_manifest ;;
-    nt10_context_adapter_parity) printf "%s\n" --test nt10_context_adapter_parity ;;
-    nt10_policy_doctor) printf '%s\n' --test nt10_policy_doctor ;;
-    nt10_policy_admission) printf '%s\n' --test nt10_policy_admission ;;
-    nt10_policy_precedence) printf '%s\n' --test nt10_policy_precedence ;;
-    nt51_gateway_health) printf '%s
-' --test nt51_gateway_health ;;
-    nt52_state_dir_isolation) printf '%s
-' --test nt52_state_dir_isolation ;;
-    nt07_admission_policy) printf '%s
-' --test nt07_admission_policy ;;
-    nt07_admission_budgets) printf '%s
-' --test nt07_admission_budgets ;;
-    nt53_improvement_proposals) printf '%s
-' --test nt53_improvement_proposals ;;
-    nt54_proposal_admission) printf '%s
-' --test nt54_proposal_admission ;;
-    nt55_impact_receipts) printf '%s
-' --test nt55_impact_receipts ;;
-    nt56_improvements_cli) printf '%s
-' --test nt56_improvements_cli ;;
-    nt07_proposal_contract) printf '%s
-' --test nt07_proposal_contract ;;
-    nt07_impact_contract) printf '%s
-' --test nt07_impact_contract ;;
-    nt07_impact_scoring) printf '%s
-' --test nt07_impact_scoring ;;
-    nt07_executable_admission) printf '%s
-' --test nt07_executable_admission ;;
+    nt_contracts) printf '%s\n' --test nt_contracts ;;
     *) return 1 ;;
   esac
 }
 
-# An archive contains all ten Cargo test binaries, so archive consumers must
+# An archive contains every Cargo test binary, so archive consumers must
 # select by nextest's stable binary ID rather than passing Cargo target flags
 # (Cargo build options conflict with --archive-file). Equality matchers are
 # deliberate: contains/glob matching could silently run a newly added binary.
@@ -275,42 +221,7 @@ needle_nextest_filter() {
 ' 'binary_id(=needle::real_br_integration_tests)' ;;
     escalation_ladder) printf '%s
 ' 'binary_id(=needle::escalation_ladder)' ;;
-    nt45_failure_evidence_capture) printf '%s
-' 'binary_id(=needle::nt45_failure_evidence_capture)' ;;
-    nt50_exception_lessons) printf '%s
-' 'binary_id(=needle::nt50_exception_lessons)' ;;
-    nt51_adapter_usage_capture) printf '%s
-' 'binary_id(=needle::nt51_adapter_usage_capture)' ;;
-    nt10_policy_hashing) printf '%s\n' 'binary_id(=needle::nt10_policy_hashing)' ;;
-    nt10_context_manifest) printf '%s\n' 'binary_id(=needle::nt10_context_manifest)' ;;
-    nt10_context_adapter_parity) printf "%s\n" "binary_id(=needle::nt10_context_adapter_parity)" ;;
-    nt10_policy_doctor) printf '%s\n' 'binary_id(=needle::nt10_policy_doctor)' ;;
-    nt10_policy_admission) printf '%s\n' 'binary_id(=needle::nt10_policy_admission)' ;;
-    nt10_policy_precedence) printf '%s\n' 'binary_id(=needle::nt10_policy_precedence)' ;;
-    nt51_gateway_health) printf '%s
-' 'binary_id(=needle::nt51_gateway_health)' ;;
-    nt52_state_dir_isolation) printf '%s
-' 'binary_id(=needle::nt52_state_dir_isolation)' ;;
-    nt07_admission_policy) printf '%s
-' 'binary_id(=needle::nt07_admission_policy)' ;;
-    nt07_admission_budgets) printf '%s
-' 'binary_id(=needle::nt07_admission_budgets)' ;;
-    nt53_improvement_proposals) printf '%s
-' 'binary_id(=needle::nt53_improvement_proposals)' ;;
-    nt54_proposal_admission) printf '%s
-' 'binary_id(=needle::nt54_proposal_admission)' ;;
-    nt55_impact_receipts) printf '%s
-' 'binary_id(=needle::nt55_impact_receipts)' ;;
-    nt56_improvements_cli) printf '%s
-' 'binary_id(=needle::nt56_improvements_cli)' ;;
-    nt07_proposal_contract) printf '%s
-' 'binary_id(=needle::nt07_proposal_contract)' ;;
-    nt07_impact_contract) printf '%s
-' 'binary_id(=needle::nt07_impact_contract)' ;;
-    nt07_impact_scoring) printf '%s
-' 'binary_id(=needle::nt07_impact_scoring)' ;;
-    nt07_executable_admission) printf '%s
-' 'binary_id(=needle::nt07_executable_admission)' ;;
+    nt_contracts) printf '%s\n' 'binary_id(=needle::nt_contracts)' ;;
     *) return 1 ;;
   esac
 }
@@ -327,7 +238,7 @@ needle_validate_archive_mode() {
     return 1
   fi
   if [[ "$SLOW_TARGET" == "installer" ]] || ! needle_nextest_filter "$SLOW_TARGET" >/dev/null; then
-    echo "Error: --archive-file requires one of the six Cargo test targets, not '$SLOW_TARGET'" >&2
+    echo "Error: --archive-file requires one of the Cargo test targets, not '$SLOW_TARGET'" >&2
     return 1
   fi
 

@@ -71,6 +71,7 @@ fn two_attempts() -> Vec<EvidenceRef> {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_valid_proposal_carries_the_current_schema_version_and_a_derived_signature() {
     let proposal = proposal_with(
         EvidenceClass::RedBaselineWorkspace,
@@ -101,6 +102,7 @@ fn a_valid_proposal_carries_the_current_schema_version_and_a_derived_signature()
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_same_evidence_in_a_different_order_derives_the_same_signature() {
     let forwards = proposal_with(
         EvidenceClass::RedBaselineWorkspace,
@@ -126,6 +128,7 @@ fn the_same_evidence_in_a_different_order_derives_the_same_signature() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn duplicate_evidence_references_collapse_before_the_signature_is_derived() {
     let mut duplicated = two_attempts();
     duplicated.extend(two_attempts());
@@ -156,6 +159,7 @@ fn duplicate_evidence_references_collapse_before_the_signature_is_derived() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn prose_is_outside_the_signature_so_rewording_does_not_refile() {
     let original = proposal_with(
         EvidenceClass::RedBaselineWorkspace,
@@ -194,6 +198,7 @@ fn prose_is_outside_the_signature_so_rewording_does_not_refile() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_different_scope_or_class_is_a_different_proposal() {
     let base = proposal_with(
         EvidenceClass::RedBaselineWorkspace,
@@ -226,6 +231,7 @@ fn a_different_scope_or_class_is_a_different_proposal() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn scope_normalizes_so_ordering_and_duplication_cannot_split_an_identity() {
     let scope = ProposalScope::new(
         ["b".to_string(), "a".to_string(), "b".to_string()],
@@ -240,6 +246,7 @@ fn scope_normalizes_so_ordering_and_duplication_cannot_split_an_identity() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_proposal_without_evidence_is_refused() {
     assert_eq!(
         proposal_with(
@@ -253,6 +260,7 @@ fn a_proposal_without_evidence_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_proposal_with_an_empty_scope_is_refused() {
     assert_eq!(
         proposal_with(
@@ -266,6 +274,7 @@ fn a_proposal_with_an_empty_scope_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_proposal_with_no_intended_change_is_refused() {
     let rejection = ImprovementProposal::new(
         EvidenceClass::RedBaselineWorkspace,
@@ -283,6 +292,7 @@ fn a_proposal_with_no_intended_change_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_acceptance_threshold_that_could_never_decide_is_refused() {
     for bad in [0.0, -0.1, f64::NAN, f64::INFINITY] {
         let rejection = ImprovementProposal::new(
@@ -310,6 +320,7 @@ fn an_acceptance_threshold_that_could_never_decide_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_zero_day_horizon_is_refused() {
     let rejection = ImprovementProposal::new(
         EvidenceClass::RedBaselineWorkspace,
@@ -332,6 +343,7 @@ fn a_zero_day_horizon_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn free_text_fields_are_bounded_at_construction() {
     let huge = "x".repeat(10_000);
     let proposal = ImprovementProposal::new(
@@ -365,6 +377,7 @@ fn free_text_fields_are_bounded_at_construction() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_proposal_claiming_more_authority_than_its_evidence_class_allows_is_refused() {
     // Canary evidence can move a canary's own knob (L2). It can never
     // authorize deploying code (L5), however many canaries ran.
@@ -391,6 +404,7 @@ fn a_proposal_claiming_more_authority_than_its_evidence_class_allows_is_refused(
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn every_evidence_class_declares_an_authority_ceiling_at_or_below_l4() {
     for class in EvidenceClass::ALL {
         let ceiling = class.max_authority();
@@ -409,6 +423,7 @@ fn every_evidence_class_declares_an_authority_ceiling_at_or_below_l4() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn controller_applied_levels_are_exactly_l1_through_l3() {
     assert!(!AuthorityLevel::L0.applied_by_controller());
     assert!(AuthorityLevel::L1.applied_by_controller());
@@ -426,6 +441,7 @@ fn controller_applied_levels_are_exactly_l1_through_l3() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_acceptance_measure_vocabulary_admits_no_uncomputable_measure() {
     // Every measure is a section 10 quantity computable from ledger rows.
     // This test exists so that adding a free-text or "other" variant fails
@@ -444,6 +460,7 @@ fn the_acceptance_measure_vocabulary_admits_no_uncomputable_measure() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_evidence_class_vocabulary_matches_the_plan() {
     let wire: Vec<&str> = EvidenceClass::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(
@@ -461,6 +478,7 @@ fn the_evidence_class_vocabulary_matches_the_plan() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_proposal_round_trips_through_json_unchanged() {
     let proposal = proposal_with(
         EvidenceClass::UnverifiedSpendConcentration,
@@ -486,6 +504,7 @@ fn a_proposal_round_trips_through_json_unchanged() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn direction_decides_against_the_declared_threshold() {
     let up = Direction::Increase;
     assert!(
@@ -509,6 +528,7 @@ fn direction_decides_against_the_declared_threshold() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn evidence_ids_are_readable_by_kind() {
     let proposal = proposal_with(
         EvidenceClass::WorkspaceAdapterRegret,

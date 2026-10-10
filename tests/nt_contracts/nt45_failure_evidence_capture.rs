@@ -70,6 +70,7 @@ fn record_with(evidence: FailureEvidence) -> AttemptRecord {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn fixture_transcript_captures_tools_final_message_and_gate_diagnostic() {
     let evidence = capture_failure_evidence(
         fixture_transcript(),
@@ -109,6 +110,7 @@ fn fixture_transcript_captures_tools_final_message_and_gate_diagnostic() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn timed_out_partial_transcript_keeps_its_last_tool_error() {
     let partial = concat!(
         r#"{"schema_version":1,"ts":1.0,"type":"tool_result","tool":"shell","success":true,"output":"ok"}"#,
@@ -125,6 +127,7 @@ fn timed_out_partial_transcript_keeps_its_last_tool_error() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn sanitizer_blocked_content_is_marked_and_bounded() {
     let evidence = capture_failure_evidence_blocked(fixture_transcript(), Some(&gate_report()))
         .expect("blocked failure evidence");
@@ -156,6 +159,7 @@ fn sanitizer_blocked_content_is_marked_and_bounded() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn evidence_is_off_by_default_and_rendering_is_byte_stable() {
     assert!(
         !Config::default()

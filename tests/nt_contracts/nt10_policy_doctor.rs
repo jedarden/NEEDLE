@@ -108,6 +108,7 @@ fn provenance_path<'a>(document: &'a Value, suffix: &str) -> &'a Value {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn policy_doctor_reports_scoped_provenance_and_content_addressed_manifest() {
     let fixture = Fixture::new();
     let first = fixture.run_json();
@@ -170,6 +171,7 @@ fn policy_doctor_reports_scoped_provenance_and_content_addressed_manifest() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn policy_doctor_reports_deterministic_equal_authority_conflict() {
     let fixture = Fixture::new();
     fs::write(

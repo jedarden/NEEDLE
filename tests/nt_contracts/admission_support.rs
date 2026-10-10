@@ -1,9 +1,8 @@
-//! Shared fixtures for the two admission harnesses (`needle-43c0d818`,
-//! `needle-f754b4cb`).
+//! Shared fixtures for the two admission modules (`needle-43c0d818`,
+//! `needle-f754b4cb`), `nt07_admission_policy` and `nt07_admission_budgets`.
 //!
-//! Not a test target of its own: `autotests = false` plus the explicit
-//! `[[test]]` inventory means only declared roots are built, so a `mod.rs`
-//! under `tests/` is a plain module both harnesses include.
+//! Declared once by the `nt_contracts` root; both modules import it through
+//! `crate::admission_support`.
 
 #![allow(dead_code)]
 

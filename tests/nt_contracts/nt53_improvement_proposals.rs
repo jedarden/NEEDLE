@@ -158,6 +158,7 @@ fn fixture() -> Vec<LedgerRow> {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_fixture_yields_the_unchanged_retry_workspace_regret_and_unverified_spend_proposals() {
     let generated = generate(&fixture(), &GeneratorThresholds::default(), now());
 
@@ -203,6 +204,7 @@ fn the_fixture_yields_the_unchanged_retry_workspace_regret_and_unverified_spend_
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn the_workspace_regret_proposals_name_the_two_workspaces_the_plan_cites() {
     let generated = generate(&fixture(), &GeneratorThresholds::default(), now());
 
@@ -218,6 +220,7 @@ fn the_workspace_regret_proposals_name_the_two_workspaces_the_plan_cites() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_regret_proposal_names_both_adapters_and_proposes_moving_to_the_better_one() {
     let generated = generate(&fixture(), &GeneratorThresholds::default(), now());
     let regret = generated
@@ -244,6 +247,7 @@ fn a_regret_proposal_names_both_adapters_and_proposes_moving_to_the_better_one()
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_repeated_failure_proposal_names_the_bead_the_reason_and_every_attempt() {
     let generated = generate(&fixture(), &GeneratorThresholds::default(), now());
     let retry = generated
@@ -270,6 +274,7 @@ fn a_repeated_failure_proposal_names_the_bead_the_reason_and_every_attempt() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn two_identical_failures_are_below_the_threshold() {
     let rows = vec![
         row(
@@ -304,6 +309,7 @@ fn two_identical_failures_are_below_the_threshold() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn three_failures_with_different_reasons_are_three_problems_not_one_class() {
     let rows = vec![
         row(
@@ -348,6 +354,7 @@ fn three_failures_with_different_reasons_are_three_problems_not_one_class() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn repeated_decompositions_are_not_repeated_failures() {
     // ADR-030: a decomposed attempt split its bead instead of delivering it
     // and earns neither success nor failure credit. Against the live ledger
@@ -379,6 +386,7 @@ fn repeated_decompositions_are_not_repeated_failures() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_adapter_below_the_evidence_floor_does_not_produce_a_regret_proposal() {
     let mut rows = Vec::new();
     // Only five attempts each: below the floor of twenty.
@@ -415,6 +423,7 @@ fn an_adapter_below_the_evidence_floor_does_not_produce_a_regret_proposal() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn unverified_spend_below_the_dollar_floor_is_not_worth_a_proposal() {
     let mut rows = Vec::new();
     // 100% unverified, but only $3 total.
@@ -441,6 +450,7 @@ fn unverified_spend_below_the_dollar_floor_is_not_worth_a_proposal() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn uncosted_rows_are_not_counted_as_free_spend() {
     let mut rows = Vec::new();
     // Thirty uncosted failures: cost unknown, never zero (ADR-030). There is
@@ -472,6 +482,7 @@ fn uncosted_rows_are_not_counted_as_free_spend() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn fixture_rows_are_excluded_before_any_denominator_is_computed() {
     let mut rows = fixture();
     let before = generate(&rows, &GeneratorThresholds::default(), now());
@@ -518,6 +529,7 @@ fn fixture_rows_are_excluded_before_any_denominator_is_computed() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn generation_is_deterministic_and_ordered() {
     let rows = fixture();
     let first = generate(&rows, &GeneratorThresholds::default(), now());
@@ -538,6 +550,7 @@ fn generation_is_deterministic_and_ordered() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_empty_ledger_produces_nothing_rather_than_failing() {
     let generated = generate(&[], &GeneratorThresholds::default(), now());
     assert!(generated.proposals.is_empty());
@@ -546,6 +559,7 @@ fn an_empty_ledger_produces_nothing_rather_than_failing() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn every_generated_proposal_carries_a_computable_acceptance_measure() {
     let generated = generate(&fixture(), &GeneratorThresholds::default(), now());
     assert!(!generated.proposals.is_empty());
@@ -570,6 +584,7 @@ fn every_generated_proposal_carries_a_computable_acceptance_measure() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn provisional_rows_cannot_generate_improvement_proposals() {
     let mut rows = fixture();
     for row in &mut rows {

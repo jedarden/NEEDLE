@@ -30,6 +30,7 @@ fn resolved_registry(repository: &std::path::Path) -> AuthorityRegistry {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn materializes_a_context_manifest_from_the_resolved_policy_snapshot() {
     let fixture = tempfile::tempdir().expect("isolated fixture directory");
     let repository = fixture.path().join("repository");
@@ -67,6 +68,7 @@ fn materializes_a_context_manifest_from_the_resolved_policy_snapshot() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn conflicting_policy_snapshot_fails_deterministically_before_materialization() {
     let fixture = tempfile::tempdir().expect("isolated fixture directory");
     let repository = fixture.path().join("repository");

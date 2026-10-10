@@ -317,6 +317,7 @@ fn resolved_hash(registry: &AuthorityRegistry, workspace: &Path, adapter: &str) 
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn cli_daemon_and_adapter_share_policy_context_and_manifest_identity() {
     let fixture = Fixture::new();
     let _environment = IsolatedEnvironment::enter(&fixture);
@@ -404,6 +405,7 @@ fn cli_daemon_and_adapter_share_policy_context_and_manifest_identity() {
 }
 
 #[test]
+#[serial_test::serial(nt_process_env)]
 fn cli_daemon_and_adapter_reject_the_same_ambiguous_context() {
     let fixture = Fixture::new();
     fs::write(

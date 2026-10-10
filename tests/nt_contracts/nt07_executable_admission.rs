@@ -65,7 +65,8 @@ fn contract() -> ImpactContract {
 
 fn good_plan() -> ExecutionPlan {
     ExecutionPlan {
-        acceptance_command: "cargo test --test nt53_improvement_proposals".to_string(),
+        acceptance_command: "cargo test --test nt_contracts nt53_improvement_proposals::"
+            .to_string(),
         overlap_scope: vec!["src/learning/improvement/generator.rs".to_string()],
         dependencies: Vec::new(),
         approved_intent: None,
@@ -77,6 +78,7 @@ fn good_plan() -> ExecutionPlan {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn improve_coverage_is_refused_with_an_explicit_reason() {
     let vague = proposal_asking("improve coverage");
     let plan = ExecutionPlan {
@@ -102,6 +104,7 @@ fn improve_coverage_is_refused_with_an_explicit_reason() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_concrete_uncovered_branch_with_a_focused_test_command_is_admissible() {
     let concrete = proposal_asking(
         "cover the untaken `Err` branch in `resolve_usage` at src/attempt_accounting.rs:210",
@@ -119,6 +122,7 @@ fn a_concrete_uncovered_branch_with_a_focused_test_command_is_admissible() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn directional_wording_is_fine_when_the_scope_names_a_real_path() {
     // "reduce" is directional, but the change points at a file, so it is a
     // destination rather than a direction.
@@ -135,6 +139,7 @@ fn directional_wording_is_fine_when_the_scope_names_a_real_path() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_missing_acceptance_command_is_refused() {
     let plan = ExecutionPlan {
         acceptance_command: "   ".to_string(),
@@ -147,6 +152,7 @@ fn a_missing_acceptance_command_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_chained_acceptance_command_is_refused_for_each_chainer() {
     for (command, chainer) in [
         ("cargo test --test a && cargo clippy", "&&"),
@@ -172,6 +178,7 @@ fn a_chained_acceptance_command_is_refused_for_each_chainer() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_unrunnable_acceptance_command_is_refused() {
     let plan = ExecutionPlan {
         acceptance_command: "echo done".to_string(),
@@ -192,9 +199,10 @@ fn an_unrunnable_acceptance_command_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn every_declared_runner_prefix_is_accepted() {
     for command in [
-        "cargo test --test nt53_improvement_proposals",
+        "cargo test --test nt_contracts nt53_improvement_proposals::",
         "cargo clippy --lib",
         "cargo check --all-targets",
         "cargo fmt --check",
@@ -219,6 +227,7 @@ fn every_declared_runner_prefix_is_accepted() {
 // ──────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_change_with_no_overlap_scope_is_refused() {
     for scope in [Vec::new(), vec!["  ".to_string()]] {
         let plan = ExecutionPlan {
@@ -234,6 +243,7 @@ fn a_change_with_no_overlap_scope_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn an_operator_approved_intent_substitutes_for_evidence_but_nothing_else_does() {
     // The envelope refuses an evidence-free proposal, so the approved-intent
     // path is reached by clearing evidence on an already-built record — the
@@ -268,6 +278,7 @@ fn an_operator_approved_intent_substitutes_for_evidence_but_nothing_else_does() 
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn a_proposal_without_a_stable_fingerprint_is_refused() {
     let mut unsigned = proposal_asking("fix src/x.rs");
     unsigned.signature.clear();
@@ -278,6 +289,7 @@ fn a_proposal_without_a_stable_fingerprint_is_refused() {
 }
 
 #[test]
+#[serial_test::parallel(nt_process_env)]
 fn declared_dependencies_are_carried_through_admission() {
     let plan = ExecutionPlan {
         dependencies: vec!["needle-d6c5397a".to_string()],
