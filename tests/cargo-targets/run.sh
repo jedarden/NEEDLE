@@ -254,7 +254,7 @@ workdir_line="$(grep -nF 'WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
    "$nextest_assert_line" -lt "$workdir_line" ]] || fail \
   'base image must add cargo-nextest after the pinned Rust toolchain layer and before WORKDIR'
 
-[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.16" ]] \
+[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.17" ]] \
   || fail 'ci/VERSION must move with the exact-profile dependency image contents'
 grep -Fq 'nextest-version = { required = "0.9.144" }' "$NEXTEST_CONFIG" \
   || fail 'nextest config must set the minimum supported runner version'
@@ -332,6 +332,6 @@ echo "PASS: rustc release matches the source toolchain pin ($source_toolchain)"
 echo 'PASS: base image builds bead-rs 0.2.6 from the pinned fleet revision'
 echo 'PASS: base image pins and verifies cargo-nextest 0.9.144 before installation'
 echo 'PASS: nextest CI profile emits stable, non-duplicated JUnit output'
-echo 'PASS: CI image version is 0.1.16'
+echo 'PASS: CI image version is 0.1.17'
 
 "$REPO_ROOT/tests/nextest-shard-plan/run.sh"
