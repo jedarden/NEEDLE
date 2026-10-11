@@ -31,9 +31,11 @@ exploration sample.
 4. **Work the approved queue, then propose.** `fleet-policy.env` enables
    Generation and Weave (operator directive 2026-10-11, needle-1eb46f73) and
    keeps Pulse and Unravel disabled. Weave runs only after Pluck and Explore
-   find nothing, creates at most five beads per workspace per 24 hours, and
-   labels every bead `weave-generated`, `proposal-pending` and `human`, so it
-   still needs admission before dispatch; see the
+   find nothing and only for a repository whose eligible-ready frontier is
+   below the low-water reserve (5), at most five beads per pass and one pass
+   per one-hour lease. Every bead it creates carries `weave-generated`,
+   `proposal-pending` and `human`, so it still needs admission before
+   dispatch; see the
    [productivity policy](../../docs/productivity-policy.md).
 5. **Observe available work.** `needle-backlog-slo.timer` measures eligible
    inventory every five minutes. Minimum and target counts are zero: fleet

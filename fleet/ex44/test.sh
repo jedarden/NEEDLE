@@ -63,7 +63,8 @@ grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
 [[ "$(awk -F'\t' '$3 == "claude-code-glm-5.3" {n++} END {print n+0}' <<<"$rows")" -le 9 ]]
 ! grep -Eq '/(CLASP|agentists-quickstart-deprecated|commitgraph-deprecated)([[:space:]]|$)' "$MANIFEST"
 
-grep -qx 'NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE=0' "$SRC_DIR/fleet-policy.env"
+grep -qx 'NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE=5' "$SRC_DIR/fleet-policy.env"
+grep -qx 'NEEDLE_STRANDS__GENERATION__LEASE_TTL_SECS=3600' "$SRC_DIR/fleet-policy.env"
 for strand in GENERATION WEAVE; do
     grep -qx "NEEDLE_STRANDS__${strand}__ENABLED=true" "$SRC_DIR/fleet-policy.env"
 done
