@@ -117,13 +117,30 @@ Fleet size: **8 workers** (`workers.tsv`), against the 2026-09-09 right-size
 of the 15-unit fleet down to 7 — one workspace family each, ~1 core per worker
 against the 7-core slice, start-staggered 15s → 165s.
 
-`lab-codex-loom` (needle-f14e1ec3, 2026-10-02) is the deliberate eighth worker.
+`lab-glm-loom` is the deliberate eighth worker, originally introduced as
+`lab-codex-loom` (needle-f14e1ec3, 2026-10-02). On 2026-10-11,
+needle-16368f14 reassigned that inactive slot to prepaid GLM-5.3-Flash and
+renamed its identity to match the provider; the old Codex unit is disabled.
 It is pinned to the lab-owned LOOM development queue and replaces the temporary
 duplicate `lab-codex-tgplat` slot without increasing fleet size or the 7-core
 slice. LOOM's production runtime and release control remain on their existing
 hosts. The slot drops the average to ~0.875 cores/worker against the same
 7-core slice, so it must be reassigned or retired rather than duplicated when
 queue ownership changes again.
+
+The lab Flash adapter has an 80-turn ceiling (needle-16368f14, 2026-10-11).
+The first `lab-glm-loom` dispatch, `loom-b9a3a285`, exhausted the former
+30-turn ceiling after reading plans, source, and related beads, with no source
+changes or verification. The larger bounded budget leaves room for implementation
+and required checks; provider, model, timeouts, resource caps, and admission
+controls retain their existing values. NEEDLE caches adapter templates in its
+dispatcher, so an adapter file edit takes effect after dispatcher reconstruction
+at a safe claim boundary. A changed `agent.adapters_dir` also rebuilds the
+dispatcher during configuration reload. A temporary equivalent path resolving
+to the same directory can trigger that reload without a restart; restore its
+original spelling after the worker acknowledges the applied key. The file edit
+alone does not update an active attempt or guarantee adoption by its next claim;
+confirm the new child process's `--max-turns 80` argument.
 
 On 2026-10-05, `lab-gantry` switched from GLM-5.3-Flash to the existing Codex
 adapter after 39 `max_turns` work failures in 24 hours and repeated upstream
