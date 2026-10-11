@@ -1810,7 +1810,11 @@ impl ExploreStrand {
             })
             .collect();
 
-        let probe_results = stream::iter(probe_jobs)
+        // Reserve half the evaluation for ranking and returning the completed
+        // frontier. Waiting for every backend let a slow probe discard ready
+        // work when the outer evaluation deadline expired.
+        let frontier_deadline = tokio::time::Instant::now() + self.evaluation_timeout / 2;
+        let probes = stream::iter(probe_jobs)
             .map(|(workspace, workspace_filters, mut timing)| async move {
                 let result = self
                     .probe_workspace_frontier(&workspace, &workspace_filters)
@@ -1822,9 +1826,34 @@ impl ExploreStrand {
                 });
                 (workspace, result)
             })
-            .buffer_unordered(EXPLORE_WORKSPACE_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await;
+            .buffer_unordered(EXPLORE_WORKSPACE_CONCURRENCY);
+        let (probe_results, frontier_timed_out) = {
+            futures::pin_mut!(probes);
+            let mut completed = Vec::new();
+            let timed_out = loop {
+                match tokio::time::timeout_at(frontier_deadline, probes.next()).await {
+                    Ok(Some(result)) => completed.push(result),
+                    Ok(None) => break false,
+                    Err(_) => break true,
+                }
+            };
+            (completed, timed_out)
+        };
+        if frontier_timed_out && partial_scan {
+            // A timeout may consume only the first few probes in this slice.
+            // Advancing by the whole slice can repeatedly skip the same stores
+            // when its size shares a factor with the fleet size. Advance past
+            // completed probes (or at least the in-flight pair) instead.
+            let advanced = probe_results.len().clamp(
+                EXPLORE_WORKSPACE_CONCURRENCY,
+                EXPLORE_WORKSPACES_PER_EVALUATION,
+            );
+            self.workspace_scan_cursor.fetch_sub(
+                (EXPLORE_WORKSPACES_PER_EVALUATION - advanced) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let partial_scan = partial_scan || frontier_timed_out;
 
         let mut workspace_health: Vec<WorkspaceHealth> = Vec::new();
         let mut validated_frontiers: HashMap<PathBuf, WorkspaceFrontier> = HashMap::new();
@@ -1990,6 +2019,13 @@ impl ExploreStrand {
 
             let mut candidates = frontier.candidates.clone();
             if candidates.is_empty() {
+                // Recovery must not consume the remaining deadline and throw
+                // away work already found. Mend can recover these queues on a
+                // later cycle; a partial frontier should retry at the floor.
+                if frontier_timed_out || !all_candidates.is_empty() {
+                    exclusion_reasons.insert("orphan_recovery_deferred".to_string());
+                    continue;
+                }
                 // No ready candidates. Run cross-workspace mend to release
                 // orphaned in-progress beads, then re-query.
                 tracing::debug!(
@@ -2416,6 +2452,29 @@ mod tests {
         }
     }
 
+    struct MixedSpeedStoreFactory {
+        ready_workspace: Option<PathBuf>,
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for MixedSpeedStoreFactory {
+        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>> {
+            if workspace.ends_with("slow")
+                || self
+                    .ready_workspace
+                    .as_ref()
+                    .is_some_and(|ready| ready != workspace)
+            {
+                return std::future::pending().await;
+            }
+            Ok(Arc::new(AdaptiveScanStore {
+                ready_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                candidate_on_ready_call: 1,
+                workspace: workspace.to_path_buf(),
+            }))
+        }
+    }
+
     /// Store factory used to verify Explore's scan cadence without sleeping.
     struct AdaptiveScanFactory {
         ready_calls: Arc<std::sync::atomic::AtomicU32>,
@@ -2614,6 +2673,77 @@ mod tests {
                 && event.data["outcome"] == "cancelled"
                 && event.data["duration_ms"].is_u64()
         }));
+    }
+
+    #[tokio::test]
+    async fn slow_frontier_probe_does_not_discard_ready_work() {
+        let root = tempfile::tempdir().unwrap();
+        let fast = root.path().join("fast");
+        let slow = root.path().join("slow");
+        for workspace in [&fast, &slow] {
+            fs::create_dir_all(workspace.join(".beads")).unwrap();
+        }
+        let state = tempfile::tempdir().unwrap();
+        let helper = TestHelper::new("partial-frontier-test");
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![fast.clone(), slow.clone()],
+            root.path().join("home"),
+            Registry::new(state.path()),
+            helper.telemetry_handle(),
+            "partial-frontier-test".to_string(),
+            Arc::new(MixedSpeedStoreFactory {
+                ready_workspace: None,
+            }),
+            300,
+        )
+        .with_evaluation_timeout(Duration::from_millis(200));
+
+        let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
+        let StrandResult::BeadFound(candidates) = result else {
+            panic!("completed ready work was discarded: {result:?}");
+        };
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].workspace, fast);
+        helper.sync().await;
+        let timings = helper.events_by_type("explore.workspace_timing");
+        assert!(timings.iter().any(|event| {
+            event.data["workspace"] == slow.display().to_string()
+                && event.data["outcome"] == "cancelled"
+        }));
+        assert_eq!(helper.events_by_type("explore.scan_summary").len(), 1);
+
+        // With a large fleet, cancelled probes must not make the next scan
+        // jump a whole 24-store slice and permanently skip ready work.
+        let workspaces: Vec<_> = (0..80)
+            .map(|index| root.path().join(format!("remote-{index}")))
+            .collect();
+        for workspace in &workspaces {
+            fs::create_dir_all(workspace.join(".beads")).unwrap();
+        }
+        let mut strand = ExploreStrand::new_with_store_factory(
+            workspaces.clone(),
+            root.path().join("home"),
+            Registry::new(state.path()),
+            helper.telemetry_handle(),
+            "partial-frontier-progress".to_string(),
+            Arc::new(SlowStoreFactory),
+            300,
+        )
+        .with_evaluation_timeout(Duration::from_millis(200));
+        let target = strand.worker_scan_order(workspaces)[2].clone();
+        strand.store_factory = Arc::new(MixedSpeedStoreFactory {
+            ready_workspace: Some(target.clone()),
+        });
+        assert!(matches!(
+            strand.evaluate(&DummyStore, &HashSet::new()).await,
+            StrandResult::NoWork
+        ));
+        let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
+        let StrandResult::BeadFound(candidates) = result else {
+            panic!("partial scan skipped the next ready workspace: {result:?}");
+        };
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].workspace, target);
     }
 
     async fn assert_explore_emits_per_workspace_timing_event() {

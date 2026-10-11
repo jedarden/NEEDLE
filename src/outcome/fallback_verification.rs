@@ -27,12 +27,16 @@
 //!   extraction is cut from. Empty means the committed state *is* the whole
 //!   work; anything uncommitted would silently vanish from the extraction.)
 //!   Clean passes with the `no verifier for this workspace` WARN, counted by
-//!   `gate.no_verifier` in the outcome handler; dirty fails the dispatch.
+//!   `gate.no_verifier` in the outcome handler. A dirty shared checkout cannot
+//!   establish what belongs to this dispatch: it is a gate execution error,
+//!   not evidence that the bead's work failed. The existing gate-health path
+//!   suppresses ordinary dispatch after repeated infrastructure errors.
 //!
-//! Verdicts (see [`FallbackVerdict`]): a command that exits non-zero and a
-//! dirty tree are verdicts — the dispatch is released with the
+//! Verdicts (see [`FallbackVerdict`]): a command that exits non-zero is a
+//! verdict — the dispatch is released with the
 //! `verification-failed` label through the ordinary failed-verification path.
-//! An extraction that cannot be built or a command that cannot spawn is not a
+//! A dirty no-verifier workspace, a Git inspection that fails, an extraction
+//! that cannot be built, or a command that cannot spawn is not a
 //! verdict: it surfaces as [`GateResult::ExecutionError`], which routes to
 //! the GateError path (release, failure-count untouched, needle-4aaa010c) —
 //! the same ADR-023 split the close-evidence re-run uses.
@@ -98,15 +102,16 @@ pub(crate) enum FallbackVerdict {
     /// A selected verifier ran green in the clean extraction.
     Pass(GateReport),
     /// No verifier for this workspace and the tree the extraction is cut
-    /// from is clean (or there is no git tree to judge at all). The caller
+    /// from is clean. The caller
     /// emits the `no verifier for this workspace` WARN and counts it, with
     /// the reason the verifier was withheld.
     NoVerifierPass(NoVerifierReason),
-    /// A verdict against the dispatch: a selected verifier failed, or the
-    /// tree is dirty. Released with `verification-failed`.
+    /// A verdict against the dispatch: a selected verifier failed.
+    /// Released with `verification-failed`.
     Fail(GateReport),
     /// The check itself could not run (extraction failed, spawn failed,
-    /// timed out) — release without a failure-count penalty.
+    /// timed out, or no verifier can judge a dirty shared checkout) — release
+    /// without a failure-count penalty. Repeated errors degrade the workspace.
     ExecutionError(GateReport),
 }
 
@@ -298,10 +303,19 @@ impl FallbackVerificationRuntime {
                     workspace = %bead.workspace.display(),
                     reason = reason.as_str(),
                     stderr = %String::from_utf8_lossy(&output.stderr),
-                    "no verifier for this workspace and git could not judge its tree — \
-                     passing on the agent's exit code alone"
+                    "no verifier for this workspace and git could not judge its tree"
                 );
-                return FallbackVerdict::NoVerifierPass(reason);
+                return FallbackVerdict::ExecutionError(execution_error_report(
+                    CLEAN_TREE_GATE_NAME,
+                    "git status --porcelain --untracked-files=all",
+                    format!(
+                        "cannot inspect committed work without a verifier ({}): git status \
+                         exited {}; stderr: {}",
+                        reason.as_str(),
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr),
+                    ),
+                ));
             }
             Err(error) => {
                 tracing::debug!(
@@ -309,10 +323,13 @@ impl FallbackVerificationRuntime {
                     workspace = %bead.workspace.display(),
                     reason = reason.as_str(),
                     error = %error,
-                    "no verifier for this workspace and git could not be spawned to judge \
-                     its tree — passing on the agent's exit code alone"
+                    "no verifier for this workspace and git could not be spawned to judge its tree"
                 );
-                return FallbackVerdict::NoVerifierPass(reason);
+                return FallbackVerdict::ExecutionError(execution_error_report(
+                    CLEAN_TREE_GATE_NAME,
+                    "git status --porcelain --untracked-files=all",
+                    format!("cannot inspect committed work without a verifier: {error}"),
+                ));
             }
         };
 
@@ -333,19 +350,25 @@ impl FallbackVerificationRuntime {
             FallbackVerdict::NoVerifierPass(reason)
         } else {
             let reason = format!(
-                "no verifier for this workspace, so the dispatch is judged on its \
-                 committed state alone — but these paths carry uncommitted changes \
-                 that the clean extraction would not contain:\n{}",
+                "no runnable verifier for this workspace ({}); the shared checkout \
+                 contains uncommitted paths, so committed work cannot be verified or \
+                 the dirt attributed to this bead. Configure an extraction-safe gate \
+                 before retrying; this is missing verification infrastructure, not a \
+                 verdict against the work. Uncommitted paths:\n{}",
+                reason.as_str(),
                 dirty.join("\n")
             );
             tracing::warn!(
                 bead_id = %bead.id,
                 workspace = %bead.workspace.display(),
                 dirty_paths = ?dirty,
-                "fallback clean-tree check failed — uncommitted changes would be \
-                 absent from the extraction"
+                "fallback verification unavailable — no verifier can judge the dirty shared checkout"
             );
-            FallbackVerdict::Fail(GateReport::single_failure(CLEAN_TREE_GATE_NAME, reason))
+            FallbackVerdict::ExecutionError(execution_error_report(
+                CLEAN_TREE_GATE_NAME,
+                "git status --porcelain --untracked-files=all",
+                reason,
+            ))
         }
     }
 }
@@ -719,7 +742,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uncommitted_changes_fail_the_clean_tree_check() {
+    async fn uncommitted_changes_without_a_verifier_are_infrastructure_errors() {
         let workspace = git_workspace(&[("README.md", "docs only\n")]);
         std::fs::write(workspace.path().join("scratch.md"), "never committed\n").unwrap();
         std::fs::write(workspace.path().join("README.md"), "edited, uncommitted\n").unwrap();
@@ -733,18 +756,18 @@ mod tests {
             )
             .await
         {
-            FallbackVerdict::Fail(report) => {
-                let reason = report
-                    .results
-                    .get(CLEAN_TREE_GATE_NAME)
-                    .and_then(|r| r.failure_reason())
-                    .unwrap_or_default();
+            FallbackVerdict::ExecutionError(report) => {
+                let result = report.results.get(CLEAN_TREE_GATE_NAME).unwrap();
+                let GateResult::ExecutionError { reason, .. } = result else {
+                    panic!("expected ExecutionError, got {result:?}");
+                };
                 assert!(
                     reason.contains("scratch.md") && reason.contains("README.md"),
                     "the reason must name the dirty paths: {reason}"
                 );
+                assert!(reason.contains("Configure an extraction-safe gate"));
             }
-            other => panic!("expected Fail, got {other:?}"),
+            other => panic!("expected ExecutionError, got {other:?}"),
         }
     }
 
@@ -793,10 +816,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_workspace_without_git_passes_the_clean_tree_check() {
-        // No git, no committed state, no extraction to speak of — nothing the
-        // check could judge, so the dispatch passes and is counted instead of
-        // failing every dispatch on a degenerate workspace forever.
+    async fn a_workspace_without_git_cannot_pass_the_clean_tree_check() {
+        // Git inspection failure is missing evidence, never a clean-tree pass.
         let workspace = tempfile::tempdir().unwrap();
         match FallbackVerificationRuntime::production()
             .verify(
@@ -807,8 +828,15 @@ mod tests {
             )
             .await
         {
-            FallbackVerdict::NoVerifierPass(NoVerifierReason::NotDetected) => {}
-            other => panic!("expected NoVerifierPass, got {other:?}"),
+            FallbackVerdict::ExecutionError(report) => {
+                let result = report.results.get(CLEAN_TREE_GATE_NAME).unwrap();
+                let GateResult::ExecutionError { command, reason } = result else {
+                    panic!("expected ExecutionError, got {result:?}");
+                };
+                assert!(command.starts_with("git status"));
+                assert!(reason.contains("cannot inspect committed work"));
+            }
+            other => panic!("expected ExecutionError, got {other:?}"),
         }
     }
 
@@ -819,6 +847,34 @@ mod tests {
             "package.json",
             r#"{"name":"x","scripts":{"test":"node test.js"}}"#,
         )])
+    }
+
+    #[tokio::test]
+    async fn dirty_node_workspace_without_a_configured_gate_cannot_pass() {
+        let runner = Arc::new(FakeProcessRunner::new());
+        let runtime = FallbackVerificationRuntime::for_tests(runner.clone(), None);
+        let workspace = node_workspace();
+        std::fs::write(workspace.path().join("other-worker.js"), "unfinished\n").unwrap();
+
+        let verdict = runtime
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
+            .await;
+        let FallbackVerdict::ExecutionError(report) = verdict else {
+            panic!("expected ExecutionError, got {verdict:?}");
+        };
+        let GateResult::ExecutionError { reason, .. } =
+            report.results.get(CLEAN_TREE_GATE_NAME).unwrap()
+        else {
+            panic!("dirty Node workspace must not pass or penalize bead work");
+        };
+        assert!(reason.contains("node_gate_not_configured"));
+        assert!(reason.contains("other-worker.js"));
+        assert!(runner.requests().is_empty());
     }
 
     #[tokio::test]

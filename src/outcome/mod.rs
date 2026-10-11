@@ -1041,13 +1041,6 @@ pub struct OutcomeHandler {
     fallback_verification: fallback_verification::FallbackVerificationRuntime,
 }
 
-/// Close reason recorded when the shipped-work gate confirms an agent's work
-/// landed but the agent did not close the bead itself. Operator-visible in the
-/// bead's history, so it must say why the fleet closed something on the agent's
-/// behalf.
-const SHIPPED_WORK_CLOSE_REASON: &str =
-    "closed by NEEDLE: shipped-work gate confirmed the work landed but the agent did not close it";
-
 impl OutcomeHandler {
     pub fn new(config: Config, telemetry: Telemetry) -> Self {
         OutcomeHandler {
@@ -2708,39 +2701,6 @@ impl OutcomeHandler {
         false
     }
 
-    /// Close the current bead only with the active claim handle. A protected
-    /// attempt never falls back to the unguarded legacy close command.
-    async fn close_for_attempt(
-        &self,
-        store: &dyn BeadStore,
-        bead: &Bead,
-        reason: &str,
-    ) -> Result<Option<()>> {
-        let active_handle = self
-            .active_claim_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(handle) = active_handle {
-            let handle = handle.lock().await.clone();
-            return match self
-                .timeout_op(|| store.close_claim(&handle, reason), "close")
-                .await?
-            {
-                Some(crate::bead_store::ClaimMutationResult::Applied) => Ok(Some(())),
-                Some(
-                    crate::bead_store::ClaimMutationResult::LostOwnership
-                    | crate::bead_store::ClaimMutationResult::Unsupported,
-                ) => Err(anyhow::anyhow!(
-                    "claim-owned close was rejected or unsupported; no unguarded fallback"
-                )),
-                None => Ok(None),
-            };
-        }
-        self.timeout_op(|| store.close(&bead.id, reason), "close")
-            .await
-    }
-
     /// Whether this attempt decomposed its bead instead of delivering it
     /// (N-T46, ADR-030; the rules are [`crate::attempt_accounting`]).
     ///
@@ -3644,7 +3604,7 @@ impl OutcomeHandler {
     ///    - Closed → emit BeadCompleted.
     ///    - Still open → emit BeadOrphaned warning.
     ///
-    /// NEEDLE does NOT auto-close — the agent owns closure via `br close`.
+    /// NEEDLE does NOT auto-close — the agent owns closure via `bead close`.
     ///
     /// Every path that does not accept the work records why in `late`, so the
     /// ledger row reports the verdict rather than the exit code.
@@ -3960,88 +3920,24 @@ impl OutcomeHandler {
                         .await
                     {
                         Ok(crate::validation::GateResult::Pass) => {
+                            // Shipped code does not establish acceptance. The
+                            // agent may have deliberately left required CI,
+                            // deployment or observation work pending. Only an
+                            // explicit agent close enters close verification.
                             tracing::info!(
                                 bead_id = %bead.id,
-                                "shipped work detected — marking orphaned bead as completed"
+                                "shipped work detected but acceptance remains open — deferring"
                             );
-                            // The gate CONFIRMED the work landed; the agent merely failed to
-                            // close the bead. Close it here.
-                            //
-                            // This previously released instead, on the stated grounds that the
-                            // store had "no close method". It has one — BeadStore::close,
-                            // implemented by cli_store against `bead close --id --reason` — so
-                            // the comment was stale. Releasing a bead whose work is finished puts
-                            // it straight back on the ready frontier, where another worker claims
-                            // and redoes it: the subscription pays twice for one unit of output
-                            // while the fleet looks busy. It also emitted BeadCompleted AND
-                            // BeadReleased for the same bead, which is why completed and released
-                            // counts overlapped and deliberate releases read as failures.
-                            match self
-                                .close_for_attempt(store, bead, SHIPPED_WORK_CLOSE_REASON)
-                                .await
-                            {
-                                Ok(Some(())) => {
-                                    let confirmed = self
-                                        .timeout_op(|| store.show(&bead.id), "show after close")
-                                        .await?;
-                                    if !confirmed.is_some_and(|bead| bead.status.is_done()) {
-                                        anyhow::bail!("shipped-work close returned success without a confirmed closed bead");
-                                    }
-                                    let _ = self.reset_failure_count(store, bead).await;
-                                    match self
-                                        .timeout_op(|| store.flush(), "flush after close")
-                                        .await
-                                    {
-                                        Ok(Some(())) => {}
-                                        Ok(None) => {
-                                            store.pause_workspace(
-                                                "checkpoint publication timed out after close"
-                                                    .to_string(),
-                                            );
-                                            anyhow::bail!(
-                                                "checkpoint publication timed out after close"
-                                            );
-                                        }
-                                        Err(error) => {
-                                            store.pause_workspace(format!("checkpoint publication failed after close: {error:#}"));
-                                            return Err(error.context(
-                                                "checkpoint publication failed after close",
-                                            ));
-                                        }
-                                    }
-                                    // Only a confirmed, durable close may
-                                    // consume this dispatch's baseline.
-                                    crate::validation::predispatch::clear_if_own(
-                                        &bead.workspace,
-                                        &bead.id,
-                                        attempt.predispatch_token.as_deref(),
-                                    )
-                                    .await;
-                                    events.push(EventKind::BeadCompleted {
-                                        bead_id: bead.id.clone(),
-                                        duration_ms: 0,
-                                    });
-                                    return Ok((BeadAction::Closed, events));
-                                }
-                                other => {
-                                    // A backend that cannot close, or a timeout. Fall back to the
-                                    // previous behaviour rather than leaving the claim dangling —
-                                    // an open bead is recoverable, a stuck claim is not.
-                                    tracing::warn!(
-                                        bead_id = %bead.id,
-                                        close_result = ?other.as_ref().map(|o| o.is_some()),
-                                        "shipped work confirmed but close failed; releasing \
-                                         instead (the bead will be re-worked)"
-                                    );
-                                    let mut release_events =
-                                        self.prepare_release_events(store, bead).await?;
-                                    events.append(&mut release_events);
-                                    return Ok((
-                                        BeadAction::Released(ReleaseReason::ShippedWorkCloseFailed),
-                                        events,
-                                    ));
-                                }
-                            }
+                            *late = Some(LateVerdict::Unjudged {
+                                reason: "acceptance_pending",
+                            });
+                            let mut release_events =
+                                self.prepare_release_events(store, bead).await?;
+                            events.append(&mut release_events);
+                            // The worker applies the existing expiring
+                            // deferred:<rfc3339> hold, preventing an immediate
+                            // retry without inventing a failure or human hold.
+                            return Ok((BeadAction::Deferred, events));
                         }
                         Ok(crate::validation::GateResult::Fail(reason)) => {
                             tracing::warn!(
@@ -4879,6 +4775,33 @@ impl OutcomeHandler {
                     workspace = %workspace,
                     "failed to record gate health state — degradation tracking may be inaccurate"
                 );
+            }
+        }
+
+        // An agent may have closed before this required check could run.
+        // Preserve incomplete acceptance before releasing; a release of an
+        // already-closed bead is otherwise a no-op on native backends.
+        let current = self
+            .timeout_op(|| store.show(&bead.id), "show before gate-error release")
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("cannot confirm bead state after gate execution error")
+            })?;
+        if current.status.is_done() {
+            self.timeout_op(
+                || store.reopen(&bead.id),
+                "reopen after gate execution error",
+            )
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("cannot reopen unverified bead after gate execution error")
+            })?;
+            let reopened = self
+                .timeout_op(|| store.show(&bead.id), "confirm gate-error reopen")
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("cannot confirm unverified bead was reopened"))?;
+            if reopened.status.is_done() {
+                anyhow::bail!("unverified bead remains closed after gate execution error");
             }
         }
 
@@ -6455,7 +6378,10 @@ mod tests {
     }
 
     fn test_bead(status: BeadStatus) -> TestBead {
-        let workspace = tempfile::TempDir::new().unwrap();
+        // Success-path tests require a valid clean workspace so fallback
+        // verification judges Git state rather than failing before the branch
+        // under test. Build markers and gate configuration remain absent.
+        let workspace = committed_git_workspace(&[("README.md", "test workspace\n")]);
         let bead = bead_in_workspace(status, workspace.path());
         TestBead {
             bead,
@@ -7087,75 +7013,45 @@ mod tests {
 
     // ── handle tests ──
 
-    /// Confirmed shipped work must CLOSE the bead, not release it.
-    ///
-    /// Releasing a bead whose work the gate has already verified puts it back on
-    /// the ready frontier, where another worker claims and redoes it — the
-    /// subscription pays twice for one unit of output while the fleet looks
-    /// busy. It also emitted BeadCompleted and BeadReleased for the same bead,
-    /// which is why completed and released counts overlapped and deliberate
-    /// releases read as failures.
-    ///
-    /// Reaching the confirmed-shipped-work branch in a unit test uses the gate's
-    /// documented conservative path: with no predispatch snapshot available it
-    /// judges "the closure on its note alone", so a non-empty note Passes rather
-    /// than failing a bead on a comparison the gate could not make. The mock
-    /// provides no snapshot, so supplying notes is sufficient.
+    /// A clean exit and shipped work cannot override deliberately pending
+    /// acceptance, or substitute for an explicit verified agent close.
     #[tokio::test]
-    async fn confirmed_shipped_work_closes_rather_than_releasing() {
-        // Enforcement ON — this is the gate under test.
-        let handler = test_handler();
-
-        // The evidence must be on the STORE, not on the bead constructed here:
-        // the gate reads notes through the store, and judges the POST-dispatch
-        // bead the handler re-reads via show(). Setting either locally silently
-        // has no effect and the gate sees a bead with no shipped work.
-        let store = test_store(BeadStatus::Open)
-            .with_notes("evidence: implemented and verified the change");
-
-        let bead = test_bead(BeadStatus::InProgress);
-
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result.bead_action,
-            BeadAction::Closed,
-            "shipped work confirmed by the gate must close the bead"
-        );
-        let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Close(_, _))),
-            "the store must be asked to close: {actions:?}"
-        );
-        assert!(
-            !actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
-            "a finished bead must not be returned to the ready frontier: {actions:?}"
-        );
-        no_op_close_never_emits_bead_completed().await;
-    }
-
-    async fn no_op_close_never_emits_bead_completed() {
+    async fn shipped_work_with_open_acceptance_is_deferred_without_success() {
         let (_guard, _home) = isolated_home();
-        let helper = crate::telemetry::test_utils::TestHelper::new("close-noop");
-        let handler = OutcomeHandler::new(Config::default(), helper.telemetry().clone());
-        let store = test_store(BeadStatus::Open)
-            .with_notes("evidence: implemented and verified the change")
-            .with_noop_close();
-        let bead = test_bead(BeadStatus::InProgress);
+        for notes in [
+            "Implemented and pushed. Required CI remains Pending; do not close until green.",
+            "No code changes needed. Seven-day acceptance remains incomplete. Keep this bead open.",
+            "evidence: implemented and verified the change",
+        ] {
+            let helper = crate::telemetry::test_utils::TestHelper::new("acceptance-pending");
+            let handler = OutcomeHandler::new(Config::default(), helper.telemetry().clone());
+            // Notes satisfy the shipped-work gate's conservative no-snapshot
+            // path. Even a backend supporting close must never be asked to
+            // turn that evidence into acceptance on the agent's behalf.
+            let store = test_store(BeadStatus::Open)
+                .with_notes(notes)
+                .with_noop_close();
+            let bead = test_bead(BeadStatus::InProgress);
+            let result = handler
+                .handle(&store, &bead, &test_output(0), false)
+                .await
+                .unwrap();
 
-        let result = handler.handle(&store, &bead, &test_output(0), false).await;
-        assert!(
-            result.is_err(),
-            "a successful close command is not proof of closure"
-        );
-        helper.sync().await;
-        assert!(helper.events_by_type("bead.completed").is_empty());
-        assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Open);
+            assert_eq!(result.bead_action, BeadAction::Deferred);
+            assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Open);
+            assert!(!store.actions().iter().any(|action| matches!(
+                action,
+                StoreAction::Close(_, _)
+                    | StoreAction::AddLabel(_, _)
+                    | StoreAction::RemoveLabel(_, _)
+            )));
+            helper.sync().await;
+            assert!(helper.events_by_type("bead.completed").is_empty());
+            let resolved = helper.events_by_type("attempt.resolved");
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].data["outcome"], "indeterminate");
+            assert_eq!(resolved[0].data["terminal_reason"], "acceptance_pending");
+        }
     }
 
     #[tokio::test]
@@ -8980,7 +8876,7 @@ mod tests {
         };
         let handler = test_handler_with_config(config);
 
-        let workspace = tempfile::TempDir::new().unwrap();
+        let workspace = committed_git_workspace(&[("README.md", "docs only\n")]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
@@ -9033,16 +8929,16 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_with_no_verifier_passes_and_is_counted() {
-        // An empty workspace — no `.needle.yaml`, no build file — resolves
-        // no verifier: the dispatch passes on the exit code alone and the
-        // gap is counted as `not_detected`.
+        // A clean committed workspace with no config or build markers
+        // has no verifier. The clean-tree fallback passes, and the gap
+        // remains visible as `not_detected`.
         let (_guard, _home) = isolated_home();
         let helper = crate::telemetry::test_utils::TestHelper::new("no-verifier-test");
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
         let handler = OutcomeHandler::new(config, helper.telemetry().clone());
 
-        let workspace = tempfile::TempDir::new().unwrap();
+        let workspace = committed_git_workspace(&[("README.md", "docs only\n")]);
         let result = no_verifier_outcome_for(&handler, &workspace).await;
 
         assert_eq!(result.outcome, Outcome::Success);
@@ -9232,7 +9128,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_less_workspace_with_dirty_tree_fails() {
+    async fn gate_less_dirty_tree_is_infrastructure_and_degrades_without_penalty() {
         let (_guard, _home) = isolated_home();
         let helper = crate::telemetry::test_utils::TestHelper::new("fallback-dirty-tree");
         let handler = fallback_handler_with(
@@ -9247,39 +9143,44 @@ mod tests {
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
 
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        assert_eq!(result.outcome, Outcome::Failure);
-        assert!(
-            matches!(result.bead_action, BeadAction::Released(_)),
-            "a dirty tree must release the bead, got {:?}",
-            result.bead_action
-        );
-        assert!(
-            store
-                .actions()
-                .iter()
-                .any(|a| matches!(a, StoreAction::Reopen(_))),
-            "the bead must be reopened, got: {:?}",
-            store.actions()
-        );
+        for attempt in 1..=3 {
+            let result = handler
+                .handle(&store, &bead, &test_output(0), false)
+                .await
+                .unwrap();
+            assert!(matches!(result.bead_action, BeadAction::Released(_)));
+            assert_eq!(
+                crate::gate_health::is_degraded(&bead.workspace).unwrap(),
+                attempt == 3,
+                "three infrastructure failures must suppress ordinary workspace dispatch"
+            );
+        }
+        assert!(store
+            .actions()
+            .iter()
+            .any(|action| matches!(action, StoreAction::Reopen(_))));
+        assert!(!store.show(&bead.id).await.unwrap().status.is_done());
+        assert!(!store.actions().iter().any(|action| matches!(
+            action,
+            StoreAction::AddLabel(_, label)
+                if label == "verification-failed" || label.starts_with("failure-count:")
+        )));
         helper.sync().await;
-        let failed = helper.events_by_type("verification.failed");
-        assert_eq!(failed.len(), 1);
-        assert_eq!(
-            failed[0].data["command"], "fallback_clean_tree",
-            "the report must name the clean-tree gate"
-        );
-        assert!(
-            failed[0].data["output"]
-                .as_str()
-                .is_some_and(|output| output.contains("uncommitted.md")),
-            "the failure must name the dirty path: {:?}",
-            failed[0].data["output"]
-        );
+        assert!(helper.events_by_type("verification.failed").is_empty());
+        let errors = helper.events_by_type("gate.execution_error");
+        assert_eq!(errors.len(), 3);
+        assert!(errors
+            .iter()
+            .all(|event| event.data["gate"] == "fallback_clean_tree"
+                && event.data["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("uncommitted.md"))));
+        let resolved = helper.events_by_type("attempt.resolved");
+        assert_eq!(resolved.len(), 3);
+        assert!(resolved
+            .iter()
+            .all(|event| event.data["outcome"] == "infrastructure_failure"
+                && event.data["terminal_reason"] == "gate_error:fallback_clean_tree"));
     }
 
     #[tokio::test]

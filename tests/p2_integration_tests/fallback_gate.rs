@@ -143,6 +143,7 @@ enum StoreAction {
 
 struct OutcomeStore {
     bead: Bead,
+    status: Mutex<BeadStatus>,
     actions: Mutex<Vec<StoreAction>>,
     labels: Mutex<Vec<String>>,
 }
@@ -152,6 +153,7 @@ impl OutcomeStore {
         Self {
             labels: Mutex::new(bead.labels.clone()),
             bead,
+            status: Mutex::new(BeadStatus::Done),
             actions: Mutex::new(Vec::new()),
         }
     }
@@ -173,7 +175,7 @@ impl BeadStore for OutcomeStore {
 
     async fn show(&self, _id: &BeadId) -> Result<Bead> {
         let mut bead = self.bead.clone();
-        bead.status = BeadStatus::Done;
+        bead.status = self.status.lock().unwrap().clone();
         bead.labels = self.labels.lock().unwrap().clone();
         Ok(bead)
     }
@@ -214,6 +216,7 @@ impl BeadStore for OutcomeStore {
     }
 
     async fn reopen(&self, _id: &BeadId) -> Result<()> {
+        *self.status.lock().unwrap() = BeadStatus::Open;
         self.actions.lock().unwrap().push(StoreAction::Reopen);
         Ok(())
     }
@@ -890,7 +893,7 @@ async fn assert_fallback_verifier_timeout_is_released_as_execution_error(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn clean_no_verifier_pass_is_counted_and_dirty_no_verifier_fails() {
+async fn clean_no_verifier_pass_is_counted_and_dirty_no_verifier_is_infrastructure_error() {
     let _environment = IsolatedEnvironment::new(false);
     let clean = tempfile::tempdir().expect("clean no-verifier fixture");
     write_file(clean.path(), "README.md", "documentation only\n");
@@ -919,14 +922,20 @@ async fn clean_no_verifier_pass_is_counted_and_dirty_no_verifier_fails() {
     assert_eq!(dirty_result.outcome, needle::types::Outcome::Failure);
     assert_eq!(
         dirty_result.bead_action,
-        BeadAction::Released(ReleaseReason::GateFailed)
+        BeadAction::Released(ReleaseReason::AgentNotFound)
     );
     assert!(dirty_actions.contains(&StoreAction::Reopen));
-    assert!(dirty_actions.contains(&StoreAction::AddLabel("verification-failed".into())));
+    assert!(!dirty_actions.contains(&StoreAction::AddLabel("verification-failed".into())));
     assert_eq!(
         telemetry_rows(&dirty_events, "verification.failed").len(),
-        1
+        0
     );
+    let errors = telemetry_rows(&dirty_events, "gate.execution_error");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0]["data"]["gate"], "fallback_clean_tree");
+    assert!(errors[0]["data"]["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("uncommitted.md")));
 }
 
 async fn run_no_verifier(
