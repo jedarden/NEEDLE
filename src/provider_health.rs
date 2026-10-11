@@ -112,10 +112,16 @@ impl ProviderErrorTracker {
     /// can replay fixtures without going through a child process.
     pub fn observe_value(&mut self, value: &Value, fallback_ts: f64) {
         let record_type = value.get("type").and_then(Value::as_str).unwrap_or("");
-        let lower_type = record_type.to_ascii_lowercase();
         let is_claude_record = matches!(
             record_type,
-            "system" | "assistant" | "user" | "result" | "error" | "api_error"
+            "system"
+                | "assistant"
+                | "user"
+                | "result"
+                | "error"
+                | "api_error"
+                | "api_retry"
+                | "retry"
         ) || record_type == "stream_event"
             || record_type == "tool_progress";
         if is_claude_record {
@@ -145,34 +151,49 @@ impl ProviderErrorTracker {
             self.last_assistant_ts = Some(timestamp);
         }
 
-        let texts = string_values(value);
-        let has_api_error = record_type == "api_error"
-            || lower_type == "api_error"
-            || value
-                .get("subtype")
-                .and_then(Value::as_str)
-                .is_some_and(|subtype| subtype.eq_ignore_ascii_case("api_error"))
-            || value
-                .get("terminal_reason")
-                .and_then(Value::as_str)
-                .is_some_and(|reason| reason.eq_ignore_ascii_case("api_error"));
-        let has_api_error = has_api_error
-            || texts
-                .iter()
-                .any(|text| text.eq_ignore_ascii_case("api_error"));
+        // Task text, tool results and identifiers are not provider telemetry.
+        // Only inspect an explicit error/retry envelope and its error fields.
+        let Some(envelope) = provider_error_envelope(value) else {
+            return;
+        };
+        let kind = envelope.get("type").and_then(Value::as_str).unwrap_or("");
+        let subtype = envelope
+            .get("subtype")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let error = envelope.get("error").filter(|error| !error.is_null());
+        let has_api_error = matches!(kind, "api_error" | "error")
+            || matches!(subtype, "api_error" | "error")
+            || error.is_some()
+            || envelope
+                .get("api_error_status")
+                .is_some_and(|status| !status.is_null())
+            || envelope.get("terminal_reason").and_then(Value::as_str) == Some("api_error");
+        let texts: Vec<&str> = [
+            envelope.get("message").and_then(Value::as_str),
+            envelope.get("result").and_then(Value::as_str),
+            error.and_then(Value::as_str),
+            error
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         let mut statuses = Vec::new();
         for status in [429, 502, 503, 529] {
-            if value_has_http_status(value, status)
+            if value_has_http_status(envelope, status)
+                || error.is_some_and(|error| value_has_http_status(error, status))
                 || texts.iter().any(|text| contains_status(text, status))
             {
                 statuses.push(status);
             }
         }
-        let retry_notice = lower_type.contains("retry")
-            || texts.iter().any(|text| {
-                let lower = text.to_ascii_lowercase();
-                lower.contains("retry") || lower.contains("rate limit; retry")
-            });
+        let retry_notice = matches!(kind, "retry" | "api_retry")
+            || matches!(subtype, "retry" | "api_retry")
+            || texts
+                .iter()
+                .any(|text| text.to_ascii_lowercase().contains("retry"));
 
         if has_api_error || !statuses.is_empty() || retry_notice {
             self.metrics.provider_errors = self.metrics.provider_errors.saturating_add(1);
@@ -258,22 +279,28 @@ fn timestamp_value(value: &Value) -> Option<f64> {
     }
 }
 
-fn string_values(value: &Value) -> Vec<String> {
-    let mut values = Vec::new();
-    collect_string_values(value, &mut values);
-    values
-}
-
-fn collect_string_values(value: &Value, values: &mut Vec<String>) {
-    match value {
-        Value::String(text) => values.push(text.clone()),
-        Value::Array(items) => items
-            .iter()
-            .for_each(|item| collect_string_values(item, values)),
-        Value::Object(fields) => fields
-            .values()
-            .for_each(|item| collect_string_values(item, values)),
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+/// Select only transport metadata; never descend into task content.
+fn provider_error_envelope(value: &Value) -> Option<&Value> {
+    let kind = value.get("type").and_then(Value::as_str)?;
+    if kind == "stream_event" {
+        return value.get("event").and_then(provider_error_envelope);
+    }
+    let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("");
+    let explicit_error = value.get("error").is_some_and(|error| !error.is_null());
+    let terminal_error = value.get("terminal_reason").and_then(Value::as_str) == Some("api_error")
+        || value
+            .get("api_error_status")
+            .is_some_and(|status| !status.is_null());
+    match kind {
+        "api_error" | "error" | "api_retry" | "retry" => Some(value),
+        "system" | "result" | "assistant"
+            if explicit_error
+                || terminal_error
+                || matches!(subtype, "api_error" | "error" | "api_retry" | "retry") =>
+        {
+            Some(value)
+        }
+        _ => None,
     }
 }
 
@@ -334,6 +361,10 @@ pub struct ProviderErrorHealthState {
     pub provider: Option<String>,
     #[serde(default)]
     pub attempts: Vec<ProviderErrorAttempt>,
+    /// Persist the configured window so read-only routing can age out evidence.
+    /// Legacy state used the default 30-minute window.
+    #[serde(default = "default_provider_error_window_seconds")]
+    pub window_seconds: u64,
     #[serde(default)]
     pub error_share: f64,
     #[serde(default)]
@@ -352,17 +383,32 @@ pub enum ProviderHealthTransition {
     Restored { error_share: f64, attempts: usize },
 }
 
+fn default_provider_error_window_seconds() -> u64 {
+    ProviderErrorConfig::default().window.as_secs()
+}
+
 impl ProviderErrorHealthState {
     fn new(adapter: &str, provider: Option<&str>) -> Self {
         Self {
             adapter: adapter.to_string(),
             provider: provider.map(str::to_string),
             attempts: Vec::new(),
+            window_seconds: default_provider_error_window_seconds(),
             error_share: 0.0,
             error_attempts: 0,
             degraded: false,
             degraded_at: None,
         }
+    }
+
+    fn has_recent_errors(&self, now: DateTime<Utc>) -> bool {
+        let window =
+            chrono::Duration::from_std(std::time::Duration::from_secs(self.window_seconds))
+                .unwrap_or(chrono::Duration::MAX);
+        let cutoff = now - window;
+        self.attempts
+            .iter()
+            .any(|attempt| attempt.provider_errors > 0 && attempt.at >= cutoff)
     }
 }
 
@@ -554,6 +600,7 @@ pub fn record_provider_attempt(
     let mut state = read_provider_error_state(&path)?
         .unwrap_or_else(|| ProviderErrorHealthState::new(adapter, provider));
     let cutoff = now - chrono::Duration::from_std(config.window).unwrap_or(chrono::Duration::MAX);
+    state.window_seconds = config.window.as_secs();
     state.attempts.retain(|attempt| attempt.at >= cutoff);
     state.attempts.push(ProviderErrorAttempt {
         at: now,
@@ -602,6 +649,13 @@ pub fn record_provider_attempt(
 }
 
 fn provider_error_state_as_health(state: ProviderErrorHealthState) -> ProviderHealthState {
+    let last_degraded_failure_at = state
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.provider_errors > 0)
+        .map(|attempt| attempt.at)
+        .max()
+        .map(|at| at.to_rfc3339());
     ProviderHealthState {
         adapter: state.adapter,
         provider: state.provider.unwrap_or_default(),
@@ -611,7 +665,7 @@ fn provider_error_state_as_health(state: ProviderErrorHealthState) -> ProviderHe
         degraded_fingerprint: Some("provider_error_share".to_string()),
         degraded_summary: Some(format!("error_share={:.3}", state.error_share)),
         degraded_at: state.degraded_at,
-        last_degraded_failure_at: None,
+        last_degraded_failure_at,
     }
 }
 
@@ -837,7 +891,7 @@ pub fn degraded_state(
 ) -> Result<Option<ProviderHealthState>> {
     if let Some(state) =
         read_provider_error_state(&provider_error_state_file_path(adapter, provider))?
-            .filter(|state| state.degraded)
+            .filter(|state| state.degraded && state.has_recent_errors(Utc::now()))
     {
         return Ok(Some(provider_error_state_as_health(state)));
     }
@@ -890,13 +944,19 @@ pub fn degraded_adapters() -> Vec<ProviderHealthState> {
             continue;
         }
         if let Ok(text) = std::fs::read_to_string(path) {
-            if let Ok(state) = serde_json::from_str::<ProviderHealthState>(&text) {
-                if state.degraded {
-                    out.push(state);
-                }
-            } else if let Ok(state) = serde_json::from_str::<ProviderErrorHealthState>(&text) {
-                if state.degraded {
-                    out.push(provider_error_state_as_health(state));
+            // Stream state shares several fields with fingerprint state;
+            // deserialize it first so its observation window is respected.
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                if value.get("attempts").is_some() {
+                    if let Ok(state) = serde_json::from_value::<ProviderErrorHealthState>(value) {
+                        if state.degraded && state.has_recent_errors(Utc::now()) {
+                            out.push(provider_error_state_as_health(state));
+                        }
+                    }
+                } else if let Ok(state) = serde_json::from_value::<ProviderHealthState>(value) {
+                    if state.degraded {
+                        out.push(state);
+                    }
                 }
             }
         }
@@ -1141,6 +1201,166 @@ mod tests {
         assert_eq!(metrics.provider_errors, 15);
         assert_eq!(metrics.provider_error_classes["api_error"], 15);
         assert_eq!(metrics.max_response_gap_ms, Some(613_000));
+    }
+
+    #[test]
+    fn claude_stream_distinguishes_task_content_from_provider_errors() {
+        let records = [
+            serde_json::json!({"type":"user", "message":{"content":[
+                {"type":"tool_result", "is_error":true,
+                 "content":"api_error 429 502 503 529 retry the application test"}
+            ]}}),
+            serde_json::json!({"type":"assistant", "message":{"content":[
+                {"type":"thinking", "thinking":"retry API 429"},
+                {"type":"text", "text":"api_error 502 503 529"},
+                {"type":"tool_use", "input":{"status":503,"message":"retry"}}
+            ]}}),
+            serde_json::json!({"type":"system", "subtype":"init",
+                "session_id":"54756db1-a6f8-429b-503a-502529000000"}),
+            serde_json::json!({"type":"result", "subtype":"success", "is_error":false,
+                "result":"Implemented retry handling for HTTP 503", "api_error_status":null}),
+            serde_json::json!({"type":"stream_event", "event":{"type":"content_block_delta",
+                "delta":{"type":"text_delta", "text":"retry 529 api_error"}}}),
+            serde_json::json!({"type":"tool_progress", "status":429, "message":"retry"}),
+        ];
+        let mut tracker = ProviderErrorTracker::default();
+        for record in records {
+            tracker.observe_value(&record, 0.0);
+        }
+        let metrics = tracker.finish();
+        assert!(metrics.saw_claude_record());
+        assert_eq!(metrics.provider_errors, 0);
+        assert!(metrics.provider_error_classes.is_empty());
+
+        // The same parser must retain genuine API failures and retries.
+        let records = [
+            serde_json::json!({"type":"api_error", "message":"API Error: 429 retry later"}),
+            serde_json::json!({"type":"system", "subtype":"api_retry", "status":502}),
+            serde_json::json!({"type":"stream_event", "event":{"type":"error",
+                "error":{"type":"overloaded_error", "message":"HTTP 529"}}}),
+            serde_json::json!({"type":"result", "subtype":"success", "is_error":true,
+                "terminal_reason":"api_error", "api_error_status":503}),
+            serde_json::json!({"type":"assistant", "error":"rate_limit",
+                "message":{"content":[{"type":"text", "text":"429"}]}}),
+        ];
+        let mut tracker = ProviderErrorTracker::default();
+        for record in records {
+            tracker.observe_value(&record, 0.0);
+        }
+        let metrics = tracker.finish();
+        assert_eq!(metrics.provider_errors, 5);
+        assert_eq!(metrics.provider_error_classes["api_error"], 4);
+        assert_eq!(metrics.provider_error_classes["retry"], 2);
+        for status in [429, 502, 503, 529] {
+            assert_eq!(metrics.provider_error_classes[&format!("http_{status}")], 1);
+        }
+    }
+
+    #[test]
+    fn expired_stream_error_evidence_allows_probes_but_recent_errors_still_hold() {
+        let (_env_guard, _home) = isolated_home();
+        let adapter = unique_adapter("expired-stream");
+        let provider = Some("glm");
+        let path = provider_error_state_file_path(&adapter, provider);
+        let now = Utc::now();
+        let mut state = ProviderErrorHealthState::new(&adapter, provider);
+        state.degraded = true;
+        state.degraded_at = Some((now - chrono::Duration::days(5)).to_rfc3339());
+        state.error_share = 1.0;
+        state.attempts.push(ProviderErrorAttempt {
+            at: now - chrono::Duration::days(4),
+            provider_errors: 1,
+            classes: BTreeMap::new(),
+        });
+        // A legacy file has no persisted window; it receives the old default.
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy.as_object_mut().unwrap().remove("window_seconds");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(!is_degraded(&adapter, provider).unwrap());
+        assert!(degraded_adapters().is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            legacy,
+            "read-only routing must retain the state for recovery accounting"
+        );
+
+        // Successful probes can satisfy normal hysteresis and persist the
+        // restoration; expiry alone does not rewrite the recorded history.
+        for _ in 0..4 {
+            record_provider_attempt(
+                &adapter,
+                provider,
+                &ProviderErrorMetrics::default(),
+                ProviderErrorConfig::default(),
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            record_provider_attempt(
+                &adapter,
+                provider,
+                &ProviderErrorMetrics::default(),
+                ProviderErrorConfig::default()
+            )
+            .unwrap(),
+            ProviderHealthTransition::Restored { .. }
+        ));
+
+        state.window_seconds = 60;
+        state.attempts[0].at = now - chrono::Duration::seconds(90);
+        write_provider_error_state(&path, &state).unwrap();
+        assert!(
+            !is_degraded(&adapter, provider).unwrap(),
+            "respect the configured window"
+        );
+        state.attempts[0].at = now;
+        write_provider_error_state(&path, &state).unwrap();
+        assert!(is_degraded(&adapter, provider).unwrap());
+        assert_eq!(degraded_adapters().len(), 1);
+        assert!(
+            degraded_state(&adapter, provider)
+                .unwrap()
+                .unwrap()
+                .secs_since_last_degraded_failure()
+                .unwrap()
+                < 5
+        );
+
+        // One probe that still fails keeps the existing degraded state even
+        // below the minimum sample floor after old observations are pruned.
+        let config = ProviderErrorConfig {
+            window: std::time::Duration::from_secs(60),
+            ..ProviderErrorConfig::default()
+        };
+        let error = ProviderErrorMetrics {
+            provider_errors: 1,
+            ..ProviderErrorMetrics::default()
+        };
+        record_provider_attempt(&adapter, provider, &error, config).unwrap();
+        assert!(is_degraded(&adapter, provider).unwrap());
+        let persisted = read_provider_error_state(&path).unwrap().unwrap();
+        assert_eq!(persisted.window_seconds, 60);
+        assert!(persisted
+            .attempts
+            .iter()
+            .all(|attempt| attempt.provider_errors == 1));
+
+        // Expiring stream evidence must not lift an independent failure storm.
+        state.attempts[0].at = now - chrono::Duration::days(4);
+        write_provider_error_state(&path, &state).unwrap();
+        for n in 0..4 {
+            record_adapter_failure(
+                &adapter,
+                provider,
+                &format!("nd-{n}"),
+                "exit_code:124",
+                &quick_config(),
+            )
+            .unwrap();
+        }
+        assert!(is_degraded(&adapter, provider).unwrap());
+        assert_eq!(degraded_adapters().len(), 1);
     }
 
     #[test]

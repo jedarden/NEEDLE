@@ -8,8 +8,8 @@
 #   start_delay     NEEDLE_START_DELAY seconds; spreads launches after reboot/mass restart
 #   explore         NEEDLE_STRANDS__EXPLORE__ENABLED (false pins the scan root away from $HOME)
 #
-# Eight workers, including two Codex routes, share the 7-core fleet slice.
-# The gantry route avoids the degraded GLM provider while retaining the
+# Eight workers, including one Codex route, share the 7-core fleet slice.
+# LOOM uses prepaid GLM inference; gantry retains its Codex route and the
 # existing eight-worker ceiling. Do not grow the fleet past this manifest
 # without raising CPUQuota deliberately.
 #
@@ -25,4 +25,4 @@ lab-gantry	/home/coding/gantry-rs	codex-gpt-5.6-luna-xhigh	75	false
 lab-miroir	/home/coding/miroir	claude-code-glm-5.3-flash	90	false
 lab-pdftract-php	/home/coding/pdftract-php	claude-code-glm-5.3-flash	120	false
 lab-pdftract-swift	/home/coding/pdftract-swift	claude-code-glm-5.3-flash	150	false
-lab-codex-loom	/home/coding/LOOM	codex-gpt-5.6-luna-xhigh	165	false
+lab-glm-loom	/home/coding/LOOM	claude-code-glm-5.3-flash	165	false

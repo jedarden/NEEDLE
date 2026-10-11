@@ -18,6 +18,9 @@ version = 1
 # Raise one only when a reviewer agrees that the named tier is the cheapest
 # correct home for the added behavior. Counts are literal Rust test attributes.
 [unit]
+# +2 reviewed GLM recovery regressions (needle-16368f14): actual provider
+# envelopes versus task content, and expired error windows with safe recovery.
+# Both exercise private health-state seams; unit is the cheapest correct tier.
 # +2 reviewed fleet-productivity regressions (needle-52c49ec1): dirty Node
 # work without a verifier and ready Explore work beside a slow probe. Both
 # exercise private runtime seams; the unit tier is the cheapest correct home.
@@ -386,7 +389,7 @@ version = 1
 # +4 LOOM client contracts (needle-0ea049d0): request auth/query/body shape,
 # same-worker 409 claim recovery vs foreign contention, token rejection and
 # rotation recovery, and unsupported contract version terminal failure.
-max_tests = 4201
+max_tests = 4203
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
