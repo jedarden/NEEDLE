@@ -80,6 +80,14 @@ fn setup_upgrade_canary(home: &Path, expected: &str) -> anyhow::Result<String> {
 }
 
 fn run_upgrade_from_file(home: &Path, candidate: &Path) -> anyhow::Result<Output> {
+    run_upgrade_from_file_with_probe(home, candidate, None)
+}
+
+fn run_upgrade_from_file_with_probe(
+    home: &Path,
+    candidate: &Path,
+    probe: Option<&Path>,
+) -> anyhow::Result<Output> {
     let bead_binary = super::bead_path();
     let bead_dir = bead_binary
         .parent()
@@ -90,7 +98,8 @@ fn run_upgrade_from_file(home: &Path, candidate: &Path) -> anyhow::Result<Output
     let path = std::env::join_paths(path_entries)
         .map_err(|error| anyhow::anyhow!("failed to construct candidate PATH: {error}"))?;
 
-    Ok(Command::new(current_candidate())
+    let mut command = Command::new(current_candidate());
+    command
         .args([
             "upgrade",
             "--from-file",
@@ -103,8 +112,13 @@ fn run_upgrade_from_file(home: &Path, candidate: &Path) -> anyhow::Result<Output
         .env("PATH", path)
         // Release canaries own their timing and are not host-capacity tests.
         .env_remove("NEEDLE_START_DELAY")
-        .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
-        .output()?)
+        .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
+    if let Some(probe) = probe {
+        command
+            .env_remove("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK")
+            .env("NEEDLE_LAUNCH_RESOURCE_PROBE", probe);
+    }
+    Ok(command.output()?)
 }
 
 /// The `needle` binary under test. Nextest archive runs relocate it, so the
@@ -238,8 +252,25 @@ fn passing_promotion_exposes_stable_to_hot_reload() {
     setup_upgrade_canary(home, "type: success\nfinal_status: closed\n")
         .expect("failed to create canary fixture");
 
+    // This host admits the fixture, while the default 0.8 CPU / 512 MB
+    // thresholds would hold it. The canary must retain the operator's limits
+    // across its isolated HOME without skipping resource admission.
+    let config_dir = home.join(".config/needle");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.yaml"),
+        "worker:\n  cpu_load_warn: 1.0\n  memory_free_warn_mb: 128\nself_modification:\n  canary_timeout: 30\n",
+    )
+    .unwrap();
+    let probe = home.join("resource-probe");
+    fs::create_dir_all(&probe).unwrap();
+    fs::write(probe.join("loadavg"), "0.95 0.95 0.95 1/1 1\n").unwrap();
+    fs::write(probe.join("stat"), "cpu 0 0 0 0\ncpu0 0 0 0 0\n").unwrap();
+    fs::write(probe.join("meminfo"), "MemAvailable: 262144 kB\n").unwrap();
+
     let candidate = current_candidate();
-    let output = run_upgrade_from_file(home, &candidate).expect("upgrade failed to run");
+    let output = run_upgrade_from_file_with_probe(home, &candidate, Some(&probe))
+        .expect("upgrade failed to run");
     assert!(
         output.status.success(),
         "passing canary upgrade failed: stdout={} stderr={}",

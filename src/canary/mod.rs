@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::rate_limit::AdmissionThresholds;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // CanaryTestResult
 // ──────────────────────────────────────────────────────────────────────────────
@@ -359,6 +361,16 @@ impl CanaryRunner {
             );
         }
 
+        // Host resource admission is operator policy, independent of the
+        // canary's isolated routing and queue. Capture only these limits before
+        // changing fixture state, and fail closed if the host config is invalid.
+        let config = crate::config::ConfigLoader::load_global()
+            .context("failed to load host admission policy for canary")?;
+        let admission = AdmissionThresholds::new(
+            config.worker.cpu_load_warn,
+            config.worker.memory_free_warn_mb,
+        );
+
         // Keep canary-owned runtime files out of the workspace's tracked
         // status. This uses the repository-local exclude file instead of
         // writing a tracked .gitignore, so a fresh canary stays clean after
@@ -413,7 +425,7 @@ impl CanaryRunner {
             }
 
             // Run the test.
-            let result = self.run_test(bead_id, &expected, &testing_binary);
+            let result = self.run_test(bead_id, &expected, &testing_binary, admission);
             match &result {
                 CanaryTestResult::Passed { .. } => passed += 1,
                 CanaryTestResult::Failed { .. } => failed += 1,
@@ -924,8 +936,13 @@ impl CanaryRunner {
     }
 
     /// Create a per-test HOME containing only the hermetic adapter and any
-    /// host bead-wrapper policy needed to reach the already-selected backend.
-    fn prepare_isolated_home(&self, expected: &ExpectedOutcome) -> Result<tempfile::TempDir> {
+    /// host resource admission and bead-wrapper policy needed to reach the
+    /// already-selected backend.
+    fn prepare_isolated_home(
+        &self,
+        expected: &ExpectedOutcome,
+        admission: AdmissionThresholds,
+    ) -> Result<tempfile::TempDir> {
         let home = tempfile::Builder::new()
             .prefix("needle-canary-home-")
             .tempdir()
@@ -938,9 +955,13 @@ impl CanaryRunner {
         // isolated process and honor the explicit `--agent` selection.
         std::fs::write(
             home.path().join(".config/needle/config.yaml"),
-            concat!(
-                "agent:\n  routing:\n    rules: []\n",
-                "worker:\n  enforce_shipped_work: false\n",
+            format!(
+                concat!(
+                    "agent:\n  routing:\n    rules: []\n",
+                    "worker:\n  enforce_shipped_work: false\n",
+                    "  cpu_load_warn: {}\n  memory_free_warn_mb: {}\n",
+                ),
+                admission.cpu_load_warn, admission.memory_free_warn_mb,
             ),
         )
         .context("failed to write hermetic canary config")?;
@@ -982,10 +1003,11 @@ impl CanaryRunner {
         bead_id: &str,
         expected: &ExpectedOutcome,
         testing_binary: &Path,
+        admission: AdmissionThresholds,
     ) -> CanaryTestResult {
         let start = Instant::now();
         let timeout = Duration::from_secs(self.test_timeout);
-        let isolated_home = match self.prepare_isolated_home(expected) {
+        let isolated_home = match self.prepare_isolated_home(expected, admission) {
             Ok(home) => home,
             Err(error) => {
                 return CanaryTestResult::Error {
@@ -1016,8 +1038,9 @@ impl CanaryRunner {
         // evaluates outcomes before work finishes, producing false negatives.
         //
         // CRITICAL: Isolate HOME to prevent reading global config at
-        // ~/.config/needle/config.yaml or ~/.needle/. This ensures the canary
-        // worker only reads from the canary workspace's .needle.yaml.
+        // ~/.config/needle/config.yaml or ~/.needle/. The generated config
+        // carries only the explicit host resource limits above; fleet routing
+        // and state remain isolated from the canary workspace's .needle.yaml.
         //
         // CRITICAL: Use the per-test adapter written into the isolated HOME to
         // avoid inheriting obsolete adapter names or invoking an external AI
@@ -1530,16 +1553,32 @@ mod tests {
         assert!(!canary_adapter_yaml(&failure).contains("```verified:"));
 
         let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 30);
-        let home = runner.prepare_isolated_home(&success).unwrap();
-        assert!(home
-            .path()
-            .join(".config/needle/adapters/canary-success.yaml")
-            .is_file());
-        assert!(
-            std::fs::read_to_string(home.path().join(".config/needle/config.yaml"))
-                .unwrap()
-                .contains("rules: []")
-        );
+        for admission in [
+            AdmissionThresholds::new(1.0, 1024),
+            AdmissionThresholds::new(0.65, 256),
+        ] {
+            let home = runner.prepare_isolated_home(&success, admission).unwrap();
+            assert!(home
+                .path()
+                .join(".config/needle/adapters/canary-success.yaml")
+                .is_file());
+            let config_path = home.path().join(".config/needle/config.yaml");
+            let config = crate::config::ConfigLoader::load_from_path(&config_path).unwrap();
+            assert_eq!(config.worker.cpu_load_warn, admission.cpu_load_warn);
+            assert_eq!(
+                config.worker.memory_free_warn_mb,
+                admission.memory_free_warn_mb
+            );
+            assert!(!config.worker.enforce_shipped_work);
+            assert!(config.agent.routing.unwrap().rules.is_empty());
+
+            // Resource policy must not pull fleet routing, worker lifecycle,
+            // credentials, or other host configuration into this HOME.
+            let yaml: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(config_path).unwrap()).unwrap();
+            assert_eq!(yaml.as_mapping().unwrap().len(), 2);
+            assert_eq!(yaml["worker"].as_mapping().unwrap().len(), 3);
+        }
     }
 
     #[test]
