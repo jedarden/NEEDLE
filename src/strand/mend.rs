@@ -3508,6 +3508,9 @@ mod tests {
         release_count: Arc<AtomicU32>,
         clear_assignee_count: Arc<AtomicU32>,
         recovery_conflicts: Mutex<HashSet<BeadId>>,
+        claim_snapshots: Mutex<HashMap<BeadId, ClaimStatus>>,
+        recovery_current: Mutex<HashMap<BeadId, ClaimStatus>>,
+        recovery_observed: Mutex<Vec<(BeadId, ClaimStatus)>>,
         /// Warnings returned by doctor_check (probe-only).
         check_warnings: Vec<String>,
         /// If Some, doctor_repair succeeds with this report. If None, it fails.
@@ -3527,6 +3530,9 @@ mod tests {
                     release_count: release_count.clone(),
                     clear_assignee_count: clear_assignee_count.clone(),
                     recovery_conflicts: Mutex::new(HashSet::new()),
+                    claim_snapshots: Mutex::new(HashMap::new()),
+                    recovery_current: Mutex::new(HashMap::new()),
+                    recovery_observed: Mutex::new(Vec::new()),
                     check_warnings: vec![],
                     repair_report: Some(RepairReport::default()),
                     rebuild_fails: false,
@@ -3534,6 +3540,18 @@ mod tests {
                 release_count,
                 clear_assignee_count,
             )
+        }
+
+        fn set_claim_snapshot(&self, id: BeadId, snapshot: ClaimStatus) {
+            self.claim_snapshots.lock().unwrap().insert(id, snapshot);
+        }
+
+        fn set_recovery_current(&self, id: BeadId, snapshot: ClaimStatus) {
+            self.recovery_current.lock().unwrap().insert(id, snapshot);
+        }
+
+        fn recovery_observed(&self) -> Vec<(BeadId, ClaimStatus)> {
+            self.recovery_observed.lock().unwrap().clone()
         }
 
         /// doctor_check returns warnings → escalates to repair (which succeeds).
@@ -3583,6 +3601,9 @@ mod tests {
             anyhow::bail!("mend recovery must not use claimant-owned release")
         }
         async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+            if let Some(snapshot) = self.claim_snapshots.lock().unwrap().get(id).cloned() {
+                return Ok(snapshot);
+            }
             let beads = self.all_beads.lock().unwrap();
             let bead = beads
                 .iter()
@@ -3600,18 +3621,28 @@ mod tests {
             id: &BeadId,
             expected: &ClaimStatus,
         ) -> Result<RecoveryReleaseOutcome> {
+            self.recovery_observed
+                .lock()
+                .unwrap()
+                .push((id.clone(), expected.clone()));
             if self.recovery_conflicts.lock().unwrap().contains(id) {
                 return Ok(RecoveryReleaseOutcome::Conflict);
             }
             // Find and update the bead's status, simulating real bead store behavior.
             let mut beads = self.all_beads.lock().unwrap();
             if let Some(bead) = beads.iter_mut().find(|b| &b.id == id) {
-                let current = ClaimStatus {
-                    status: bead.status.clone(),
-                    assignee: bead.assignee.clone(),
-                    revision: Some(1),
-                    claim_epoch: Some(1),
-                };
+                let current = self
+                    .recovery_current
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| ClaimStatus {
+                        status: bead.status.clone(),
+                        assignee: bead.assignee.clone(),
+                        revision: Some(1),
+                        claim_epoch: Some(1),
+                    });
                 if current != *expected {
                     return Ok(RecoveryReleaseOutcome::Conflict);
                 }
@@ -4649,11 +4680,131 @@ mod tests {
         assert_eq!(verdict(ids[8]), "unknown", "bead {}", ids[8]);
     }
 
+    async fn mend_recovery_release_is_fenced_cases() {
+        let heartbeat_dir = tempfile::tempdir().unwrap();
+        let registry_dir = tempfile::tempdir().unwrap();
+        let workspace = fixture_root("mend-recovery-fenced-workspace");
+        let cases = [
+            // A permitted recovery must submit the exact live snapshot.
+            ("success", 42, 7, 42, 7, None, false),
+            // A renewal wins between the snapshot and the compare-and-release.
+            ("renewal", 42, 7, 43, 8, None, false),
+            // A reassignment wins, even though the old claim is still in progress.
+            ("reassignment", 50, 9, 51, 9, Some("new-worker"), false),
+            // Each fencing component is independently required by recovery.
+            ("stale-revision", 60, 10, 61, 10, None, false),
+            ("stale-epoch", 70, 11, 70, 12, None, false),
+            // The backend can report a fenced conflict even when its snapshot
+            // has not changed by the time the command reaches it.
+            ("fenced-conflict", 80, 13, 80, 13, None, true),
+        ];
+
+        let mut beads = Vec::new();
+        for (id, ..) in cases {
+            let mut bead =
+                make_in_progress_bead(&format!("nd-recovery-{id}"), &format!("old-worker-{id}"));
+            bead.workspace = workspace.clone();
+            bead.updated_at = Utc::now();
+            beads.push(bead);
+        }
+
+        let (store, release_count, _) = MockBeadStore::new(beads.clone());
+        for (
+            (
+                _,
+                observed_revision,
+                observed_epoch,
+                current_revision,
+                current_epoch,
+                reassigned_to,
+                backend_conflict,
+            ),
+            bead,
+        ) in cases.iter().zip(&beads)
+        {
+            let assignee = bead.assignee.clone();
+            let observed = ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: assignee.clone(),
+                revision: Some(*observed_revision),
+                claim_epoch: Some(*observed_epoch),
+            };
+            let current = ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: reassigned_to
+                    .as_ref()
+                    .map(|value| (*value).to_string())
+                    .or_else(|| assignee.clone()),
+                revision: Some(*current_revision),
+                claim_epoch: Some(*current_epoch),
+            };
+            store.set_claim_snapshot(bead.id.clone(), observed);
+            store.set_recovery_current(bead.id.clone(), current);
+            if *backend_conflict {
+                store
+                    .recovery_conflicts
+                    .lock()
+                    .unwrap()
+                    .insert(bead.id.clone());
+            }
+
+            let mut heartbeat = make_stale_heartbeat(
+                bead.assignee.as_deref().unwrap(),
+                99_999_999,
+                Some(bead.id.as_ref()),
+            );
+            heartbeat.qualified_id = bead.assignee.clone().unwrap();
+            heartbeat.workspace = workspace.clone();
+            write_heartbeat(heartbeat_dir.path(), &heartbeat);
+        }
+
+        let telemetry = TestHelper::new("mend-recovery-release-is-fenced");
+        let released = cleanup_in_progress(
+            &store,
+            &Registry::new(registry_dir.path()),
+            telemetry.telemetry(),
+            None,
+            Some(heartbeat_dir.path()),
+            Duration::from_secs(300),
+            ClaimCleanupPolicy::MendExact {
+                workspace_identity: canonical_workspace_identity(&workspace),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(released, 1, "only the unchanged claim may be released");
+        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+
+        let observed = store.recovery_observed();
+        assert_eq!(observed.len(), cases.len());
+        for ((id, observed_revision, observed_epoch, ..), bead) in cases.iter().zip(&beads) {
+            let expected_id = BeadId::from(format!("nd-recovery-{id}"));
+            let (_, claim) = observed
+                .iter()
+                .find(|(observed_id, _)| observed_id == &expected_id)
+                .unwrap_or_else(|| panic!("missing recovery submission for {expected_id}"));
+            assert_eq!(claim.revision, Some(*observed_revision), "{id}");
+            assert_eq!(claim.claim_epoch, Some(*observed_epoch), "{id}");
+            assert_eq!(&claim.assignee, &bead.assignee, "{id}");
+        }
+
+        let remaining = store.all_beads.lock().unwrap();
+        assert_eq!(
+            remaining
+                .iter()
+                .filter(|bead| bead.status == BeadStatus::Open)
+                .count(),
+            1,
+            "renewal, reassignment, stale revision, stale epoch, and fenced conflict stay held"
+        );
+    }
+
     /// A missing heartbeat plus an unregistered assignee is absence of
     /// evidence, not proof of death: since needle-26205003 such a claim is
     /// held (ownership unknown) rather than released as an orphan.
     #[tokio::test]
-    async fn in_progress_bead_with_no_ownership_evidence_held() {
+    async fn mend_recovery_release_is_fenced() {
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
@@ -4675,6 +4826,8 @@ mod tests {
             0,
             "missing heartbeat + unregistered assignee is unknown ownership, not an orphan verdict"
         );
+
+        mend_recovery_release_is_fenced_cases().await;
     }
 
     #[tokio::test]
