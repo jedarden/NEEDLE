@@ -2484,14 +2484,18 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
 
-    // Pin the real bead and shell binaries onto the child PATH. The dispatcher
-    // launches templates through `bash -c`; minimal/NixOS hosts need that
-    // resolved explicitly rather than assuming it lives under /bin.
+    // Pin bead, shell, and Git onto the restricted child PATH. The dispatcher
+    // needs bash, and fallback verification must inspect the real repository;
+    // minimal/NixOS hosts need both resolved explicitly.
     let pinned_bead = bin_dir.join("bead");
     std::fs::copy(&bead_bin, &pinned_bead)?;
     std::fs::copy(
         which::which("bash").context("bash is required by the dispatcher")?,
         bin_dir.join("bash"),
+    )?;
+    std::fs::copy(
+        which::which("git").context("git is required by fallback verification")?,
+        bin_dir.join("git"),
     )?;
     #[cfg(unix)]
     {
@@ -2516,6 +2520,46 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
         "bead_cli:\n  backend: bead-rs\n",
     )?;
     let canary = create_bead(&workspace, "Saturated host canary", 1)?;
+
+    // Model a clean native Git workspace without treating shim HOME/bin files
+    // as product changes. Native checkpoint files remain available to Git.
+    std::fs::write(workspace.join("README.md"), "Saturated-host fixture\n")?;
+    std::fs::write(
+        workspace.join(".gitignore"),
+        ".test-bin/\n.test-home/\n.beads/beads.db\n.beads/beads.db-*\n",
+    )?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "add",
+            "README.md",
+            ".gitignore",
+            ".needle.yaml",
+            ".beads/config.json",
+            ".beads/checkpoint",
+        ],
+        vec![
+            "-c",
+            "user.name=jedarden",
+            "-c",
+            "user.email=github@jedarden.com",
+            "commit",
+            "-qm",
+            "Initialize saturated-host fixture",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "fixture Git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     // Deterministic adapter: closes the canary and exits. Claimed bead-rs
     // issues require the live fencing epoch on a mutating close, so capture it

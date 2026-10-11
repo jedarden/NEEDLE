@@ -405,8 +405,8 @@ async fn worker_processes_a_bead_through_the_real_dispatch_lifecycle() {
     let _admission = EnvGuard::set("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
     let home = tempfile::tempdir().expect("create isolated worker home");
     let workspace = tempfile::tempdir().expect("create isolated workspace");
-    std::fs::create_dir(workspace.path().join(".beads")).unwrap();
     let _home = EnvGuard::set("HOME", home.path());
+    initialize_lifecycle_workspace(workspace.path());
 
     let mut config = isolated_worker_config(home.path(), workspace.path());
     config.agent.default = "echo-test".to_string();
@@ -453,8 +453,8 @@ async fn worker_applies_a_config_change_only_after_the_adapter_child_exits() {
     let _admission = EnvGuard::set("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
     let home = tempfile::tempdir().expect("create isolated worker home");
     let workspace = tempfile::tempdir().expect("create isolated workspace");
-    std::fs::create_dir(workspace.path().join(".beads")).unwrap();
     let _home = EnvGuard::set("HOME", home.path());
+    initialize_lifecycle_workspace(workspace.path());
     let config_path = home.path().join(".config/needle/config.yaml");
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
 
@@ -547,8 +547,8 @@ async fn worker_rejects_an_invalid_reload_without_failing_its_lifecycle() {
     let _max_workers_override = EnvGuard::remove("NEEDLE_WORKER__MAX_WORKERS");
     let home = tempfile::tempdir().expect("create isolated worker home");
     let workspace = tempfile::tempdir().expect("create isolated workspace");
-    std::fs::create_dir(workspace.path().join(".beads")).unwrap();
     let _home = EnvGuard::set("HOME", home.path());
+    initialize_lifecycle_workspace(workspace.path());
     let config_path = home.path().join(".config/needle/config.yaml");
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
 
@@ -794,6 +794,44 @@ fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(10));
     }
     predicate()
+}
+
+// Successful lifecycle fixtures need an inspectable Git workspace. Adapter
+// synchronization files are test controls rather than shipped changes.
+fn initialize_lifecycle_workspace(workspace: &std::path::Path) {
+    std::fs::create_dir(workspace.join(".beads")).unwrap();
+    std::fs::write(workspace.join("README.md"), "Lifecycle fixture\n").unwrap();
+    std::fs::write(
+        workspace.join(".gitignore"),
+        ".beads/\ndispatch-started\nrelease-dispatch\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "README.md", ".gitignore"],
+        vec![
+            "-c",
+            "user.name=jedarden",
+            "-c",
+            "user.email=github@jedarden.com",
+            "commit",
+            "-qm",
+            "Initialize lifecycle fixture",
+        ],
+    ] {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("run fixture Git command");
+        assert!(
+            output.status.success(),
+            "fixture Git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 fn isolated_worker_config(home: &std::path::Path, workspace: &std::path::Path) -> Config {

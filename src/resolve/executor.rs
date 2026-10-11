@@ -2855,6 +2855,27 @@ mod tests {
     fn temp_workspace() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
+        // Completion fixtures must provide a clean Git state for the fallback
+        // verifier. Work evidence and mutation outcomes remain store-driven.
+        for args in [
+            vec!["init", "-q"],
+            vec!["commit", "--allow-empty", "-q", "-m", "fixture"],
+        ] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .args(["-c", "user.email=needle@example.test"])
+                .args(["-c", "user.name=needle-test"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .expect("run fixture Git command");
+            assert!(
+                output.status.success(),
+                "fixture Git command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         (dir, path)
     }
 
@@ -2918,9 +2939,9 @@ mod tests {
 
     #[tokio::test]
     async fn complete_closes_after_gates_and_shipped_work_pass() {
-        // No .needle.yaml in the workspace → no configured gates → passes.
+        // No .needle.yaml or build markers selects the clean Git fallback.
         // A non-empty bead note satisfies the shipped-work gate's note arm
-        // (no snapshot recorded), so no git repository is needed here.
+        // (no snapshot recorded).
         let (_dir, workspace) = temp_workspace();
         let store = RecordingStore::new(workspace).with_stored_notes("did the work; see notes");
 

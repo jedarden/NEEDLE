@@ -61,6 +61,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -301,7 +302,11 @@ impl BeadStore for CycleStore {
         Ok(())
     }
 
-    async fn reopen(&self, _id: &BeadId) -> anyhow::Result<()> {
+    async fn reopen(&self, id: &BeadId) -> anyhow::Result<()> {
+        if let Some(bead) = self.beads.lock().unwrap().iter_mut().find(|b| &b.id == id) {
+            bead.status = BeadStatus::Open;
+            bead.assignee = None;
+        }
         Ok(())
     }
 
@@ -443,8 +448,39 @@ fn stub_adapter(name: &str) -> AgentAdapter {
     }
 }
 
+fn initialize_cycle_workspace(workspace: &Path) {
+    std::fs::create_dir(workspace).unwrap();
+    std::fs::write(workspace.join("README.md"), "Claim-cycle fixture\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "README.md"],
+        vec![
+            "-c",
+            "user.name=jedarden",
+            "-c",
+            "user.email=github@jedarden.com",
+            "commit",
+            "-qm",
+            "Initialize claim-cycle fixture",
+        ],
+    ] {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("run fixture Git command");
+        assert!(
+            output.status.success(),
+            "fixture Git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 /// Config whose every filesystem touchpoint lives in the tempdir.
-fn isolated_config(home: &Path) -> Config {
+fn isolated_config(home: &Path, workspace: &Path) -> Config {
     let mut config = Config::default();
     config.agent.default = "claude-sonnet".to_string();
     // Adapter resolution and routing must see only this test's fixtures —
@@ -452,7 +488,7 @@ fn isolated_config(home: &Path) -> Config {
     config.agent.adapters_dir = home.join("adapters");
     config.agent.routing = None;
     config.workspace.home = home.to_path_buf();
-    config.workspace.default = home.to_path_buf();
+    config.workspace.default = workspace.to_path_buf();
     config.worker.idle_action = IdleAction::Exit;
     // boot() downgrades Exit to Wait without an opt-in (see needle-ab52a15a),
     // and this test has no supervisor to find.
@@ -464,7 +500,7 @@ fn isolated_config(home: &Path) -> Config {
     config.self_modification.hot_reload = false;
     // Test isolation policy: pin the Explore scan root and disable the strand.
     config.strands.explore.enabled = false;
-    config.strands.explore.workspace_root = home.to_path_buf();
+    config.strands.explore.workspace_root = workspace.to_path_buf();
     config.strands.explore.workspaces = Vec::new();
     // The telemetry file sink defaults to $HOME/.needle/logs.
     config.telemetry.file_sink.log_dir = Some(home.join("logs"));
@@ -518,9 +554,12 @@ fn claim_cycles_keep_bead_span_depth_constant() {
     // Declared after the tempdir so the guard drops — and restores the real
     // HOME — before the tempdir itself is removed.
     let _home_guard = HomeGuard::pin(home.path());
+    // Keep telemetry and heartbeat writes outside the clean Git workspace.
+    let workspace = home.path().join("workspace");
+    initialize_cycle_workspace(&workspace);
 
     let beads: Vec<Bead> = (0..CLAIM_CYCLES)
-        .map(|i| make_bead(&format!("needle-span-depth-{i:04}"), home.path()))
+        .map(|i| make_bead(&format!("needle-span-depth-{i:04}"), &workspace))
         .collect();
     let store = Arc::new(CycleStore::new(beads));
 
@@ -547,7 +586,7 @@ fn claim_cycles_keep_bead_span_depth_constant() {
 
     runtime.block_on(async {
         let mut worker = Worker::new(
-            isolated_config(home.path()),
+            isolated_config(home.path(), &workspace),
             "span-depth".to_string(),
             store.clone() as Arc<dyn BeadStore>,
         );

@@ -47,6 +47,35 @@ fn setup_upgrade_canary(home: &Path, expected: &str) -> anyhow::Result<String> {
         canary.join("expected").join(format!("{bead_id}.yaml")),
         expected,
     )?;
+    // The release worker uses the normal fail-closed fallback verification.
+    // Give it a committed Git tree to inspect rather than treating this
+    // otherwise valid native bead workspace as exempt from that check.
+    fs::write(canary.join(".gitignore"), "/.test-home/\n")?;
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "--", ".gitignore", ".needle.yaml", "expected"],
+        vec!["commit", "--quiet", "-m", "release canary fixture"],
+    ] {
+        let output = Command::new("git")
+            .current_dir(&canary)
+            .env("HOME", &bead_home)
+            .args([
+                "-c",
+                "user.name=needle-test",
+                "-c",
+                "user.email=needle@example.test",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(&args)
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "canary git {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(bead_id)
 }
 

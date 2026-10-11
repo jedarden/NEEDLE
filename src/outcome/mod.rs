@@ -7319,14 +7319,20 @@ mod tests {
     async fn unusable_extraction_releases_without_a_failure_count() {
         let (_guard, _home) = isolated_home();
         let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-noextraction");
-        // Production runtime, no extraction override: the fixture workspace
-        // is not a git repository, so extracting committed state must fail.
+        // A runnable workspace gate reaches close-evidence extraction, which
+        // must fail for this deliberately non-Git workspace.
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
         let handler = OutcomeHandler::new(config, helper.telemetry().clone());
         let store = test_store(BeadStatus::Done)
             .with_close_reason("done\n```verified:\ncargo test --lib exit=0\n```");
-        let bead = test_bead(BeadStatus::InProgress);
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "gates:\n  - type: command\n    commands: ['true']\n    run_in: workspace\n",
+        )
+        .unwrap();
+        let bead = bead_in_workspace(BeadStatus::InProgress, workspace.path());
 
         let result = handler
             .handle(&store, &bead, &test_output(0), false)
@@ -7334,7 +7340,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(result.bead_action, BeadAction::Released(_)),
+            matches!(
+                result.bead_action,
+                BeadAction::Released(ReleaseReason::AgentNotFound)
+            ),
             "no extraction means no verdict, got {:?}",
             result.bead_action
         );
@@ -7345,12 +7354,23 @@ mod tests {
             "an execution error is not the bead's failure — no failure-count increment"
         );
         assert!(
-            !store
+            store
                 .actions()
                 .iter()
                 .any(|a| matches!(a, StoreAction::Reopen(_))),
-            "the bead was never closed in this store's view; no reopen expected"
+            "an unverified closure must be reopened without a work penalty"
         );
+        assert_eq!(store.show(&bead.id).await.unwrap().status, BeadStatus::Open);
+        helper.sync().await;
+        assert!(helper
+            .events_by_type("gate.execution_error")
+            .iter()
+            .any(|event| event.data["gate"] == close_verification::GATE_NAME));
+        assert!(helper.events_by_type("bead.completed").is_empty());
+        assert!(!result
+            .telemetry_events
+            .iter()
+            .any(|event| matches!(event, EventKind::BeadCompleted { .. })));
     }
 
     #[tokio::test]
@@ -8780,12 +8800,8 @@ mod tests {
         };
         let handler = test_handler_with_config(config);
 
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(
-            workspace.path().join(".needle.yaml"),
-            "bead_cli:\n  backend: bead-rs\n",
-        )
-        .unwrap();
+        let workspace =
+            committed_git_workspace(&[(".needle.yaml", "bead_cli:\n  backend: bead-rs\n")]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);

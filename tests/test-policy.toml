@@ -1085,3 +1085,10 @@ owner = "component:bead-rs-contract"
 [[artifact]]
 pattern = "tests/attempt-archive-drain/*"
 owner = "component:attempt-archive-drain"
+
+[[unit_exception]]
+path = "src/resolve/executor.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-52c49ec1"
+reason = "The resolver completion fixtures require an actual clean Git repository to exercise fallback verification and store-driven completion failures."
