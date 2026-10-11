@@ -60,12 +60,16 @@ agent:
     candidates:
       - claude-code-glm-5.3-flash
       - claude-code-glm-5.3
-      - codex-gpt-5.6-luna-xhigh
-    # N-T61: codex may win only where its own workspace evidence decides, and
-    # is never explored fleet-wide. Without this, one adapter clearing the
-    # fleet floor would migrate 45 GLM workers onto an OpenAI-billed adapter.
-    workspace_only_candidates:
-      - codex-gpt-5.6-luna-xhigh
+    # N-T61 originally listed codex-gpt-5.6-luna-xhigh above and below so
+    # codex could win only where its own workspace evidence decided, never
+    # fleet-wide. Removed on 2026-10-11 (needle-16368f14, needle-1eb46f73):
+    # GLM workspace evidence was poor almost everywhere, so that path sent
+    # 2,318 of the week's 3,327 attempts from GLM-named workers onto the
+    # OpenAI-billed adapter and exhausted the Codex weekly window by day 5
+    # while the prepaid Z.ai quota sat idle. Codex workers keep their adapter
+    # through NEEDLE_AGENT with evidence routing disabled; this list stays
+    # empty on codinghome.
+    workspace_only_candidates: []
 
 limits:
   providers:

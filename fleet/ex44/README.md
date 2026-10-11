@@ -28,10 +28,13 @@ exploration sample.
    in `workers.tsv` are Pluck-first routes, not an Explore allowlist; the fleet
    leaves Explore's workspace list empty so recursive discovery also reaches
    repositories created after this manifest was written.
-4. **Work the approved queue.** `fleet-policy.env` disables automatic
-   generation, Weave, Pulse, and Unravel. An exhausted queue may idle.
-   Explicitly enabled discovery produces proposals that need admission before
-   dispatch; see the [productivity policy](../../docs/productivity-policy.md).
+4. **Work the approved queue, then propose.** `fleet-policy.env` enables
+   Generation and Weave (operator directive 2026-10-11, needle-1eb46f73) and
+   keeps Pulse and Unravel disabled. Weave runs only after Pluck and Explore
+   find nothing, creates at most five beads per workspace per 24 hours, and
+   labels every bead `weave-generated`, `proposal-pending` and `human`, so it
+   still needs admission before dispatch; see the
+   [productivity policy](../../docs/productivity-policy.md).
 5. **Observe available work.** `needle-backlog-slo.timer` measures eligible
    inventory every five minutes. Minimum and target counts are zero: fleet
    capacity and unused quota do not justify creating tasks. Pending proposals

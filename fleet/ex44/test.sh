@@ -64,9 +64,13 @@ grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
 ! grep -Eq '/(CLASP|agentists-quickstart-deprecated|commitgraph-deprecated)([[:space:]]|$)' "$MANIFEST"
 
 grep -qx 'NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE=0' "$SRC_DIR/fleet-policy.env"
-for strand in GENERATION WEAVE PULSE UNRAVEL; do
+for strand in GENERATION WEAVE; do
+    grep -qx "NEEDLE_STRANDS__${strand}__ENABLED=true" "$SRC_DIR/fleet-policy.env"
+done
+for strand in PULSE UNRAVEL; do
     grep -qx "NEEDLE_STRANDS__${strand}__ENABLED=false" "$SRC_DIR/fleet-policy.env"
 done
+grep -qx 'BEAD_ORG_SECRET_SCANNER=/home/coding/.local/bin/secret-scanner' "$SRC_DIR/fleet-policy.env"
 ! grep -q 'NEEDLE_STRANDS__GENERATION__ENABLED' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -qx 'NEEDLE_STRANDS__MITOSIS__TIMEOUT_TRIGGERED__AGENT_WALLCLOCK_TIMEOUT=true' "$SRC_DIR/fleet-policy.env"
 grep -qx 'NEEDLE_WORKER__MAX_WORKERS=38' "$SRC_DIR/fleet-policy.env"
