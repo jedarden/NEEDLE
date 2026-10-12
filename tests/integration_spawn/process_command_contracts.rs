@@ -12,12 +12,13 @@ use needle::attempt_archive::{
     SpooledReceipt, SIDECAR_SCHEMA_VERSION,
 };
 use needle::bead_store::{
-    builtin_bead_backends, open_configured, BeadBackend, BeadStore, CliBeadStore, Filters,
-    RepairReport,
+    builtin_bead_backends, open_configured, AttemptResolution, BeadBackend, BeadStore,
+    ClaimMutationResult, CliBeadStore, Filters, RepairReport, ResolutionAction, ResolveReceipt,
 };
 use needle::build_status::template_for_workspace;
 use needle::canary::CanaryRunner;
 use needle::ci::{correlate_commit, CorrelationError};
+use needle::claim::{ClaimCapabilities, ClaimHandle};
 use needle::commit_hook::{inject_bead_id_trailer, validate_commit};
 use needle::config::{
     resolve_bead_cli, ArchiveCompression, AttemptArchiveConfig, Backend, BackendSource,
@@ -603,6 +604,7 @@ struct TestStore {
     bead: Mutex<Bead>,
     notes: Option<String>,
     actions: Mutex<Vec<String>>,
+    capabilities: Option<serde_json::Value>,
 }
 
 impl TestStore {
@@ -611,7 +613,13 @@ impl TestStore {
             bead: Mutex::new(bead),
             notes: None,
             actions: Mutex::new(Vec::new()),
+            capabilities: None,
         }
+    }
+
+    fn with_capabilities(mut self, capabilities: serde_json::Value) -> Self {
+        self.capabilities = Some(capabilities);
+        self
     }
 
     fn with_notes(mut self, notes: &str) -> Self {
@@ -626,6 +634,36 @@ impl TestStore {
 
 #[async_trait]
 impl BeadStore for TestStore {
+    fn negotiated_capabilities(&self) -> Option<serde_json::Value> {
+        self.capabilities.clone()
+    }
+
+    async fn resolve_lifecycle_claim(
+        &self,
+        handle: &ClaimHandle,
+        resolution: &AttemptResolution,
+        action: ResolutionAction,
+    ) -> Result<(ClaimMutationResult, Option<ResolveReceipt>)> {
+        assert_eq!(handle.bead_id, resolution.bead_id);
+        self.actions
+            .lock()
+            .unwrap()
+            .push(format!("atomic:{}", action.as_str()));
+        assert_eq!(action, ResolutionAction::Release);
+        let mut bead = self.bead.lock().unwrap();
+        bead.status = BeadStatus::Open;
+        bead.assignee = None;
+        Ok((
+            ClaimMutationResult::Applied,
+            Some(ResolveReceipt {
+                receipt_id: "process-contract-receipt".to_string(),
+                resulting_state: Some("open".to_string()),
+                resulting_attempt_tier: None,
+                is_replay: false,
+            }),
+        ))
+    }
+
     async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
         Ok(Vec::new())
     }
@@ -3528,6 +3566,115 @@ fn resolution_process_contracts_context<'a>(bead: &'a Bead) -> ResolveContext<'a
     )
 }
 
+async fn resolution_process_contracts_atomic_capability_selects_one_resolution_path() {
+    let cases = [
+        (
+            "advertised",
+            Some(serde_json::json!({"atomic_resolution": true})),
+            true,
+        ),
+        (
+            "nested",
+            Some(serde_json::json!({"transitions": {"atomic_resolution": true}})),
+            true,
+        ),
+        (
+            "false",
+            Some(serde_json::json!({"atomic_resolution": false})),
+            false,
+        ),
+        (
+            "missing",
+            Some(serde_json::json!({"transitions": {}})),
+            false,
+        ),
+        ("unavailable", None, false),
+    ];
+    for (name, capabilities, atomic) in cases {
+        let (_workspace, bead) = resolution_process_contracts_workspace(&[]);
+        let store = match capabilities {
+            Some(capabilities) => TestStore::new(bead.clone()).with_capabilities(capabilities),
+            None => TestStore::new(bead.clone()),
+        };
+        let logs = TempDir::new().expect("create telemetry directory");
+        let telemetry =
+            Telemetry::with_log_dir(format!("resolution-selection-{name}"), logs.path());
+        telemetry.start();
+        let executor = DecisionExecutor::new(Config::default(), telemetry.clone());
+        let evidence =
+            needle::resolve::evidence::capture(&bead.workspace, &bead, 124, "", "", false).await;
+        let handle = ClaimHandle::unprotected(
+            bead.id.clone(),
+            "process-contract-workspace".to_string(),
+            "test-worker".to_string(),
+            None,
+            None,
+            ClaimCapabilities::default(),
+        );
+        let observation = needle::resolve::executor::ResolutionObservation {
+            evidence: &evidence,
+            exit_code: 124,
+            interrupted: false,
+            attempt_id: "process-contract-attempt",
+            claim_handle: Some(&handle),
+        };
+
+        let applied = executor
+            .apply_observed(
+                &store,
+                &bead,
+                &resolution_process_contracts_complete(),
+                "test-worker",
+                None,
+                Some(&observation),
+            )
+            .await
+            .expect("an abnormal exit is released");
+        assert_eq!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::Unverifiable),
+            "{name}"
+        );
+        let actions = store.actions();
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.starts_with("atomic:"))
+                .count(),
+            usize::from(atomic),
+            "{name}: {actions:?}"
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.starts_with("release:"))
+                .count(),
+            usize::from(!atomic),
+            "{name}: {actions:?}"
+        );
+        telemetry
+            .force_flush_async(Duration::from_secs(2))
+            .await
+            .expect("flush resolution telemetry");
+        let events = telemetry_events(logs.path());
+        assert!(
+            events.iter().any(|event| {
+                event.event_type == "outcome.handled"
+                    && event.data["outcome"] == "resolve:complete"
+                    && event.data["action"] == "released"
+            }),
+            "{name}: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "bead.released"),
+            "{name}"
+        );
+        telemetry.shutdown().await;
+    }
+}
+
 #[tokio::test]
 async fn resolution_process_contracts_complete_rejects_failed_and_missing_gates() {
     for command in ["false", "/nonexistent/needle-missing-gate-cmd"] {
@@ -4086,6 +4233,7 @@ async fn resolution_process_contracts_attempt_ledger_is_once_per_terminal_path()
         }
         telemetry.shutdown().await;
     }
+    resolution_process_contracts_atomic_capability_selects_one_resolution_path().await;
 }
 
 #[tokio::test]
