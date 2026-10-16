@@ -7986,6 +7986,9 @@ pub struct AuditConfig {
     /// Learning-loop liveness thresholds (F5).
     #[serde(default, rename = "loop")]
     pub loop_: AuditLoopConfig,
+    /// Thresholds for a verification gate red at pristine HEAD (F6).
+    #[serde(default)]
+    pub gate_red: AuditGateRedConfig,
 }
 
 impl Default for AuditConfig {
@@ -7995,6 +7998,7 @@ impl Default for AuditConfig {
             max_beads_per_run: Self::default_max_beads_per_run(),
             home_workspace: Self::default_home_workspace(),
             loop_: AuditLoopConfig::default(),
+            gate_red: AuditGateRedConfig::default(),
         }
     }
 }
@@ -8132,6 +8136,45 @@ impl Default for AuditLoopConfig {
 impl AuditLoopConfig {
     pub fn default_stall_days() -> i64 {
         3
+    }
+}
+
+/// Thresholds for `F6_GATE_RED_AT_HEAD`: one verification gate failing every
+/// change in a workspace, which means it is red at pristine HEAD.
+///
+/// The defaults are what the 2026-10-08..14 evidence needs: NEEDLE's own
+/// `gate_1` failed 23 consecutive attempts across 7 beads and the daily audit
+/// runs once a day, so the window has to span several runs for a red gate to
+/// be seen by more than one of them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditGateRedConfig {
+    /// Hours of per-bead attempt journals (`.beads/traces/*/attempts.jsonl`)
+    /// the rule reads, ending at collection time.
+    #[serde(default = "AuditGateRedConfig::default_window_hours")]
+    pub window_hours: i64,
+    /// Distinct beads the same gate must have failed (`work_failure`,
+    /// `gate:<name>`) since the workspace's newest verified closure before
+    /// the gate counts as red at HEAD rather than as one bad change.
+    #[serde(default = "AuditGateRedConfig::default_min_beads")]
+    pub min_beads: u64,
+}
+
+impl Default for AuditGateRedConfig {
+    fn default() -> Self {
+        AuditGateRedConfig {
+            window_hours: Self::default_window_hours(),
+            min_beads: Self::default_min_beads(),
+        }
+    }
+}
+
+impl AuditGateRedConfig {
+    pub fn default_window_hours() -> i64 {
+        72
+    }
+    pub fn default_min_beads() -> u64 {
+        2
     }
 }
 

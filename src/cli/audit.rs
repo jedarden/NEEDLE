@@ -213,6 +213,9 @@ pub struct AuditContext {
     pub ci_templates: BTreeMap<String, String>,
     /// Bead inventory per workspace path.
     pub beads: BTreeMap<PathBuf, Collected<Vec<Bead>>>,
+    /// Per-bead attempt journals per workspace name, trimmed to the
+    /// `audit.gate_red` window (F6).
+    pub attempts: BTreeMap<String, Collected<Vec<factory::AttemptRow>>>,
 }
 
 /// One collected input, and what to say when it could not be collected.
@@ -402,6 +405,10 @@ pub async fn collect_context(config: Config, root: Option<PathBuf>) -> Result<Au
         let collected = collect_workspace_beads(&workspace).await;
         beads.insert(workspace, collected);
     }
+    let attempts = collect_attempts(
+        &workspaces,
+        collected_at - chrono::Duration::hours(config.audit.gate_red.window_hours),
+    );
 
     Ok(AuditContext {
         root,
@@ -413,7 +420,29 @@ pub async fn collect_context(config: Config, root: Option<PathBuf>) -> Result<Au
         ci,
         ci_templates,
         beads,
+        attempts,
     })
+}
+
+/// Attempt journals per workspace name, keeping rows recorded at or after
+/// `cutoff`. A journal tree that cannot be read is `Unavailable`, never an
+/// empty history.
+fn collect_attempts(
+    workspaces: &[WorkspaceEntry],
+    cutoff: DateTime<Utc>,
+) -> BTreeMap<String, Collected<Vec<factory::AttemptRow>>> {
+    workspaces
+        .iter()
+        .map(|workspace| {
+            let collected = match factory::attempt_rows(&workspace.path, cutoff) {
+                Ok(rows) => Collected::Available(rows),
+                Err(error) => {
+                    Collected::Unavailable(format!("attempt journals unreadable: {error:#}"))
+                }
+            };
+            (workspace.name.clone(), collected)
+        })
+        .collect()
 }
 
 /// CI run history per workspace, with the template each one resolved to.
@@ -619,7 +648,12 @@ fn unavailable_inputs(ctx: &AuditContext) -> Vec<String> {
             format!("{scope}: {reason}")
         })
     });
-    let mut out: Vec<String> = ci.chain(beads).collect();
+    let attempts = ctx.attempts.iter().filter_map(|(scope, collected)| {
+        collected
+            .unavailable_reason()
+            .map(|reason| format!("{scope}: {reason}"))
+    });
+    let mut out: Vec<String> = ci.chain(beads).chain(attempts).collect();
     out.sort();
     out.dedup();
     out
@@ -923,6 +957,7 @@ mod tests {
             ci: BTreeMap::new(),
             ci_templates: BTreeMap::new(),
             beads: BTreeMap::new(),
+            attempts: BTreeMap::new(),
         }
     }
 

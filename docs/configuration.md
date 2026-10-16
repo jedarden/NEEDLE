@@ -1585,6 +1585,20 @@ audit:
     # — an edit after the close moves it forward, never back — so it can only
     # make this rule quieter, never noisier.
     stall_days: 3
+
+  # A verification gate red at pristine HEAD (F6). Reads the per-bead attempt
+  # journals (`.beads/traces/*/attempts.jsonl`) of every discovered workspace.
+  gate_red:
+    # Hours of attempt journals the rule reads, ending at collection time
+    # (default: 72). The audit runs daily, so the window spans several runs.
+    window_hours: 72
+
+    # Distinct beads the same gate must have failed (`work_failure`,
+    # `gate:<name>`) since the workspace's newest verified closure inside the
+    # window before the gate counts as red at HEAD (default: 2). One bead
+    # failing a gate is a bad change; several, with nothing verified in
+    # between, is the gate.
+    min_beads: 2
 ```
 
 The `factory` predicate group and the keys each rule reads:
@@ -1596,6 +1610,7 @@ The `factory` predicate group and the keys each rule reads:
 | `F3_UNCOSTED_TIMEOUTS` | violation | `window_hours`, `min_costed_rows`, `min_uncosted_timeouts` |
 | `F4_CI_RED` | violation | `ci_red_hours` |
 | `F5_LEARNING_LOOP_STALLED` | violation | `loop.workspaces`, `loop.stall_days` |
+| `F6_GATE_RED_AT_HEAD` | violation | `gate_red.window_hours`, `gate_red.min_beads` |
 | `I_CHECKLIST_DRIFT` | informational | bead inventories only — no threshold |
 
 `F5_LEARNING_LOOP_STALLED` escalates rather than filing ordinary work. It fires
@@ -1606,6 +1621,15 @@ and the run writes a brief to `~/.needle/state/escalations/<RULE>--<scope>.md`
 for an interactive session or a stronger-model lane. The brief is rewritten in
 place per rule and scope, never duplicated, and the filed bead names its path.
 Nothing is reassigned or re-prioritised automatically.
+
+`F6_GATE_RED_AT_HEAD` is filed as an operational defect: at P0, carrying
+`operational-defect`, and never `human` or `proposal-pending` — it needs no
+admission, because every attempt dispatched to the workspace until the gate is
+fixed is spent for nothing. Its detail names the gate command, every failing
+bead and each failing attempt's timestamp. One bead per (workspace, gate) is
+kept across runs through the usual evidence signature. Added after NEEDLE's own
+`gate_1` stayed red at pristine HEAD from 2026-10-08 while its fix waited five
+days as a held proposal (needle-9c66c160).
 
 Informational rules (prefixed `I_`) report states that are correct as-is and
 must never be repaired automatically. They still drive exit code 1, because

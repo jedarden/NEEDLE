@@ -64,6 +64,26 @@ pub const HUMAN_LABEL: &str = "human";
 /// `strands.pluck.exclude_labels` carries it by default.
 pub const ESCALATION_LABEL: &str = "escalation";
 
+/// Label marking an audit bead as an operational defect: the fleet's own
+/// machinery is failing every change put in front of it, so the bead is
+/// filed at P0 for whoever can fix it now — never as a held proposal.
+pub const OPERATIONAL_DEFECT_LABEL: &str = "operational-defect";
+
+/// Whether a finding is an operational defect (filed P0, never a proposal).
+///
+/// `F6_GATE_RED_AT_HEAD` is: NEEDLE's own gate_1 was red at pristine HEAD
+/// for days in October 2026 while its only fix waited as a `human`-held
+/// proposal nobody looked at.
+pub fn is_operational_defect(finding: &Finding) -> bool {
+    finding.rule == super::factory::F6_GATE_RED_AT_HEAD
+}
+
+/// The priority a filed bead is created at, when it is not the backend
+/// default. Operational defects are P0; everything else keeps P2.
+pub fn priority_for(finding: &Finding) -> Option<u8> {
+    is_operational_defect(finding).then_some(0)
+}
+
 /// Whether a finding escalates instead of filing ordinary work.
 ///
 /// One rule does. `F5_LEARNING_LOOP_STALLED` fires exactly when the fleet has
@@ -118,6 +138,9 @@ pub fn labels_for(finding: &Finding) -> Vec<String> {
     if is_escalating(finding) {
         labels.push(ESCALATION_LABEL.to_string());
     }
+    if is_operational_defect(finding) {
+        labels.push(OPERATIONAL_DEFECT_LABEL.to_string());
+    }
     labels
 }
 
@@ -154,6 +177,14 @@ pub fn body_for(finding: &Finding, escalation: Option<&Path>) -> String {
         detail = finding.detail,
         label = signature_label(finding),
     );
+    if is_operational_defect(finding) {
+        body.push_str(&format!(
+            "\nThis is an operational defect, filed at P0 and carrying `{OPERATIONAL_DEFECT_LABEL}`.\n\
+             It is not a proposal and needs no admission: the fleet's own machinery is\n\
+             failing every change put in front of it, and every attempt dispatched\n\
+             until it is fixed is spent for nothing.\n"
+        ));
+    }
     if let Some(path) = escalation {
         body.push_str(&format!(
             "\nThis finding is escalated. The bead carries `{ESCALATION_LABEL}`, which\n\
@@ -444,14 +475,17 @@ pub async fn apply(
                 "an audit bead must never carry the human label"
             );
             let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-            match store
-                .create_bead(
-                    &title_for(&planned.finding),
-                    &body_for(&planned.finding, planned.escalation.as_deref()),
-                    &label_refs,
-                )
-                .await
-            {
+            let title = title_for(&planned.finding);
+            let body = body_for(&planned.finding, planned.escalation.as_deref());
+            let created = match priority_for(&planned.finding) {
+                Some(priority) => {
+                    store
+                        .create_bead_with_priority(&title, &body, &label_refs, priority)
+                        .await
+                }
+                None => store.create_bead(&title, &body, &label_refs).await,
+            };
+            match created {
                 Ok(id) => summary.created.push(id),
                 Err(error) => summary.errors.push(FilingError::new(
                     FilingErrorKind::FilingFailed,
@@ -658,6 +692,8 @@ mod tests {
         /// Every write attempted against the store, refused or not, so a
         /// test can prove nothing retried or reached for a credential.
         attempts: Mutex<Vec<String>>,
+        /// Explicit priorities beads were created at, by title.
+        priorities: Mutex<Vec<(String, u8)>>,
     }
 
     impl MemoryStore {
@@ -771,6 +807,20 @@ mod tests {
                 labels.iter().map(|label| label.to_string()).collect(),
             ));
             Ok(id)
+        }
+
+        async fn create_bead_with_priority(
+            &self,
+            title: &str,
+            body: &str,
+            labels: &[&str],
+            priority: u8,
+        ) -> Result<BeadId> {
+            self.priorities
+                .lock()
+                .expect("priorities lock")
+                .push((title.to_string(), priority));
+            self.create_bead(title, body, labels).await
         }
 
         async fn add_dependency(&self, _blocker: &BeadId, _blocked: &BeadId) -> Result<()> {
@@ -1191,6 +1241,58 @@ mod tests {
         assert_eq!(summary.errors[0].holder, None);
         assert_eq!(summary.blocked(), 0);
         assert!(summary.errors[0].reason.contains("database is locked"));
+    }
+
+    /// needle-9c66c160: a red-at-HEAD gate is filed at P0 as an operational
+    /// defect — never `human`, never a proposal — and a second run notes the
+    /// same bead instead of filing a twin.
+    #[tokio::test]
+    async fn a_gate_red_at_head_is_filed_p0_as_an_operational_defect() {
+        let store = MemoryStore::default();
+        let finding = Finding::violation(
+            crate::cli::audit::factory::F6_GATE_RED_AT_HEAD,
+            "NEEDLE",
+            "gate_1",
+            "gate `gate_1` (`cargo test --lib`) failed work_failure on 7 distinct bead(s)",
+            7,
+        );
+        assert!(is_operational_defect(&finding));
+        assert_eq!(priority_for(&finding), Some(0));
+
+        let planned = plan(std::slice::from_ref(&finding), &|_| None, 3);
+        let mut summary = FilingSummary::default();
+        apply(&store, &planned[0], now(), &mut summary).await;
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+
+        let (title, body, labels) = store.created()[0].clone();
+        assert_eq!(
+            store.priorities.lock().expect("priorities lock").clone(),
+            vec![(title.clone(), 0)],
+            "filed at an explicit P0"
+        );
+        assert!(labels.contains(&OPERATIONAL_DEFECT_LABEL.to_string()));
+        for forbidden in [HUMAN_LABEL, "proposal-pending", ESCALATION_LABEL] {
+            assert!(
+                !labels.iter().any(|label| label == forbidden),
+                "an operational defect never carries `{forbidden}`: {labels:?}"
+            );
+        }
+        assert!(body.contains("cargo test --lib"), "{body}");
+        assert!(body.contains("operational defect"), "{body}");
+
+        // Another run over the same gate in the same workspace notes it.
+        let existing = BeadId::from("audit-1".to_string());
+        let again = plan(
+            std::slice::from_ref(&finding),
+            &|_| Some(existing.clone()),
+            3,
+        );
+        assert_eq!(again[0].action, Filing::Note(existing));
+
+        // An ordinary finding keeps the backend default priority.
+        let ordinary = violation("F4_CI_RED", "NEEDLE", "needle-ci");
+        assert_eq!(priority_for(&ordinary), None);
+        assert!(!labels_for(&ordinary).contains(&OPERATIONAL_DEFECT_LABEL.to_string()));
     }
 
     #[test]

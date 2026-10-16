@@ -10,6 +10,7 @@
 //! | `F2_LATE_TIER_YIELD_INVERSION` | 86 % / 97 % "yield" on fourth and later attempts — the split-counted-as-success defect (N-T46) |
 //! | `F3_UNCOSTED_TIMEOUTS` | every timed-out attempt booked at $0 (N-T47) |
 //! | `F4_CI_RED` | needle-ci red for 20 h with no bead tracking it |
+//! | `F6_GATE_RED_AT_HEAD` | NEEDLE's `gate_1` red at pristine HEAD 2026-10-08..16: 23 attempts on 7 beads failed it, the fix sat as a human-held proposal for 5 days |
 //! | `I_CHECKLIST_DRIFT` | an open bead's checklist still unchecked after the bead it names closed |
 //!
 //! Each predicate is a pure function of [`AuditContext`], including its clock:
@@ -22,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 
 use super::{AuditContext, Collected, Finding, Predicate};
 use crate::config::Config;
@@ -43,6 +45,7 @@ pub fn predicates() -> Vec<Box<dyn Predicate>> {
         Box::new(UncostedTimeouts),
         Box::new(CiRed),
         Box::new(LearningLoopStalled),
+        Box::new(GateRedAtHead),
         Box::new(ChecklistDrift),
     ]
 }
@@ -477,6 +480,225 @@ impl Predicate for CiRed {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// F6 — a verification gate that is red at pristine HEAD
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Rule id for a gate that fails every change in a workspace.
+///
+/// A named constant because filing files it as a P0 operational defect
+/// rather than an ordinary audit bead.
+pub const F6_GATE_RED_AT_HEAD: &str = "F6_GATE_RED_AT_HEAD";
+
+/// Semantic outcome of an attempt whose own work was judged and rejected.
+const WORK_FAILURE: &str = "work_failure";
+
+/// Attempts listed by bead and time in an F6 finding before the rest are
+/// counted rather than named, so the bead body stays readable.
+const GATE_RED_LISTED_ATTEMPTS: usize = 25;
+
+/// One resolved attempt from a per-bead journal
+/// (`.beads/traces/<bead>/attempts.jsonl`), reduced to what F6 reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptRow {
+    pub bead_id: String,
+    pub recorded_at: DateTime<Utc>,
+    /// Semantic outcome (`verified_success`, `work_failure`, ...).
+    pub outcome: String,
+    /// Terminal reason, e.g. `gate:gate_1` or `gate:gate_0,gate_1`.
+    pub terminal_reason: String,
+    /// The gate command named in the failure summary, when it names one.
+    pub gate_command: Option<String>,
+}
+
+impl AttemptRow {
+    /// The gates this attempt failed: the names in a `gate:` terminal reason
+    /// on a `work_failure`, and nothing for any other attempt.
+    fn failed_gates(&self) -> Vec<&str> {
+        if self.outcome != WORK_FAILURE {
+            return Vec::new();
+        }
+        self.terminal_reason
+            .strip_prefix("gate:")
+            .map(|names| {
+                names
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// The command a gate failure summary names: `command '<cmd>' failed: ...`,
+/// the shape `validation` writes. `None` when the summary names none.
+pub(crate) fn gate_command(summary: &str) -> Option<String> {
+    let start = summary.find("command '")? + "command '".len();
+    let rest = &summary[start..];
+    let end = rest.find("' failed").or_else(|| rest.find('\''))?;
+    let command = rest[..end].trim();
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+/// Attempt rows from every journal in `workspace` recorded at or after
+/// `cutoff`, oldest first.
+///
+/// A row whose timestamp does not parse is dropped: F6 orders attempts
+/// against the newest verified closure, and a row that cannot be placed in
+/// time cannot be on either side of it.
+pub fn attempt_rows(workspace: &Path, cutoff: DateTime<Utc>) -> Result<Vec<AttemptRow>> {
+    let mut rows = Vec::new();
+    for (bead, records) in crate::attempt_history::load_workspace_journals(workspace)? {
+        for record in records {
+            let Ok(stamp) = DateTime::parse_from_rfc3339(&record.recorded_at) else {
+                continue;
+            };
+            let recorded_at = stamp.with_timezone(&Utc);
+            if recorded_at < cutoff {
+                continue;
+            }
+            rows.push(AttemptRow {
+                bead_id: bead.clone(),
+                recorded_at,
+                outcome: record.outcome.clone(),
+                terminal_reason: record.terminal_reason.clone().unwrap_or_default(),
+                gate_command: record.failure_summary.as_deref().and_then(gate_command),
+            });
+        }
+    }
+    rows.sort_by(|a, b| (a.recorded_at, &a.bead_id).cmp(&(b.recorded_at, &b.bead_id)));
+    Ok(rows)
+}
+
+/// The same gate failing `work_failure` on several distinct beads with no
+/// verified closure in the workspace since: the gate is red at HEAD.
+///
+/// # Why the count starts at the newest verified closure
+///
+/// A gate that fails whatever change is put in front of it is failing on
+/// what every change shares — the committed tree. One bead failing a gate is
+/// a bad change; several distinct beads failing the same gate with nothing
+/// passing in between is the gate. The count restarts at the workspace's
+/// newest `verified_success` inside the window, so "zero verified closures"
+/// holds over exactly the span the failures are counted in, and a success
+/// recorded before the gate went red cannot mask it.
+///
+/// Retrying the beads cannot fix this, and a fix filed as a held proposal
+/// sat unseen for five days, so the finding is filed as a P0 operational
+/// defect (see `filing::priority_for`), never as a proposal.
+struct GateRedAtHead;
+
+impl Predicate for GateRedAtHead {
+    fn id(&self) -> &'static str {
+        F6_GATE_RED_AT_HEAD
+    }
+
+    fn description(&self) -> &'static str {
+        "one verification gate failed several distinct beads with nothing verified since: it is red at HEAD"
+    }
+
+    fn check(&self, ctx: &AuditContext) -> Result<Vec<Finding>> {
+        let config = &ctx.config.audit.gate_red;
+        let cutoff = ctx.collected_at - chrono::Duration::hours(config.window_hours);
+        let mut findings = Vec::new();
+
+        for (workspace, collected) in &ctx.attempts {
+            // Not collected is reported as an unavailable input by the run.
+            let Collected::Available(rows) = collected else {
+                continue;
+            };
+            let rows: Vec<&AttemptRow> = rows
+                .iter()
+                .filter(|row| row.recorded_at >= cutoff && row.recorded_at <= ctx.collected_at)
+                .collect();
+            let newest_success = rows
+                .iter()
+                .filter(|row| row.outcome == VERIFIED_SUCCESS)
+                .map(|row| row.recorded_at)
+                .max();
+
+            // Gate name -> the failing attempts after the newest closure.
+            let mut by_gate: BTreeMap<&str, Vec<&AttemptRow>> = BTreeMap::new();
+            for row in rows
+                .iter()
+                .filter(|row| newest_success.is_none_or(|success| row.recorded_at > success))
+            {
+                for gate in row.failed_gates() {
+                    by_gate.entry(gate).or_default().push(row);
+                }
+            }
+
+            for (gate, failures) in by_gate {
+                let beads: BTreeSet<&str> =
+                    failures.iter().map(|row| row.bead_id.as_str()).collect();
+                if (beads.len() as u64) < config.min_beads {
+                    continue;
+                }
+                findings.push(Finding::violation(
+                    self.id(),
+                    workspace.clone(),
+                    gate,
+                    gate_red_detail(gate, &failures, &beads, newest_success, config.window_hours),
+                    beads.len() as u64,
+                ));
+            }
+        }
+        Ok(findings)
+    }
+}
+
+/// The detail an F6 finding carries: the gate command, the failing beads and
+/// every attempt's timestamp, so the bead is actionable without the journals.
+fn gate_red_detail(
+    gate: &str,
+    failures: &[&AttemptRow],
+    beads: &BTreeSet<&str>,
+    newest_success: Option<DateTime<Utc>>,
+    window_hours: i64,
+) -> String {
+    // The newest command named wins: the gate's definition can change, and
+    // the newest failure is the one that describes HEAD.
+    let command = failures
+        .iter()
+        .rev()
+        .find_map(|row| row.gate_command.as_deref())
+        .map(|command| format!("`{command}`"))
+        .unwrap_or_else(|| "(not named in the failure summary)".to_string());
+    let since = match newest_success {
+        Some(success) => format!(
+            "since the newest verified closure at {}",
+            success.to_rfc3339()
+        ),
+        None => format!("in the whole {window_hours} h window"),
+    };
+    let first = failures.first().map(|row| row.recorded_at.to_rfc3339());
+    let last = failures.last().map(|row| row.recorded_at.to_rfc3339());
+    let mut listed: Vec<String> = failures
+        .iter()
+        .take(GATE_RED_LISTED_ATTEMPTS)
+        .map(|row| format!("{}@{}", row.bead_id, row.recorded_at.to_rfc3339()))
+        .collect();
+    if failures.len() > GATE_RED_LISTED_ATTEMPTS {
+        listed.push(format!(
+            "(+{} more)",
+            failures.len() - GATE_RED_LISTED_ATTEMPTS
+        ));
+    }
+    format!(
+        "gate `{gate}` ({command}) failed work_failure on {} distinct bead(s) across {} \
+         attempt(s) from {} to {}, and nothing in this workspace verified {since}. A gate \
+         that fails every change is red at pristine HEAD: fix the gate at HEAD — retrying \
+         the beads only burns attempts. Failing beads: {}. Attempts: {}",
+        beads.len(),
+        failures.len(),
+        first.unwrap_or_default(),
+        last.unwrap_or_default(),
+        beads.iter().copied().collect::<Vec<_>>().join(", "),
+        listed.join(", "),
+    )
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // I_CHECKLIST_DRIFT — informational
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -754,6 +976,7 @@ mod tests {
             ci: BTreeMap::new(),
             ci_templates: BTreeMap::new(),
             beads: BTreeMap::new(),
+            attempts: BTreeMap::new(),
         }
     }
 
@@ -794,6 +1017,352 @@ mod tests {
 
     fn findings_of(predicate: &dyn Predicate, ctx: &AuditContext) -> Vec<Finding> {
         predicate.check(ctx).expect("predicate runs")
+    }
+
+    // ── F6 ────────────────────────────────────────────────────────────────
+
+    /// The NEEDLE attempt history the October 2026 red gate left behind,
+    /// as (recorded_at, bead, outcome, terminal_reason): `gate_1` (`cargo
+    /// test --lib`) red at pristine HEAD, every attempt failing it whatever
+    /// its change. The two `needle-test` closures are real rows too — a test
+    /// fixture's, recorded into the live journals — and they are why F6
+    /// counts from the newest closure rather than demanding an empty window.
+    const OCTOBER_2026_GATE_1: &[(&str, &str, &str, &str)] = &[
+        (
+            "2026-10-08T18:05:43.836Z",
+            "needle-closed",
+            "verified_success",
+            "",
+        ),
+        (
+            "2026-10-09T19:49:32.292Z",
+            "needle-f54bab82",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-11T15:46:39.224Z",
+            "needle-d7b6198a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-11T16:03:57.065Z",
+            "needle-d74c803a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-11T16:15:08.960Z",
+            "needle-d7b6198a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-11T16:35:03.325Z",
+            "needle-d74c803a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-11T16:53:06.598Z",
+            "needle-d7b6198a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-11T16:58:49.363Z",
+            "needle-test",
+            "verified_success",
+            "",
+        ),
+        (
+            "2026-10-11T16:58:49.378Z",
+            "needle-test",
+            "verified_success",
+            "",
+        ),
+        (
+            "2026-10-11T17:10:08.033Z",
+            "needle-d74c803a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-11T17:59:30.830Z",
+            "needle-78a9a735",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-12T04:45:40.486Z",
+            "needle-d74c803a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-12T05:12:01.709Z",
+            "needle-d74c803a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-12T05:22:05.743Z",
+            "needle-69306987",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-12T05:46:08.009Z",
+            "needle-b7ca91bf",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-12T06:21:06.366Z",
+            "needle-69306987",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-12T07:34:24.431Z",
+            "needle-b184d5d7",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-12T08:05:27.847Z",
+            "needle-b184d5d7",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-12T08:37:14.400Z",
+            "needle-b184d5d7",
+            "indeterminate",
+            "timeout:idle",
+        ),
+        (
+            "2026-10-14T00:21:32.505Z",
+            "needle-d7b6198a",
+            "work_failure",
+            "gate:gate_1",
+        ),
+    ];
+
+    /// Write `rows` as real `attempts.jsonl` journals under `workspace`, in
+    /// the on-disk record shape the outcome handler appends.
+    fn write_journals(workspace: &std::path::Path, rows: &[(&str, &str, &str, &str)]) {
+        let mut by_bead: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for (index, (at, bead, outcome, reason)) in rows.iter().enumerate() {
+            let summary = reason.strip_prefix("gate:").map(|gate| {
+                format!(
+                    "gate `{gate}` failed:\ncommand 'cargo test --lib' failed: Compiling needle \
+                     v0.6.36\nerror: test failed, to rerun pass `--lib`"
+                )
+            });
+            let record = serde_json::json!({
+                "schema_version": 1,
+                "attempt_id": format!("attempt-{index}"),
+                "recorded_at": at,
+                "worker": "codex-gpt-5.6-luna-xhigh-sg-codex-1",
+                "adapter": "codex-gpt-5.6-luna-xhigh",
+                "outcome": outcome,
+                "terminal_reason": (!reason.is_empty()).then_some(*reason),
+                "exit_code": 0,
+                "requested_action": "released:gate_failed",
+                "commits": [],
+                "duration_ms": 600000,
+                "failure_summary": summary,
+            });
+            by_bead.entry(bead).or_default().push(record.to_string());
+        }
+        for (bead, lines) in by_bead {
+            let path = crate::attempt_history::history_path(
+                workspace,
+                &crate::types::BeadId::from(bead.to_string()),
+            );
+            std::fs::create_dir_all(path.parent().expect("journal has a parent"))
+                .expect("journal directory");
+            std::fs::write(&path, lines.join("\n") + "\n").expect("journal written");
+        }
+    }
+
+    /// A context collected at `at` over the journals under `workspace`,
+    /// through the same reader and window trim production uses.
+    fn gate_ctx(workspace: &std::path::Path, at: DateTime<Utc>) -> AuditContext {
+        let mut context = ctx();
+        context.collected_at = at;
+        let cutoff = at - chrono::Duration::hours(context.config.audit.gate_red.window_hours);
+        context.attempts.insert(
+            "NEEDLE".to_string(),
+            Collected::Available(attempt_rows(workspace, cutoff).expect("journals read")),
+        );
+        context
+    }
+
+    fn at(stamp: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(stamp)
+            .expect("fixture stamp parses")
+            .with_timezone(&Utc)
+    }
+
+    /// needle-9c66c160 acceptance (5): replayed over the real October
+    /// history, F6 fires on every daily audit from 2026-10-11 to 10-14 and
+    /// goes quiet once only one bead is failing inside the window.
+    #[test]
+    fn f6_fires_on_the_october_2026_needle_gate_1_history() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        write_journals(workspace.path(), OCTOBER_2026_GATE_1);
+
+        // The daily audit runs at 07:40 America/New_York, ~11:45 UTC.
+        for day in ["2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14"] {
+            let context = gate_ctx(workspace.path(), at(&format!("{day}T11:45:00Z")));
+            let findings = findings_of(&GateRedAtHead, &context);
+            assert_eq!(findings.len(), 1, "{day}: {findings:?}");
+            let finding = &findings[0];
+            assert_eq!(finding.rule, F6_GATE_RED_AT_HEAD);
+            assert_eq!(finding.scope, "NEEDLE");
+            assert_eq!(finding.subject, "gate_1");
+            assert!(finding.count >= 2, "{day}: {finding:?}");
+            assert!(
+                finding.detail.contains("`cargo test --lib`"),
+                "the gate command is named: {}",
+                finding.detail
+            );
+        }
+
+        // On 10-13 the window reaches back past the needle-test closures to
+        // nothing; every bead failing since then is named, with timestamps.
+        let context = gate_ctx(workspace.path(), at("2026-10-13T11:45:00Z"));
+        let finding = &findings_of(&GateRedAtHead, &context)[0];
+        assert_eq!(finding.count, 5, "{}", finding.detail);
+        for bead in [
+            "needle-d74c803a",
+            "needle-78a9a735",
+            "needle-69306987",
+            "needle-b7ca91bf",
+            "needle-b184d5d7",
+        ] {
+            assert!(finding.detail.contains(bead), "{bead}: {}", finding.detail);
+        }
+        assert!(finding
+            .detail
+            .contains("needle-78a9a735@2026-10-11T17:59:30.830+00:00"));
+        assert!(finding.detail.contains("2026-10-11T16:58:49.378+00:00"));
+
+        // 10-15: one failing bead in the window is one bad change, not a gate.
+        let context = gate_ctx(workspace.path(), at("2026-10-15T11:45:00Z"));
+        assert!(findings_of(&GateRedAtHead, &context).is_empty());
+    }
+
+    #[test]
+    fn f6_stays_quiet_when_one_bead_fails_a_gate_repeatedly() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        write_journals(
+            workspace.path(),
+            &[
+                (
+                    "2026-09-15T10:00:00Z",
+                    "needle-a",
+                    "work_failure",
+                    "gate:gate_1",
+                ),
+                (
+                    "2026-09-15T11:00:00Z",
+                    "needle-a",
+                    "work_failure",
+                    "gate:gate_1",
+                ),
+                (
+                    "2026-09-15T12:00:00Z",
+                    "needle-a",
+                    "work_failure",
+                    "gate:gate_1",
+                ),
+            ],
+        );
+        assert!(findings_of(&GateRedAtHead, &gate_ctx(workspace.path(), now())).is_empty());
+    }
+
+    #[test]
+    fn f6_resets_at_a_verified_closure_and_never_combines_gates() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        write_journals(
+            workspace.path(),
+            &[
+                // Two beads failed gate_1, then something verified: the gate
+                // was passable after all.
+                (
+                    "2026-09-15T10:00:00Z",
+                    "needle-a",
+                    "work_failure",
+                    "gate:gate_1",
+                ),
+                (
+                    "2026-09-15T11:00:00Z",
+                    "needle-b",
+                    "work_failure",
+                    "gate:gate_1",
+                ),
+                ("2026-09-15T12:00:00Z", "needle-c", "verified_success", ""),
+                // After it, two beads failed two different gates.
+                (
+                    "2026-09-15T13:00:00Z",
+                    "needle-d",
+                    "work_failure",
+                    "gate:gate_0",
+                ),
+                (
+                    "2026-09-15T14:00:00Z",
+                    "needle-e",
+                    "work_failure",
+                    "gate:gate_1",
+                ),
+                // Infrastructure and timeouts are not gate verdicts.
+                (
+                    "2026-09-15T15:00:00Z",
+                    "needle-f",
+                    "infrastructure_failure",
+                    "gate_error:gate_1",
+                ),
+                (
+                    "2026-09-15T16:00:00Z",
+                    "needle-g",
+                    "indeterminate",
+                    "timeout",
+                ),
+            ],
+        );
+        assert!(findings_of(&GateRedAtHead, &gate_ctx(workspace.path(), now())).is_empty());
+
+        // A multi-gate terminal reason counts toward each gate it names.
+        write_journals(
+            workspace.path(),
+            &[(
+                "2026-09-15T17:00:00Z",
+                "needle-h",
+                "work_failure",
+                "gate:gate_0,gate_1",
+            )],
+        );
+        let findings = findings_of(&GateRedAtHead, &gate_ctx(workspace.path(), now()));
+        let subjects: Vec<&str> = findings.iter().map(|f| f.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["gate_0", "gate_1"], "{findings:?}");
+    }
+
+    #[test]
+    fn f6_reads_the_gate_command_from_the_failure_summary() {
+        assert_eq!(
+            gate_command("gate `gate_1` failed:\ncommand 'cargo test --lib' failed: boom"),
+            Some("cargo test --lib".to_string())
+        );
+        assert_eq!(
+            gate_command("command 'scripts/definition-of-done.sh --fast' failed: x"),
+            Some("scripts/definition-of-done.sh --fast".to_string())
+        );
+        assert_eq!(gate_command("exit code 1"), None);
+        assert_eq!(gate_command("command '' failed: x"), None);
     }
 
     // ── F5 ────────────────────────────────────────────────────────────────

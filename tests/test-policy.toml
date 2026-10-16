@@ -402,7 +402,14 @@ version = 1
 # lists) and two config cases (omitted cap keeps the default, key-path
 # validation). The gate and its counting seam are private to the strand, so
 # the unit tier is the cheapest correct home.
-max_tests = 4216
+# +5 audit F6_GATE_RED_AT_HEAD contracts (needle-9c66c160): replay of the real
+# October 2026 NEEDLE gate_1 journals fires on every daily run 10-11..14 and
+# goes quiet on 10-15; one bead failing repeatedly stays quiet; a verified
+# closure resets the count and distinct gates never combine; the gate command
+# parses from the failure summary; and the finding files at P0 as an
+# operational defect, never human or proposal-pending. Fixture attempts.jsonl
+# in a tempdir against private predicate/filing seams; no subprocess.
+max_tests = 4221
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

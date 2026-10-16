@@ -1054,6 +1054,37 @@ pub fn load_local(workspace: &Path, bead_id: &BeadId) -> Result<Vec<AttemptRecor
         .collect())
 }
 
+/// Every local journal in `workspace`, as `(bead id, records oldest first)`,
+/// sorted by bead id.
+///
+/// A workspace with no journal root has no history, which is an empty answer
+/// rather than an error. A root or journal that exists but cannot be read is
+/// an error: a reader that skipped it would report "no failures" where it
+/// merely could not look.
+pub fn load_workspace_journals(workspace: &Path) -> Result<Vec<(String, Vec<AttemptRecord>)>> {
+    let root = journal_root(workspace);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut journals = Vec::new();
+    for entry in std::fs::read_dir(&root)
+        .with_context(|| format!("failed to read attempt journals under {}", root.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read an entry under {}", root.display()))?;
+        if !entry.path().join("attempts.jsonl").is_file() {
+            continue;
+        }
+        let bead = entry.file_name().to_string_lossy().into_owned();
+        let records = load_local(workspace, &BeadId::from(bead.clone()))?;
+        if !records.is_empty() {
+            journals.push((bead, records));
+        }
+    }
+    journals.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(journals)
+}
+
 /// The bounded mirror written to bead-rs structured data: the newest
 /// [`MIRROR_KEEP`] records with legacy summaries and structured evidence cut
 /// to [`MIRROR_SUMMARY_BYTES`].
