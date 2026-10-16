@@ -629,6 +629,13 @@ impl Predicate for GateRedAtHead {
             }
 
             for (gate, failures) in by_gate {
+                // Only a gate that runs a command against the tree can be red
+                // at HEAD. A judgment gate (`shipped_work`, close evidence)
+                // rejects the attempt's own output, and two beads failing it
+                // say nothing about the committed tree.
+                if failures.iter().all(|row| row.gate_command.is_none()) {
+                    continue;
+                }
                 let beads: BTreeSet<&str> =
                     failures.iter().map(|row| row.bead_id.as_str()).collect();
                 if (beads.len() as u64) < config.min_beads {
@@ -1350,6 +1357,46 @@ mod tests {
         let findings = findings_of(&GateRedAtHead, &gate_ctx(workspace.path(), now()));
         let subjects: Vec<&str> = findings.iter().map(|f| f.subject.as_str()).collect();
         assert_eq!(subjects, vec!["gate_0", "gate_1"], "{findings:?}");
+
+        // A judgment gate names no command and is never red at HEAD, however
+        // many beads it rejects (bead-rs, 2026-10-16: two beads failed
+        // `shipped_work` within half an hour).
+        let judged = tempfile::tempdir().expect("tempdir");
+        let path = crate::attempt_history::history_path(
+            judged.path(),
+            &crate::types::BeadId::from("needle-x".to_string()),
+        );
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        let line = |bead: &str, at: &str| {
+            serde_json::json!({
+                "schema_version": 1, "attempt_id": format!("{bead}-{at}"),
+                "recorded_at": at, "worker": "w", "adapter": "a",
+                "outcome": "work_failure", "terminal_reason": "gate:shipped_work",
+                "exit_code": 0, "requested_action": "released", "duration_ms": 1,
+                "failure_summary": "no commits were produced by this attempt",
+            })
+            .to_string()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                line("needle-x", "2026-09-15T20:00:00Z"),
+                line("needle-x", "2026-09-15T20:10:00Z")
+            ),
+        )
+        .expect("journal");
+        let other = crate::attempt_history::history_path(
+            judged.path(),
+            &crate::types::BeadId::from("needle-y".to_string()),
+        );
+        std::fs::create_dir_all(other.parent().expect("parent")).expect("dir");
+        std::fs::write(
+            &other,
+            format!("{}\n", line("needle-y", "2026-09-15T20:20:00Z")),
+        )
+        .expect("journal");
+        assert!(findings_of(&GateRedAtHead, &gate_ctx(judged.path(), now())).is_empty());
     }
 
     #[test]
