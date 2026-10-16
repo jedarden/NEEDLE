@@ -21,6 +21,22 @@
 //!
 //! Nothing here repairs anything. Filing a bead is a report with a tracking
 //! number, which is a different blast radius from changing state.
+//!
+//! # Filing never costs the verdict
+//!
+//! A failure to file or note one finding is recorded as a [`FilingError`] and
+//! the run carries on: the verdict, every other finding and every other bead
+//! still land. From 2026-10-12 to 10-16 one unwritable repeat note — the
+//! finding bead was leased by a worker that was no longer running — turned
+//! every daily factory audit into `audit: no verdict`, so the fleet's health
+//! check reported nothing for five days while gates were red. One bead's
+//! bookkeeping must never be able to do that again.
+//!
+//! The audit writes only under its own identity. When bead-rs refuses a note
+//! because another claimant holds the bead's lease, the refusal is the policy
+//! working: the error text even names the epoch to pass, and presenting it
+//! would be writing with somebody else's fencing token. The finding is
+//! recorded as `filing_blocked` with the holder named instead.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -302,15 +318,124 @@ pub struct FilingSummary {
     pub noted: Vec<BeadId>,
     /// Violations reported and telemetered but not filed, being past budget.
     pub over_budget: usize,
+    /// Findings whose bead could not be filed or noted this run. Each is
+    /// reported beside the verdict; none of them suppresses it.
+    pub errors: Vec<FilingError>,
+}
+
+impl FilingSummary {
+    /// Filing errors that were lease refusals rather than failures.
+    pub fn blocked(&self) -> usize {
+        self.errors
+            .iter()
+            .filter(|error| error.kind == FilingErrorKind::FilingBlocked)
+            .count()
+    }
+}
+
+/// Why a finding's bead was not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilingErrorKind {
+    /// The target bead is leased by another claimant and bead-rs refused the
+    /// write without that claimant's credential. Expected, not a fault: the
+    /// audit never presents a credential it does not own.
+    FilingBlocked,
+    /// Anything else: a store that would not open, an unreadable inventory, a
+    /// create or note the backend refused, a brief that could not be written.
+    FilingFailed,
+}
+
+impl FilingErrorKind {
+    /// The wire name the JSON report and stderr summary share.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FilingErrorKind::FilingBlocked => "filing_blocked",
+            FilingErrorKind::FilingFailed => "filing_failed",
+        }
+    }
+}
+
+/// One finding whose bead could not be filed or noted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FilingError {
+    pub kind: FilingErrorKind,
+    pub rule: String,
+    pub scope: String,
+    pub subject: String,
+    /// The finding's evidence signature, so the error joins to its bead.
+    pub signature: String,
+    /// The existing bead a repeat note was meant for, when there was one.
+    pub bead: Option<String>,
+    /// Who holds the lease, for a `filing_blocked` error whose holder the
+    /// store would name.
+    pub holder: Option<String>,
+    /// The backend's own words, bounded.
+    pub reason: String,
+}
+
+impl FilingError {
+    fn new(
+        kind: FilingErrorKind,
+        finding: &Finding,
+        bead: Option<&BeadId>,
+        holder: Option<String>,
+        reason: String,
+    ) -> Self {
+        let mut reason = reason;
+        truncate_on_char_boundary(&mut reason, NOTE_MAX_BYTES);
+        FilingError {
+            kind,
+            rule: finding.rule.clone(),
+            scope: finding.scope.clone(),
+            subject: finding.subject.clone(),
+            signature: signature(finding),
+            bead: bead.map(|id| id.to_string()),
+            holder,
+            reason,
+        }
+    }
+
+    /// One line for stderr and the human report.
+    pub fn describe(&self) -> String {
+        let target = match (&self.bead, &self.holder) {
+            (Some(bead), Some(holder)) => format!(" on {bead} (lease held by {holder})"),
+            (Some(bead), None) => format!(" on {bead}"),
+            (None, _) => String::new(),
+        };
+        format!(
+            "{}{target}: [{}] {}: {} — {}",
+            self.kind.as_str(),
+            self.rule,
+            self.scope,
+            self.subject,
+            self.reason
+        )
+    }
+}
+
+/// Whether a backend error is a lease refusal: the bead is claimed under a
+/// fenced lease and the write did not present that claim's credential.
+///
+/// Matched on bead-rs's own error wording (`Lease conflict:` /
+/// `Lease error:` / `Claim-epoch credential ...`), which is what reaches the
+/// caller through the CLI store's error context.
+pub fn is_lease_refusal(error_text: &str) -> bool {
+    error_text.contains("Lease conflict")
+        || error_text.contains("Lease error")
+        || error_text.contains("Claim-epoch credential")
 }
 
 /// Apply one planned filing to an already-opened store.
+///
+/// Never fails the run. A refused create or note becomes a [`FilingError`] on
+/// `summary`, and the caller moves on to the next finding.
 pub async fn apply(
     store: &dyn BeadStore,
     planned: &PlannedFiling,
     at: DateTime<Utc>,
     summary: &mut FilingSummary,
-) -> Result<()> {
+) {
     match &planned.action {
         Filing::Create => {
             let labels = labels_for(&planned.finding);
@@ -319,26 +444,62 @@ pub async fn apply(
                 "an audit bead must never carry the human label"
             );
             let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-            let id = store
+            match store
                 .create_bead(
                     &title_for(&planned.finding),
                     &body_for(&planned.finding, planned.escalation.as_deref()),
                     &label_refs,
                 )
                 .await
-                .with_context(|| format!("failed to file a bead for {}", planned.finding.rule))?;
-            summary.created.push(id);
+            {
+                Ok(id) => summary.created.push(id),
+                Err(error) => summary.errors.push(FilingError::new(
+                    FilingErrorKind::FilingFailed,
+                    &planned.finding,
+                    None,
+                    None,
+                    format!("failed to file a bead: {error:#}"),
+                )),
+            }
         }
-        Filing::Note(id) => {
-            store
-                .append_notes(id, &repeat_note(&planned.finding, at))
-                .await
-                .with_context(|| format!("failed to note the repeat on bead {id}"))?;
-            summary.noted.push(id.clone());
-        }
+        Filing::Note(id) => match store
+            .append_notes(id, &repeat_note(&planned.finding, at))
+            .await
+        {
+            Ok(()) => summary.noted.push(id.clone()),
+            Err(error) => {
+                let text = format!("{error:#}");
+                // A lease refusal is answered by naming the holder, never by
+                // retrying with a credential: the one bead-rs suggests is the
+                // claimant's, and this process is not the claimant.
+                let error = if is_lease_refusal(&text) {
+                    let holder = store
+                        .show(id)
+                        .await
+                        .ok()
+                        .and_then(|bead| bead.assignee)
+                        .filter(|holder| !holder.trim().is_empty());
+                    FilingError::new(
+                        FilingErrorKind::FilingBlocked,
+                        &planned.finding,
+                        Some(id),
+                        holder,
+                        text,
+                    )
+                } else {
+                    FilingError::new(
+                        FilingErrorKind::FilingFailed,
+                        &planned.finding,
+                        Some(id),
+                        None,
+                        format!("failed to note the repeat: {text}"),
+                    )
+                };
+                summary.errors.push(error);
+            }
+        },
         Filing::OverBudget => summary.over_budget += 1,
     }
-    Ok(())
 }
 
 /// File every violation in `report` into the store that owns it.
@@ -347,7 +508,12 @@ pub async fn apply(
 /// signatures once, plans the whole run against a single shared budget, and
 /// applies. The budget is per run rather than per store, so a noisy workspace
 /// cannot spend another one's allowance.
-pub async fn file_report(ctx: &AuditContext, report: &AuditReport) -> Result<FilingSummary> {
+///
+/// Infallible by design: a store that will not open or an inventory that will
+/// not read costs the findings that belong to it — each recorded as a
+/// [`FilingError`] — and nothing else. Those findings are kept out of the
+/// plan, so a store nobody could read never spends the shared budget.
+pub async fn file_report(ctx: &AuditContext, report: &AuditReport) -> FilingSummary {
     let home = &ctx.config.audit.home_workspace;
     let violations: Vec<&Finding> = report
         .findings
@@ -356,33 +522,57 @@ pub async fn file_report(ctx: &AuditContext, report: &AuditReport) -> Result<Fil
         .collect();
 
     // Open each owning store once and read its signatures once.
-    let mut stores = BTreeMap::new();
+    type OpenStore = (std::sync::Arc<dyn BeadStore>, BTreeMap<String, BeadId>);
+    let mut stores: BTreeMap<PathBuf, std::result::Result<OpenStore, String>> = BTreeMap::new();
     for finding in &violations {
         let path = owning_workspace(finding, &ctx.workspaces, home);
         if stores.contains_key(&path) {
             continue;
         }
-        let store = super::workspace_store(&path)
-            .with_context(|| format!("failed to open the bead store at {}", path.display()))?;
-        let signatures = existing_signatures(store.as_ref()).await?;
-        stores.insert(path, (store, signatures));
+        let opened = match super::workspace_store(&path) {
+            Ok(store) => match existing_signatures(store.as_ref()).await {
+                Ok(signatures) => Ok((store, signatures)),
+                Err(error) => Err(format!("{error:#}")),
+            },
+            Err(error) => Err(format!(
+                "failed to open the bead store at {}: {error:#}",
+                path.display()
+            )),
+        };
+        stores.insert(path, opened);
+    }
+
+    let mut summary = FilingSummary::default();
+    let mut findings: Vec<Finding> = Vec::new();
+    for finding in &violations {
+        let path = owning_workspace(finding, &ctx.workspaces, home);
+        match stores.get(&path) {
+            Some(Ok(_)) => findings.push((*finding).clone()),
+            Some(Err(reason)) => summary.errors.push(FilingError::new(
+                FilingErrorKind::FilingFailed,
+                finding,
+                None,
+                None,
+                reason.clone(),
+            )),
+            None => {}
+        }
     }
 
     let lookup = |finding: &Finding| -> Option<BeadId> {
         let path = owning_workspace(finding, &ctx.workspaces, home);
-        stores
-            .get(&path)
-            .and_then(|(_, signatures)| signatures.get(&signature(finding)).cloned())
+        match stores.get(&path) {
+            Some(Ok((_, signatures))) => signatures.get(&signature(finding)).cloned(),
+            _ => None,
+        }
     };
-
-    let findings: Vec<Finding> = violations
-        .iter()
-        .map(|finding| (*finding).clone())
-        .collect();
     let mut planned = plan(&findings, &lookup, ctx.config.audit.max_beads_per_run);
 
     // An escalating finding gets its brief before its bead, so the bead names
-    // a path that is already on disk rather than one it hopes for (N-T60).
+    // a path that is already on disk rather than one it hopes for (N-T60). A
+    // brief that cannot be written is reported, and the bead is still filed
+    // without naming one: a bead with no brief is worse than one with a
+    // brief, and much better than no bead at all.
     let brief_dir = super::escalation::default_brief_dir(&ctx.config);
     for item in planned
         .iter_mut()
@@ -390,27 +580,31 @@ pub async fn file_report(ctx: &AuditContext, report: &AuditReport) -> Result<Fil
     {
         let workspace = owning_workspace(&item.finding, &ctx.workspaces, home);
         let stalled = super::factory::stalled_loop_beads(ctx, &workspace);
-        item.escalation = Some(super::escalation::write_brief(
-            &brief_dir,
-            &item.finding,
-            &stalled,
-            ctx.collected_at,
-        )?);
+        match super::escalation::write_brief(&brief_dir, &item.finding, &stalled, ctx.collected_at)
+        {
+            Ok(path) => item.escalation = Some(path),
+            Err(error) => summary.errors.push(FilingError::new(
+                FilingErrorKind::FilingFailed,
+                &item.finding,
+                None,
+                None,
+                format!("escalation brief not written: {error:#}"),
+            )),
+        }
     }
 
-    let mut summary = FilingSummary::default();
     for item in &planned {
         // Resolved from the finding rather than from a parallel index: `plan`
         // drops intra-run duplicate signatures, so a positional index into
         // `violations` can run short and file a finding into another
         // workspace's store.
         let path = owning_workspace(&item.finding, &ctx.workspaces, home);
-        let Some((store, _)) = stores.get(&path) else {
+        let Some(Ok((store, _))) = stores.get(&path) else {
             continue;
         };
-        apply(store.as_ref(), item, ctx.collected_at, &mut summary).await?;
+        apply(store.as_ref(), item, ctx.collected_at, &mut summary).await;
     }
-    Ok(summary)
+    summary
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -458,6 +652,12 @@ mod tests {
         created: Mutex<Vec<(String, String, Vec<String>)>>,
         notes: Mutex<Vec<(BeadId, String)>>,
         next: Mutex<usize>,
+        /// Bead ids whose notes the store refuses, with the refusal text —
+        /// the shape of a bead leased by another claimant.
+        refuse_notes: Mutex<BTreeMap<String, String>>,
+        /// Every write attempted against the store, refused or not, so a
+        /// test can prove nothing retried or reached for a credential.
+        attempts: Mutex<Vec<String>>,
     }
 
     impl MemoryStore {
@@ -538,6 +738,18 @@ mod tests {
         }
 
         async fn append_notes(&self, id: &BeadId, note: &str) -> Result<()> {
+            self.attempts
+                .lock()
+                .expect("attempts lock")
+                .push(format!("append_notes {id}"));
+            if let Some(refusal) = self
+                .refuse_notes
+                .lock()
+                .expect("refuse lock")
+                .get(id.as_ref())
+            {
+                anyhow::bail!("{refusal}");
+            }
             self.notes
                 .lock()
                 .expect("notes lock")
@@ -546,6 +758,10 @@ mod tests {
         }
 
         async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
+            self.attempts
+                .lock()
+                .expect("attempts lock")
+                .push(format!("create_bead {title}"));
             let mut next = self.next.lock().expect("next lock");
             *next += 1;
             let id = BeadId::from(format!("audit-{next}"));
@@ -687,9 +903,7 @@ mod tests {
         );
         let mut summary = FilingSummary::default();
         for item in &planned {
-            apply(&store, item, now(), &mut summary)
-                .await
-                .expect("filing applies");
+            apply(&store, item, now(), &mut summary).await;
         }
         assert_eq!(summary.created.len(), 1, "one bead filed");
         assert!(summary.noted.is_empty());
@@ -717,9 +931,7 @@ mod tests {
         );
         let mut summary = FilingSummary::default();
         for item in &planned {
-            apply(&store, item, now(), &mut summary)
-                .await
-                .expect("filing applies");
+            apply(&store, item, now(), &mut summary).await;
         }
         assert!(summary.created.is_empty(), "no second bead");
         assert_eq!(summary.noted.len(), 1, "the existing bead gained a note");
@@ -738,9 +950,7 @@ mod tests {
         let finding = violation("F1_WORKSPACE_NO_VERIFIED_CLOSURES", "NEEDLE", "NEEDLE");
         let planned = plan(std::slice::from_ref(&finding), &|_| None, 3);
         let mut summary = FilingSummary::default();
-        apply(&store, &planned[0], now(), &mut summary)
-            .await
-            .expect("filing applies");
+        apply(&store, &planned[0], now(), &mut summary).await;
 
         let (title, body, labels) = store.created()[0].clone();
         assert!(title.contains("F1_WORKSPACE_NO_VERIFIED_CLOSURES"));
@@ -824,9 +1034,7 @@ mod tests {
         planned[0].escalation = Some(brief.clone());
 
         let mut summary = FilingSummary::default();
-        apply(&store, &planned[0], now(), &mut summary)
-            .await
-            .expect("filing applies");
+        apply(&store, &planned[0], now(), &mut summary).await;
 
         let (_, body, labels) = store.created()[0].clone();
         assert!(
@@ -864,5 +1072,135 @@ mod tests {
         // Truncation never splits a character.
         assert!(std::str::from_utf8(note.as_bytes()).is_ok());
         assert!(note.ends_with('…'));
+    }
+
+    /// The bead-rs refusal the 2026-10-12..16 audits died on, verbatim in
+    /// shape: the finding bead is leased by a worker that is not running.
+    const LEASE_REFUSAL: &str = "backend 'bead-rs' operation 'append_notes' exited with code 4: \
+        bead: Lease conflict: Claim-epoch credential required: issue needle-held is claimed at \
+        claim epoch 15; pass --fencing-token 15 (the current epoch is projected by \
+        `bead show needle-held --json`)";
+
+    /// needle-39b6d6e4: a repeat note refused on a leased bead is recorded as
+    /// `filing_blocked` naming the holder, is attempted exactly once with no
+    /// credential, and never stops the other findings from filing.
+    #[tokio::test]
+    async fn a_lease_refused_note_is_filing_blocked_and_the_run_carries_on() {
+        let held = violation("F1_WORKSPACE_NO_VERIFIED_CLOSURES", "NEEDLE", "NEEDLE");
+        let fresh = violation("F4_CI_RED", "NEEDLE", "needle-ci");
+        let noted = violation("F4_CI_RED", "SEAM", "seam-ci");
+
+        let mut held_bead = bead(
+            "needle-held",
+            BeadStatus::InProgress,
+            &[&signature_label(&held)],
+        );
+        held_bead.assignee = Some("codex-luna-cgov-03".to_string());
+        let store = MemoryStore::with(vec![
+            held_bead,
+            bead("needle-open", BeadStatus::Open, &[&signature_label(&noted)]),
+        ]);
+        store
+            .refuse_notes
+            .lock()
+            .expect("refuse lock")
+            .insert("needle-held".to_string(), LEASE_REFUSAL.to_string());
+
+        let existing = existing_signatures(&store).await.expect("inventory reads");
+        // The held finding sorts first, so a fatal refusal would have stopped
+        // both findings after it.
+        let findings = vec![held.clone(), fresh, noted];
+        let planned = plan(
+            &findings,
+            &|finding| existing.get(&signature(finding)).cloned(),
+            3,
+        );
+        let mut summary = FilingSummary::default();
+        for item in &planned {
+            apply(&store, item, now(), &mut summary).await;
+        }
+
+        assert_eq!(summary.created.len(), 1, "the new finding still filed");
+        assert_eq!(
+            summary.noted,
+            vec![BeadId::from("needle-open".to_string())],
+            "the unheld repeat still noted"
+        );
+        assert_eq!(summary.errors.len(), 1);
+        assert_eq!(summary.blocked(), 1);
+        let error = &summary.errors[0];
+        assert_eq!(error.kind, FilingErrorKind::FilingBlocked);
+        assert_eq!(error.kind.as_str(), "filing_blocked");
+        assert_eq!(error.bead.as_deref(), Some("needle-held"));
+        assert_eq!(
+            error.holder.as_deref(),
+            Some("codex-luna-cgov-03"),
+            "the holder is named"
+        );
+        assert_eq!(error.signature, signature(&held));
+        assert!(error
+            .describe()
+            .contains("lease held by codex-luna-cgov-03"));
+
+        // One attempt on the held bead, and nothing else touched it: no retry
+        // with the epoch the refusal suggests, no claim, no release.
+        let attempts = store.attempts.lock().expect("attempts lock").clone();
+        assert_eq!(
+            attempts
+                .iter()
+                .filter(|attempt| attempt.as_str() == "append_notes needle-held")
+                .count(),
+            1,
+            "the refused note is never retried: {attempts:?}"
+        );
+        assert!(
+            !store
+                .notes()
+                .iter()
+                .any(|(id, _)| id.as_ref() == "needle-held"),
+            "nothing was written to the held bead"
+        );
+    }
+
+    /// Any other refusal is `filing_failed`, still non-fatal, and names no
+    /// holder it does not know.
+    #[tokio::test]
+    async fn a_non_lease_note_failure_is_filing_failed() {
+        let finding = violation("F4_CI_RED", "NEEDLE", "needle-ci");
+        let store = MemoryStore::with(vec![bead(
+            "needle-x",
+            BeadStatus::Open,
+            &[&signature_label(&finding)],
+        )]);
+        store
+            .refuse_notes
+            .lock()
+            .expect("refuse lock")
+            .insert("needle-x".to_string(), "database is locked".to_string());
+
+        let planned = plan(
+            std::slice::from_ref(&finding),
+            &|_| Some(BeadId::from("needle-x".to_string())),
+            3,
+        );
+        let mut summary = FilingSummary::default();
+        apply(&store, &planned[0], now(), &mut summary).await;
+
+        assert_eq!(summary.errors.len(), 1);
+        assert_eq!(summary.errors[0].kind, FilingErrorKind::FilingFailed);
+        assert_eq!(summary.errors[0].holder, None);
+        assert_eq!(summary.blocked(), 0);
+        assert!(summary.errors[0].reason.contains("database is locked"));
+    }
+
+    #[test]
+    fn lease_refusals_are_recognised_by_bead_rs_wording() {
+        assert!(is_lease_refusal(LEASE_REFUSAL));
+        assert!(is_lease_refusal("bead: Lease error: lease expired"));
+        assert!(is_lease_refusal(
+            "Claim-epoch credential mismatch: issue x is claimed at claim epoch 3, not 2"
+        ));
+        assert!(!is_lease_refusal("database is locked"));
+        assert!(!is_lease_refusal("Issue not found: needle-x"));
     }
 }

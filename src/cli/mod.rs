@@ -1020,26 +1020,35 @@ fn cmd_audit(
 /// One audit run: collect, reconcile, report, and optionally file and emit.
 ///
 /// Filing runs before rendering so the printed report is the same one the
-/// telemetry describes, and so a filing failure fails the run rather than
-/// leaving an operator with a clean-looking report and no bead.
+/// telemetry describes. A bead that could not be filed or noted is reported
+/// in the output and telemetry as a filing error and never costs the run its
+/// verdict (needle-39b6d6e4): from 2026-10-12 to 10-16 one lease-refused note
+/// turned every daily audit into "no verdict" and hid every finding with it.
 async fn audit_run(
     json: bool,
     root: Option<PathBuf>,
     emit_telemetry: bool,
     file_beads: bool,
 ) -> Result<i32> {
-    let (ctx, report) = audit::run_audit(root).await?;
+    let (ctx, mut report) = audit::run_audit(root).await?;
 
     let mut filed = 0usize;
     let mut noted = 0usize;
     if file_beads {
-        let summary = audit::filing::file_report(&ctx, &report).await?;
+        let summary = audit::filing::file_report(&ctx, &report).await;
         filed = summary.created.len();
         noted = summary.noted.len();
         eprintln!(
-            "audit: filed {filed} bead(s), noted {noted} repeat(s), {} withheld by the per-run budget",
-            summary.over_budget
+            "audit: filed {filed} bead(s), noted {noted} repeat(s), {} withheld by the per-run budget, \
+             {} filing error(s) ({} lease-blocked)",
+            summary.over_budget,
+            summary.errors.len(),
+            summary.blocked(),
         );
+        for error in &summary.errors {
+            eprintln!("audit: {}", error.describe());
+        }
+        report.filing_errors = summary.errors;
     }
 
     if json {

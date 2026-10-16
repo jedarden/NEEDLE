@@ -562,6 +562,13 @@ pub struct AuditReport {
     /// Naming the gap beside the verdict is what keeps "no findings" from
     /// being read as "everything was checked and everything is fine".
     pub inputs_unavailable: Vec<String>,
+    /// Findings whose bead `--file-beads` could not file or note this run.
+    ///
+    /// Empty until filing runs. Reported beside the verdict and never in
+    /// place of it: the exit code is a function of `findings` alone, so one
+    /// unwritable bead can no longer cost the whole run its verdict
+    /// (needle-39b6d6e4).
+    pub filing_errors: Vec<filing::FilingError>,
 }
 
 /// Run `predicates` over `ctx` and collect their findings.
@@ -592,6 +599,7 @@ pub fn run(ctx: &AuditContext, predicates: &[Box<dyn Predicate>]) -> Result<Audi
         predicates_run,
         findings,
         inputs_unavailable: unavailable_inputs(ctx),
+        filing_errors: Vec::new(),
     })
 }
 
@@ -689,6 +697,7 @@ pub fn render_human(report: &AuditReport) -> String {
         out.push_str(&format!(
             "reachability audit: no unreachable work found ({checked})\n"
         ));
+        out.push_str(&render_filing_errors(report));
         return out;
     }
     out.push_str(&unread);
@@ -730,6 +739,22 @@ pub fn render_human(report: &AuditReport) -> String {
         }
     }
 
+    out.push_str(&render_filing_errors(report));
+    out
+}
+
+/// The filing-error block of the human report: empty when every bead landed.
+fn render_filing_errors(report: &AuditReport) -> String {
+    if report.filing_errors.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\nfiling errors ({} — the findings above stand; only these beads were not written):\n",
+        report.filing_errors.len()
+    );
+    for error in &report.filing_errors {
+        out.push_str(&format!("    {}\n", error.describe()));
+    }
     out
 }
 
@@ -761,6 +786,7 @@ pub fn render_json(report: &AuditReport) -> Result<String> {
         },
         "findings": report.findings,
         "inputs_unavailable": report.inputs_unavailable,
+        "filing_errors": report.filing_errors,
         "exit_code": exit_code(report),
     });
     Ok(serde_json::to_string_pretty(&value)?)
@@ -805,12 +831,19 @@ pub fn audit_events(
         .filter(|finding| finding.severity == Severity::Violation)
         .count();
 
+    let filing_blocked = report
+        .filing_errors
+        .iter()
+        .filter(|error| error.kind == filing::FilingErrorKind::FilingBlocked)
+        .count();
     events.push(EventKind::AuditCompleted {
         predicates_run: report.predicates_run.len(),
         violation_findings: violations,
         informational_findings: report.findings.len() - violations,
         beads_filed,
         beads_noted,
+        filing_errors: report.filing_errors.len(),
+        filing_blocked,
         exit_code: exit_code(report),
     });
     events
@@ -1061,6 +1094,69 @@ mod tests {
         assert_eq!(value["workspaces_discovered"], 1);
         assert_eq!(value["findings"][0]["severity"], "violation");
         assert_eq!(value["findings"][0]["count"], 144);
+        assert_eq!(
+            value["filing_errors"],
+            serde_json::json!([]),
+            "the key is always present"
+        );
+    }
+
+    /// needle-39b6d6e4: a filing error is reported in the JSON, the human
+    /// report and the completion event, and changes nothing about the exit
+    /// code — findings decide that, not bookkeeping.
+    #[test]
+    fn a_filing_error_is_reported_beside_the_verdict_not_instead_of_it() {
+        use crate::telemetry::EventKind;
+
+        let ctx = test_context();
+        let mut report = run(
+            &ctx,
+            &[Box::new(Fixed::reporting(
+                "F4_CI_RED",
+                vec![violation("F4_CI_RED", "alpha", 2)],
+            ))],
+        )
+        .unwrap();
+        report.filing_errors.push(filing::FilingError {
+            kind: filing::FilingErrorKind::FilingBlocked,
+            rule: "F4_CI_RED".to_string(),
+            scope: "alpha".to_string(),
+            subject: "subject".to_string(),
+            signature: "0123456789abcdef".to_string(),
+            bead: Some("needle-held".to_string()),
+            holder: Some("codex-luna-cgov-03".to_string()),
+            reason: "Lease conflict: Claim-epoch credential required".to_string(),
+        });
+
+        assert_eq!(exit_code(&report), 1, "the finding still decides the exit");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&report).unwrap()).unwrap();
+        assert_eq!(value["exit_code"], 1);
+        assert_eq!(value["filing_errors"][0]["kind"], "filing_blocked");
+        assert_eq!(value["filing_errors"][0]["holder"], "codex-luna-cgov-03");
+        assert_eq!(value["findings"][0]["rule"], "F4_CI_RED");
+
+        let human = render_human(&report);
+        assert!(human.contains("F4_CI_RED"), "the finding is still printed");
+        assert!(
+            human.contains("filing_blocked on needle-held (lease held by codex-luna-cgov-03)"),
+            "{human}"
+        );
+
+        match audit_events(&report, 0, 0).last() {
+            Some(EventKind::AuditCompleted {
+                filing_errors,
+                filing_blocked,
+                exit_code,
+                ..
+            }) => {
+                assert_eq!(*filing_errors, 1);
+                assert_eq!(*filing_blocked, 1);
+                assert_eq!(*exit_code, 1);
+            }
+            other => panic!("expected audit.completed last, got {other:?}"),
+        }
     }
 
     /// The emission contract: one `audit.finding` per finding — informational
@@ -1116,8 +1212,12 @@ mod tests {
                 informational_findings,
                 beads_filed,
                 beads_noted,
+                filing_errors,
+                filing_blocked,
                 exit_code,
             } => {
+                assert_eq!(*filing_errors, 0);
+                assert_eq!(*filing_blocked, 0);
                 assert_eq!(*predicates_run, 2);
                 assert_eq!(*violation_findings, 2);
                 assert_eq!(*informational_findings, 1);
@@ -1154,8 +1254,12 @@ mod tests {
                 informational_findings,
                 beads_filed,
                 beads_noted,
+                filing_errors,
+                filing_blocked,
                 exit_code,
             } => {
+                assert_eq!(*filing_errors, 0);
+                assert_eq!(*filing_blocked, 0);
                 assert_eq!(*predicates_run, 1, "what the run actually checked");
                 assert_eq!(*violation_findings, 0);
                 assert_eq!(*informational_findings, 0);

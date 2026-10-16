@@ -801,6 +801,12 @@ pub enum EventKind {
         informational_findings: usize,
         beads_filed: usize,
         beads_noted: usize,
+        /// Findings whose bead could not be filed or noted. Never part of the
+        /// exit code: a filing error is reported beside the verdict.
+        filing_errors: usize,
+        /// The subset of `filing_errors` refused because another claimant
+        /// holds the bead's lease.
+        filing_blocked: usize,
         exit_code: i32,
     },
     /// Pluck ordering degraded due to large queue size.
@@ -2826,6 +2832,8 @@ impl EventKind {
                 informational_findings,
                 beads_filed,
                 beads_noted,
+                filing_errors,
+                filing_blocked,
                 exit_code,
             } => {
                 serde_json::json!({
@@ -2834,6 +2842,8 @@ impl EventKind {
                     "informational_findings": informational_findings,
                     "beads_filed": beads_filed,
                     "beads_noted": beads_noted,
+                    "filing_errors": filing_errors,
+                    "filing_blocked": filing_blocked,
                     "exit_code": exit_code,
                 })
             }

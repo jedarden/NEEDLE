@@ -389,7 +389,13 @@ version = 1
 # +4 LOOM client contracts (needle-0ea049d0): request auth/query/body shape,
 # same-worker 409 claim recovery vs foreign contention, token rejection and
 # rotation recovery, and unsupported contract version terminal failure.
-max_tests = 4203
+# +4 audit filing-error contracts (needle-39b6d6e4): a lease-refused repeat
+# note is filing_blocked naming the holder, attempted once and never retried
+# with a credential, while the run files every other finding; a non-lease
+# refusal is filing_failed; bead-rs lease wording is recognised; and a filing
+# error is reported beside the verdict without changing the exit code. They
+# drive the private apply/report seams against an in-memory store.
+max_tests = 4207
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

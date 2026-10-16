@@ -167,9 +167,9 @@ from.
   stream that disagreed with the printed report would be worse than none.
 - `audit.completed` — One `needle audit` run finished. Fields:
   `predicates_run`, `violation_findings`, `informational_findings`,
-  `beads_filed`, `beads_noted`, `exit_code`. `predicates_run` is what the run
-  actually checked, so a reader can tell a clean estate from an audit that
-  reconciled nothing.
+  `beads_filed`, `beads_noted`, `filing_errors`, `filing_blocked`, `exit_code`.
+  `predicates_run` is what the run actually checked, so a reader can tell a
+  clean estate from an audit that reconciled nothing.
 
 ### Configuration
 - `config.warning` — Configuration validation warning
@@ -815,6 +815,8 @@ Exactly one per `needle audit` run under `--emit-telemetry`, after every
 | `informational_findings`  | integer | always  | Findings of severity `informational`.                                        |
 | `beads_filed`             | integer | always  | Beads created this run by `--file-beads`. Zero without that flag.            |
 | `beads_noted`             | integer | always  | Existing beads that gained a repeat note instead of a duplicate.             |
+| `filing_errors`           | integer | always  | Findings whose bead could not be filed or noted this run (needle-39b6d6e4). Reported beside the verdict, never part of the exit code; each one is listed under `filing_errors` in the JSON report and on stderr. |
+| `filing_blocked`          | integer | always  | The subset of `filing_errors` refused because another claimant holds the bead's lease. The audit never writes with another claimant's fencing token; the holder is named in the report. |
 | `exit_code`               | integer | always  | 0 clean, 1 findings, 2 no verdict. Mirrors the process exit code.            |
 
 ---
