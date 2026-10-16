@@ -1032,15 +1032,41 @@ mod tests {
     /// The NEEDLE attempt history the October 2026 red gate left behind,
     /// as (recorded_at, bead, outcome, terminal_reason): `gate_1` (`cargo
     /// test --lib`) red at pristine HEAD, every attempt failing it whatever
-    /// its change. The two `needle-test` closures are real rows too — a test
-    /// fixture's, recorded into the live journals — and they are why F6
-    /// counts from the newest closure rather than demanding an empty window.
+    /// its change, copied row for row from the live journals for
+    /// 2026-10-08T18:00..10-14 (the 10-12 timeouts after 08:05 omitted). The
+    /// four `needle-test` closures are real rows too — a test fixture's,
+    /// recorded into the live journals — and they are why F6 counts from the
+    /// newest closure rather than demanding an empty window.
     const OCTOBER_2026_GATE_1: &[(&str, &str, &str, &str)] = &[
         (
-            "2026-10-08T18:05:43.836Z",
-            "needle-closed",
+            "2026-10-08T18:05:43.833Z",
+            "needle-test",
             "verified_success",
             "",
+        ),
+        (
+            "2026-10-08T18:05:43.836Z",
+            "needle-test",
+            "verified_success",
+            "",
+        ),
+        (
+            "2026-10-08T18:39:34.779Z",
+            "needle-1a4288f3",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-08T19:12:41.444Z",
+            "needle-1a4288f3",
+            "work_failure",
+            "gate:gate_1",
+        ),
+        (
+            "2026-10-08T19:49:41.922Z",
+            "needle-1a4288f3",
+            "work_failure",
+            "gate:gate_1",
         ),
         (
             "2026-10-09T19:49:32.292Z",
