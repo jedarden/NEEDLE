@@ -1569,9 +1569,20 @@ mod tests {
         use crate::telemetry::Telemetry;
         use std::os::unix::fs::PermissionsExt;
 
-        let fixture_dir = std::env::var_os("NEEDLE_LOOM_CONFORMANCE_DIR")
-            .map(std::path::PathBuf::from)
-            .expect("CI/local conformance replay requires NEEDLE_LOOM_CONFORMANCE_DIR");
+        // The canonical fixtures live in LOOM, not in this repository. needle-ci
+        // clones LOOM, checks the fixtures are present, and exports this variable,
+        // so CI always runs the replay. A clean extraction used by an attempt gate
+        // has no LOOM checkout; failing there made `cargo test --lib` red at
+        // pristine HEAD and failed every NEEDLE attempt (needle-21c9b322).
+        let Some(fixture_dir) =
+            std::env::var_os("NEEDLE_LOOM_CONFORMANCE_DIR").map(std::path::PathBuf::from)
+        else {
+            eprintln!(
+                "skipping LOOM conformance replay: NEEDLE_LOOM_CONFORMANCE_DIR is unset \
+                 (needle-ci sets it from a LOOM checkout)"
+            );
+            return;
+        };
         let claude: serde_json::Value =
             serde_json::from_slice(&std::fs::read(fixture_dir.join("claude_print.json")).unwrap())
                 .unwrap();
