@@ -977,6 +977,7 @@ mod tests {
             ci_templates: BTreeMap::new(),
             beads: BTreeMap::new(),
             attempts: BTreeMap::new(),
+            tree_drift: BTreeMap::new(),
         }
     }
 
@@ -1938,16 +1939,19 @@ mod tests {
                 "F3_UNCOSTED_TIMEOUTS",
                 "F4_CI_RED",
                 "F5_LEARNING_LOOP_STALLED",
+                "F6_GATE_RED_AT_HEAD",
                 "I_CHECKLIST_DRIFT",
             ]
         );
+        let mut registered = ids.clone();
+        registered.push(crate::cli::audit::tree_drift::F7_STALE_TREE_DRIFT);
         assert_eq!(
             crate::cli::audit::registry()
                 .iter()
                 .map(|p| p.id())
                 .collect::<Vec<_>>(),
-            ids,
-            "the registry is the factory group"
+            registered,
+            "the registry is the factory group plus the checkout-drift rule"
         );
 
         // The healthy-state case every predicate inherits: an estate with
@@ -1956,6 +1960,6 @@ mod tests {
         let report = run(&ctx(), &predicates()).expect("audit runs");
         assert!(report.findings.is_empty(), "{:?}", report.findings);
         assert_eq!(exit_code(&report), 0);
-        assert_eq!(report.predicates_run.len(), 6);
+        assert_eq!(report.predicates_run.len(), 7);
     }
 }

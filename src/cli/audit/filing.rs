@@ -73,9 +73,12 @@ pub const OPERATIONAL_DEFECT_LABEL: &str = "operational-defect";
 ///
 /// `F6_GATE_RED_AT_HEAD` is: NEEDLE's own gate_1 was red at pristine HEAD
 /// for days in October 2026 while its only fix waited as a `human`-held
-/// proposal nobody looked at.
+/// proposal nobody looked at. So is `F7_STALE_TREE_DRIFT`: a shared checkout
+/// whose tree lags HEAD turns every pathspec commit from it into a silent
+/// revert of somebody else's work.
 pub fn is_operational_defect(finding: &Finding) -> bool {
     finding.rule == super::factory::F6_GATE_RED_AT_HEAD
+        || finding.rule == super::tree_drift::F7_STALE_TREE_DRIFT
 }
 
 /// The priority a filed bead is created at, when it is not the backend
@@ -141,6 +144,12 @@ pub fn labels_for(finding: &Finding) -> Vec<String> {
     if is_operational_defect(finding) {
         labels.push(OPERATIONAL_DEFECT_LABEL.to_string());
     }
+    // A drifted shared checkout is repaired by salvaging other workers'
+    // in-flight edits first; a fleet worker told to "bring the paths back to
+    // HEAD" would destroy them. Keep it P0 and visible, but out of Pluck.
+    if finding.rule == super::tree_drift::F7_STALE_TREE_DRIFT && !is_escalating(finding) {
+        labels.push(ESCALATION_LABEL.to_string());
+    }
     labels
 }
 
@@ -183,6 +192,15 @@ pub fn body_for(finding: &Finding, escalation: Option<&Path>) -> String {
              It is not a proposal and needs no admission: the fleet's own machinery is\n\
              failing every change put in front of it, and every attempt dispatched\n\
              until it is fixed is spent for nothing.\n"
+        ));
+    }
+    if finding.rule == super::tree_drift::F7_STALE_TREE_DRIFT {
+        body.push_str(&format!(
+            "\nIt also carries `{ESCALATION_LABEL}`, so no fleet worker claims it: the stale\n\
+             paths may sit under other workers' uncommitted edits, which have to be\n\
+             salvaged before anything is brought back to HEAD. Never repair it by\n\
+             moving the ref again, and never by `git stash`/`reset --hard` in the\n\
+             shared checkout.\n"
         ));
     }
     if let Some(path) = escalation {

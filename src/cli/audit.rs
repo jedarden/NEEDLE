@@ -64,6 +64,7 @@ use crate::types::Bead;
 pub mod escalation;
 pub mod factory;
 pub mod filing;
+pub mod tree_drift;
 
 /// The message an empty registry fails with. Worded for an operator who has
 /// just been told the estate is fine by a command that checked nothing.
@@ -216,6 +217,9 @@ pub struct AuditContext {
     /// Per-bead attempt journals per workspace name, trimmed to the
     /// `audit.gate_red` window (F6).
     pub attempts: BTreeMap<String, Collected<Vec<factory::AttemptRow>>>,
+    /// Each workspace's tree checked against its own HEAD (F7). `None` for a
+    /// workspace with no commit to drift from.
+    pub tree_drift: BTreeMap<String, Collected<Option<tree_drift::TreeDrift>>>,
 }
 
 /// One collected input, and what to say when it could not be collected.
@@ -409,6 +413,20 @@ pub async fn collect_context(config: Config, root: Option<PathBuf>) -> Result<Au
         &workspaces,
         collected_at - chrono::Duration::hours(config.audit.gate_red.window_hours),
     );
+    let tree_drift = workspaces
+        .iter()
+        .map(|workspace| {
+            let collected =
+                match tree_drift::collect(&workspace.path, config.audit.tree_drift.history_commits)
+                {
+                    Ok(drift) => Collected::Available(drift),
+                    Err(error) => {
+                        Collected::Unavailable(format!("checkout tree not judged: {error:#}"))
+                    }
+                };
+            (workspace.name.clone(), collected)
+        })
+        .collect();
 
     Ok(AuditContext {
         root,
@@ -421,6 +439,7 @@ pub async fn collect_context(config: Config, root: Option<PathBuf>) -> Result<Au
         ci_templates,
         beads,
         attempts,
+        tree_drift,
     })
 }
 
@@ -562,7 +581,9 @@ pub trait Predicate {
 /// nothing must not be able to say "no unreachable work found" — that is the
 /// fail-open shape this whole design exists to refuse.
 pub fn registry() -> Vec<Box<dyn Predicate>> {
-    factory::predicates()
+    let mut predicates = factory::predicates();
+    predicates.push(Box::new(tree_drift::StaleTreeDrift));
+    predicates
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -653,7 +674,12 @@ fn unavailable_inputs(ctx: &AuditContext) -> Vec<String> {
             .unavailable_reason()
             .map(|reason| format!("{scope}: {reason}"))
     });
-    let mut out: Vec<String> = ci.chain(beads).chain(attempts).collect();
+    let trees = ctx.tree_drift.iter().filter_map(|(scope, collected)| {
+        collected
+            .unavailable_reason()
+            .map(|reason| format!("{scope}: {reason}"))
+    });
+    let mut out: Vec<String> = ci.chain(beads).chain(attempts).chain(trees).collect();
     out.sort();
     out.dedup();
     out
@@ -958,6 +984,7 @@ mod tests {
             ci_templates: BTreeMap::new(),
             beads: BTreeMap::new(),
             attempts: BTreeMap::new(),
+            tree_drift: BTreeMap::new(),
         }
     }
 

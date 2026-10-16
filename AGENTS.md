@@ -50,6 +50,22 @@ source, prompts, scripts, tests, or documentation.
   cannot see the directory. A startup sweep is the backstop (`needle-f40a5de7`).
 - Do not use destructive Git operations (`reset --hard`, forced checkout,
   forced push) to resolve unrelated changes.
+- **Never advance a branch ref without its tree.** In a shared checkout, do
+  not move `main` (or any branch) with `git update-ref`, `git reset --soft`,
+  or `git branch -f`. Each moves the ref and leaves the index and working tree
+  where they were, so every file the skipped commits changed now reads as a
+  staged revert of them, and the next pathspec commit of such a file silently
+  undoes another worker's commit. Workers did exactly this to `~/NEEDLE`
+  (`git update-ref refs/heads/main <origin/main>`, about twenty times from
+  2026-10-07) and left the checkout 85 files and 9,959 lines behind HEAD by
+  2026-10-16 (needle-8879251b). To pick up `origin/main`, run
+  `git merge --ff-only origin/main`, which moves the ref, index and worktree
+  together; if local commits have diverged, reconcile with a merge commit,
+  never a rebase or a force-push. If a dirty tree or staged files block the
+  merge, **stop and report the blocking paths on the bead** — do not move the
+  ref by hand, and do not stash, reset or check out other workers' files to
+  clear the way. `needle audit` reports a checkout whose tracked files hold
+  older committed content than HEAD as `F7_STALE_TREE_DRIFT`.
 - Forgejo (`git.ardenone.com`) is the authoritative remote. GitHub is a mirror.
   Push only to the configured `origin`, and never use `--force` or
   `--force-with-lease`.

@@ -7989,6 +7989,9 @@ pub struct AuditConfig {
     /// Thresholds for a verification gate red at pristine HEAD (F6).
     #[serde(default)]
     pub gate_red: AuditGateRedConfig,
+    /// Thresholds for a checkout whose tree lags its HEAD (F7).
+    #[serde(default)]
+    pub tree_drift: AuditTreeDriftConfig,
 }
 
 impl Default for AuditConfig {
@@ -7999,6 +8002,7 @@ impl Default for AuditConfig {
             home_workspace: Self::default_home_workspace(),
             loop_: AuditLoopConfig::default(),
             gate_red: AuditGateRedConfig::default(),
+            tree_drift: AuditTreeDriftConfig::default(),
         }
     }
 }
@@ -8175,6 +8179,41 @@ impl AuditGateRedConfig {
     }
     pub fn default_min_beads() -> u64 {
         2
+    }
+}
+
+/// Thresholds for `F7_STALE_TREE_DRIFT`: tracked files in a checkout whose
+/// index or worktree content matches an older commit than HEAD — the tree a
+/// branch ref leaves behind when it is moved with `update-ref`,
+/// `reset --soft` or `branch -f` (needle-8879251b).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditTreeDriftConfig {
+    /// Stale paths (outside `.beads/`) a checkout needs before it is
+    /// reported. Above one so a deliberate single-file revert in progress
+    /// does not file a P0; the 2026-10-16 drift was 85 paths.
+    #[serde(default = "AuditTreeDriftConfig::default_min_paths")]
+    pub min_paths: u64,
+    /// Commits touching the differing paths searched for the older content.
+    #[serde(default = "AuditTreeDriftConfig::default_history_commits")]
+    pub history_commits: u64,
+}
+
+impl Default for AuditTreeDriftConfig {
+    fn default() -> Self {
+        AuditTreeDriftConfig {
+            min_paths: Self::default_min_paths(),
+            history_commits: Self::default_history_commits(),
+        }
+    }
+}
+
+impl AuditTreeDriftConfig {
+    pub fn default_min_paths() -> u64 {
+        3
+    }
+    pub fn default_history_commits() -> u64 {
+        500
     }
 }
 

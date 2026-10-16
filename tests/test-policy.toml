@@ -409,7 +409,13 @@ version = 1
 # parses from the failure summary; and the finding files at P0 as an
 # operational defect, never human or proposal-pending. Fixture attempts.jsonl
 # in a tempdir against private predicate/filing seams; no subprocess.
-max_tests = 4221
+# +3 audit F7_STALE_TREE_DRIFT contracts (needle-8879251b): a tree left behind
+# by an update-ref advance is stale while in-flight edits and plain on-disk
+# deletions are not; the ls-files/ls-tree/name-list/log --raw parsers; and the
+# finding fires at audit.tree_drift.min_paths, names paths with the commit
+# they match, and files P0 operational-defect + escalation. Pure classifier
+# over fixture git output; the git-running collector is never invoked.
+max_tests = 4224
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

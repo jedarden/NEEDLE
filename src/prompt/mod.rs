@@ -103,7 +103,13 @@ Complete these steps in order and include evidence for each one in the close rea
    recorded in the evidence below.
 4. Push the commits with `git push`, then confirm the upstream is current: replace
    `<branch>` with the current branch and run `git rev-list origin/<branch>..HEAD`.
-   The output must be empty.
+   The output must be empty. If the push is rejected because the upstream moved,
+   integrate it with `git merge --ff-only origin/<branch>`, or a merge commit when
+   the histories diverged. Never move a branch ref with `git update-ref`,
+   `git reset --soft` or `git branch -f` in this shared checkout: that leaves the
+   index and working tree behind the ref, and later commits silently revert other
+   workers' changes. If a dirty tree blocks the merge, stop and report it on the
+   bead instead of moving the ref.
 5. Only after steps 1–4 pass, close the bead:
 
 `{bead_cli} close {bead_id} --reason \"...\"`
@@ -2279,6 +2285,10 @@ mod tests {
             "3. In that same clean extraction",
             "4. Push the commits with `git push`",
             "git rev-list origin/<branch>..HEAD",
+            // needle-8879251b: never advance a ref without its tree.
+            "git merge --ff-only origin/<branch>",
+            "Never move a branch ref with `git update-ref`",
+            "stop and report it on the",
             "5. Only after steps 1–4 pass, close the bead",
             "bead close needle-abc --reason",
             "```verified:",

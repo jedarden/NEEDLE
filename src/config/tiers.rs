@@ -446,6 +446,8 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("audit.loop.stall_days", ReloadTier::Live),
     ("audit.gate_red.window_hours", ReloadTier::Live),
     ("audit.gate_red.min_beads", ReloadTier::Live),
+    ("audit.tree_drift.min_paths", ReloadTier::Live),
+    ("audit.tree_drift.history_commits", ReloadTier::Live),
     // ═══════════════════════════════════════════════════════════════════════════════
     // TIER B: COMPONENT REBUILD
     // ═══════════════════════════════════════════════════════════════════════════════

@@ -1599,6 +1599,19 @@ audit:
     # failing a gate is a bad change; several, with nothing verified in
     # between, is the gate.
     min_beads: 2
+
+  # A checkout whose tree lags its own HEAD (F7). Runs read-only git
+  # (`--no-optional-locks`) in every discovered workspace.
+  tree_drift:
+    # Tracked paths outside `.beads/` whose index or worktree content matches
+    # an older commit than HEAD before the checkout is reported (default: 3).
+    # Above one so a deliberate single-file revert in progress does not file
+    # a P0; the 2026-10-16 drift in ~/NEEDLE was 85 paths.
+    min_paths: 3
+
+    # Commits touching the differing paths searched for that older content
+    # (default: 500).
+    history_commits: 500
 ```
 
 The `factory` predicate group and the keys each rule reads:
@@ -1611,6 +1624,7 @@ The `factory` predicate group and the keys each rule reads:
 | `F4_CI_RED` | violation | `ci_red_hours` |
 | `F5_LEARNING_LOOP_STALLED` | violation | `loop.workspaces`, `loop.stall_days` |
 | `F6_GATE_RED_AT_HEAD` | violation | `gate_red.window_hours`, `gate_red.min_beads` |
+| `F7_STALE_TREE_DRIFT` | violation | `tree_drift.min_paths`, `tree_drift.history_commits` |
 | `I_CHECKLIST_DRIFT` | informational | bead inventories only — no threshold |
 
 `F5_LEARNING_LOOP_STALLED` escalates rather than filing ordinary work. It fires
@@ -1630,6 +1644,15 @@ bead and each failing attempt's timestamp. One bead per (workspace, gate) is
 kept across runs through the usual evidence signature. Added after NEEDLE's own
 `gate_1` stayed red at pristine HEAD from 2026-10-08 while its fix waited five
 days as a held proposal (needle-9c66c160).
+
+`F7_STALE_TREE_DRIFT` is filed the same way. It reports a checkout whose
+tracked files (outside `.beads/`) differ from HEAD and hold content — or an
+absence — the path had in an older commit, which is the tree a branch ref
+leaves behind when it is moved with `git update-ref`, `git reset --soft` or
+`git branch -f`. Ordinary in-flight edits hold content no commit ever had and
+are never counted. A checkout mid-merge or mid-rebase is reported as an input
+that could not be judged rather than as drift. One bead per workspace is kept
+across runs (needle-8879251b).
 
 Informational rules (prefixed `I_`) report states that are correct as-is and
 must never be repaired automatically. They still drive exit code 1, because
