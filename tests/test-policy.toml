@@ -395,7 +395,14 @@ version = 1
 # refusal is filing_failed; bead-rs lease wording is recognised; and a filing
 # error is reported beside the verdict without changing the exit code. They
 # drive the private apply/report seams against an in-memory store.
-max_tests = 4207
+# +9 generation proposal-backlog cap (needle-b117f398): seven GeneratorGate
+# cases in src/strand/generation.rs (at-cap suppression with the kept lease and
+# proposal_backlog reason, genuinely empty override, below-cap override, which
+# beads count, cap 0 disables, count failure degrades, healthy reserve never
+# lists) and two config cases (omitted cap keeps the default, key-path
+# validation). The gate and its counting seam are private to the strand, so
+# the unit tier is the cheapest correct home.
+max_tests = 4216
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -519,8 +526,10 @@ contract = 246
 # fake-Claude dispatch/timeout/signal coverage.
 # -28 the N-T45, N-T50, both N-T51 and N-T52 harnesses folded into the
 # nt_contracts contract harness with their ceilings (needle-1f31332d).
+# +1 native bead-rs proposal-backlog cap scenario in the P3 harness below
+# (needle-b117f398).
 
-e2e = 856
+e2e = 857
 soak = 0
 fuzz = 0
 
@@ -640,8 +649,11 @@ tier = "e2e"
 # (needle-e13204d9).
 # +1 GenAI semantic-convention matrix across the supported built-in adapters
 # (needle-758bfd1d).
+# +1 FleetWeave withholds the low-water pass at the proposal backlog cap
+# against a native bead-rs store (needle-b117f398): proves the labels Weave
+# files survive the real inventory projection.
 
-max_tests = 387
+max_tests = 388
 owner = "component:weave-unravel-pulse"
 
 [[harness]]

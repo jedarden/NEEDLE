@@ -1044,6 +1044,56 @@ strands:
         command: cargo clippy --all-targets -- -D warnings
 ```
 
+### Low-water Generation (Weave and Pulse cooldown override)
+
+When Pluck and Explore find nothing, the generation gate may let Weave or
+Pulse bypass its own cooldown to replenish a thin workspace. It is off by
+default:
+
+```yaml
+strands:
+  generation:
+    enabled: false              # Opt-in (default: false)
+    low_water_reserve: 2        # Override only while eligible-ready work is below this; 0 disables the override
+    lease_ttl_secs: 300         # Workspace-plus-strand lease; also bounds how often the gate is re-evaluated
+    proposal_backlog_cap: 10    # Withhold the override at/above this many unadmitted generated proposals; 0 disables the cap
+```
+
+Environment overrides use the usual form, e.g.
+`NEEDLE_STRANDS__GENERATION__PROPOSAL_BACKLOG_CAP=10`.
+
+Generators file **proposals**, not eligible work: Weave labels its beads
+`weave-generated` and Pulse `pulse-finding`, each beside `proposal-pending`
+and `human`, and the eligible-ready count excludes them until an operator
+admits them (removes `proposal-pending` and `human`). Generating therefore
+never raises a workspace back above `low_water_reserve`. Without a bound, a
+workspace below the reserve received a new proposal pass every lease period
+— 4,897 proposals across 57 repositories in 3.5 days, none admitted
+(needle-b117f398).
+
+`proposal_backlog_cap` is that bound. After a worker wins the lease for a
+workspace below the reserve, the gate counts the workspace's **open** beads
+that carry `proposal-pending` and a generator provenance label
+(`weave-generated` or `pulse-finding`, counted together). At or above the
+cap it withholds the override, emits `generation.gate_evaluated` with reason
+`proposal_backlog`, and the generator falls back to its ordinary cooldown —
+which, for the fleet-wide Weave that only runs under the override, means it
+moves on to the next workspace. Closed, deferred, and admitted beads do not
+count, nor do Unravel's `unravel-proposal` alternatives. The won lease is kept,
+so the inventory query runs at most once per workspace and strand per
+`lease_ttl_secs`. If the inventory cannot be read the gate reports
+`gate_disabled` and also falls back to the ordinary cooldown.
+
+The cap is a threshold, not a quota: one permitted pass may still file up to
+the generator's `max_beads_per_run`, so the backlog can exceed the cap by that
+much before the next check withholds the override. Set it to `0` only to
+restore the unbounded pre-cap behaviour.
+
+Gate reasons reported on `generation.gate_evaluated`: `low_water` (override
+granted), `contended` (another worker holds the lease), `backlog_healthy`
+(eligible work meets the reserve), `proposal_backlog` (cap reached), and
+`gate_disabled` (disabled, zero reserve, or the backlog could not be counted).
+
 ### Reflect and Learning Context (legacy, off by default)
 
 Since N-T15 (plan section 4.4 step 0, ADR-026) the legacy Reflect

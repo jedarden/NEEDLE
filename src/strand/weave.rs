@@ -1575,6 +1575,7 @@ timeout_secs: 5
                 enabled: true,
                 low_water_reserve: 1,
                 lease_ttl_secs: 300,
+                proposal_backlog_cap: 10,
             },
             Vec::new(),
         );
@@ -1608,6 +1609,7 @@ timeout_secs: 5
                 enabled: true,
                 low_water_reserve: 1,
                 lease_ttl_secs: 300,
+                proposal_backlog_cap: 10,
             },
             Vec::new(),
         )
@@ -1632,6 +1634,7 @@ timeout_secs: 5
             enabled: true,
             low_water_reserve: 1,
             lease_ttl_secs: 300,
+            proposal_backlog_cap: 10,
         };
 
         // The first empty worker sees the empty frontier, wins the

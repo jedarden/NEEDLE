@@ -184,6 +184,7 @@ fn generation_config() -> GenerationConfig {
         enabled: true,
         low_water_reserve: 1,
         lease_ttl_secs: 300,
+        proposal_backlog_cap: 10,
     }
 }
 
@@ -489,6 +490,93 @@ async fn fleet_empty_weave_proposal_is_claimable_only_after_admission() {
         .await
         .unwrap();
     telemetry.shutdown().await;
+}
+
+/// needle-b117f398: a workspace below the reserve whose open, unadmitted
+/// generated proposals already reach `proposal_backlog_cap` gets no low-water
+/// pass. Held proposals never count as eligible-ready work, so before the cap
+/// such a workspace received a fresh proposal pass every lease period. The
+/// proposals here are filed through the same store call and labels Weave uses,
+/// so the count is proven against the native bead-rs inventory projection.
+#[tokio::test]
+async fn fleet_weave_withholds_the_low_water_pass_at_the_proposal_backlog_cap() {
+    let target = create_workspace("proposal-backlog").unwrap();
+    write_readme(target.path()).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let telemetry = telemetry("proposal-backlog", logs.path());
+    telemetry.start();
+
+    let target_store = store_for(target.path()).unwrap();
+    for title in ["held-proposal-one", "held-proposal-two"] {
+        target_store
+            .create_bead(
+                title,
+                "Awaiting operator admission.",
+                &["weave-generated", "proposal-pending", "human"],
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        target_store
+            .ready(&Filters::default())
+            .await
+            .unwrap()
+            .iter()
+            .all(|bead| bead.labels.iter().any(|label| label == "proposal-pending")),
+        "the fixture's only open work must be held proposals"
+    );
+
+    let weave = FleetWeaveStrand::new(
+        weave_config(),
+        explore_config(target.path()),
+        state.path().to_path_buf(),
+        Box::new(MockWeaveAgent {
+            response: generated_response("must-not-be-generated"),
+        }),
+        telemetry.clone(),
+        GenerationConfig {
+            proposal_backlog_cap: 2,
+            ..generation_config()
+        },
+        Vec::new(),
+        "proposal-backlog-worker".to_string(),
+    );
+
+    let result = weave.evaluate(&target_store, &HashSet::new()).await;
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "a workspace at the proposal cap must not get a low-water pass: {result:?}"
+    );
+    let titles = target_store
+        .list_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|bead| bead.title)
+        .collect::<Vec<_>>();
+    assert_eq!(titles.len(), 2, "no proposal may be added: {titles:?}");
+
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    telemetry.shutdown().await;
+    let events = read_events(&logs.path().join("logs"));
+    let gate_reasons: Vec<_> = events
+        .iter()
+        .filter(|event| event["event_type"] == "generation.gate_evaluated")
+        .filter_map(|event| event["data"]["reason"].as_str())
+        .collect();
+    assert!(
+        gate_reasons.contains(&"proposal_backlog"),
+        "the suppression must be reported: {gate_reasons:?}"
+    );
+    assert!(
+        !gate_reasons.contains(&"low_water"),
+        "no override may be granted: {gate_reasons:?}"
+    );
 }
 
 #[tokio::test]

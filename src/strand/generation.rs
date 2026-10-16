@@ -11,6 +11,18 @@
 //! its own cooldown policy exactly as it would have without the gate. Only a
 //! contended lease suppresses the generator, because that means another worker
 //! is already filling the gap this pass would have filled.
+//!
+//! Generators do not create eligible work: Weave and Pulse file proposals
+//! labelled `proposal-pending` + `human`, which the eligible-ready count
+//! excludes until an operator admits them. A workspace below the reserve can
+//! therefore never climb back above it by generating, and without a bound it
+//! received a fresh proposal pass every lease period (needle-b117f398: 4,897
+//! proposals in 3.5 days, none admitted). The override is therefore withheld
+//! while the workspace already holds `proposal_backlog_cap` or more open,
+//! unadmitted generated proposals, and the gate reports `proposal_backlog`.
+//! The backlog is counted only after the lease is won, so the full-inventory
+//! query runs at most once per workspace and strand per lease period, and the
+//! held lease rate-limits the re-check the same way it does a no-gap pass.
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -27,12 +39,23 @@ use crate::config::GenerationConfig;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, BeadStatus};
 
+/// Provenance labels of the generators this gate can unleash. A bead carrying
+/// one of these plus `proposal-pending` is generated work awaiting admission:
+/// Weave files `weave-generated` and Pulse files `pulse-finding`, each beside
+/// `proposal-pending` and `human`. Admission removes `proposal-pending`, so an
+/// admitted bead stops counting toward the backlog and starts counting as
+/// eligible-ready work instead.
+const GENERATED_PROPOSAL_LABELS: &[&str] = &["weave-generated", "pulse-finding"];
+const PROPOSAL_PENDING_LABEL: &str = "proposal-pending";
+
 /// What a generator may do in the current waterfall pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum GeneratorPermit {
     /// Apply the generator's ordinary cooldown policy. Returned when the gate
     /// is disabled, the reserve is zero, the eligible backlog already meets
-    /// the reserve, or the gate could not evaluate the backlog at all.
+    /// the reserve, the workspace already holds at least
+    /// `proposal_backlog_cap` unadmitted generated proposals, or the gate
+    /// could not evaluate the backlog at all.
     Ordinary,
     /// Eligible fleet-ready work is below the reserve and this worker holds
     /// the workspace-plus-strand lease: bypass the cooldown and generate.
@@ -132,6 +155,38 @@ impl GeneratorGate {
 
         match self.acquire_lease(strand_name) {
             Ok(Some(fencing_token)) => {
+                // The lease is deliberately kept when the override is
+                // withheld below: it bounds how often any worker re-runs the
+                // inventory query for this workspace and strand, exactly as a
+                // pass that found no gap would.
+                if self.config.proposal_backlog_cap > 0 {
+                    match self.count_pending_generated_proposals(store).await {
+                        Ok(pending) if pending >= self.config.proposal_backlog_cap => {
+                            self.emit_gate(strand_name, "proposal_backlog", eligible_ready);
+                            tracing::info!(
+                                strand = strand_name,
+                                workspace = %self.workspace.display(),
+                                eligible_ready,
+                                low_water_reserve = self.config.low_water_reserve,
+                                pending_generated_proposals = pending,
+                                proposal_backlog_cap = self.config.proposal_backlog_cap,
+                                "unadmitted generated proposals at or above the cap; withholding the low-water override"
+                            );
+                            return GeneratorPermit::Ordinary;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                strand = strand_name,
+                                workspace = %self.workspace.display(),
+                                error = %error,
+                                "low-water gate could not count pending generated proposals; falling back to the generator's ordinary cooldown"
+                            );
+                            self.emit_gate(strand_name, "gate_disabled", eligible_ready);
+                            return GeneratorPermit::Ordinary;
+                        }
+                    }
+                }
                 self.emit_gate(strand_name, "low_water", eligible_ready);
                 tracing::info!(
                     strand = strand_name,
@@ -193,6 +248,22 @@ impl GeneratorGate {
                     && !crate::internal::is_internal_artifact(bead)
                     && !self.held_by_label_policy(bead, now)
             })
+            .count())
+    }
+
+    /// Count open generated proposals still awaiting admission.
+    ///
+    /// These are exactly the beads [`Self::held_by_label_policy`] keeps out
+    /// of the eligible-ready count, so they are read from the full inventory
+    /// rather than the ready frontier.
+    async fn count_pending_generated_proposals(&self, store: &dyn BeadStore) -> Result<usize> {
+        let inventory = store
+            .list_all()
+            .await
+            .context("failed to list the workspace inventory")?;
+        Ok(inventory
+            .iter()
+            .filter(|bead| bead.status == BeadStatus::Open && is_pending_generated_proposal(bead))
             .count())
     }
 
@@ -375,6 +446,16 @@ impl GeneratorGate {
     }
 }
 
+/// Whether a bead is a generator-filed proposal that has not been admitted.
+fn is_pending_generated_proposal(bead: &crate::types::Bead) -> bool {
+    let has = |wanted: &str| {
+        bead.labels
+            .iter()
+            .any(|label| label.trim().eq_ignore_ascii_case(wanted))
+    };
+    has(PROPOSAL_PENDING_LABEL) && GENERATED_PROPOSAL_LABELS.iter().any(|label| has(label))
+}
+
 fn read_lease(path: &Path) -> Result<Option<LeaseRecord>> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -400,6 +481,7 @@ mod tests {
         ready_beads: Vec<Bead>,
         all_beads: Vec<Bead>,
         fail_ready: AtomicBool,
+        fail_list: AtomicBool,
     }
 
     impl GateStore {
@@ -408,6 +490,7 @@ mod tests {
                 ready_beads,
                 all_beads: Vec::new(),
                 fail_ready: AtomicBool::new(false),
+                fail_list: AtomicBool::new(false),
             }
         }
     }
@@ -415,6 +498,9 @@ mod tests {
     #[async_trait::async_trait]
     impl BeadStore for GateStore {
         async fn list_all(&self) -> Result<Vec<Bead>> {
+            if self.fail_list.load(Ordering::SeqCst) {
+                anyhow::bail!("inventory query unavailable");
+            }
             Ok(self.all_beads.clone())
         }
 
@@ -528,6 +614,7 @@ mod tests {
                 enabled: true,
                 low_water_reserve: 2,
                 lease_ttl_secs: ttl,
+                proposal_backlog_cap: 10,
             },
             PathBuf::from("/workspace"),
             state_dir.to_path_buf(),
@@ -542,6 +629,7 @@ mod tests {
                 enabled: true,
                 low_water_reserve: reserve,
                 lease_ttl_secs: 300,
+                proposal_backlog_cap: 10,
             },
             PathBuf::from("/workspace"),
             state_dir.to_path_buf(),
@@ -556,12 +644,65 @@ mod tests {
                 enabled: false,
                 low_water_reserve: 2,
                 lease_ttl_secs: 300,
+                proposal_backlog_cap: 10,
             },
             PathBuf::from("/workspace"),
             state_dir.to_path_buf(),
             Vec::new(),
             Telemetry::new("worker-a".to_string()),
         )
+    }
+
+    /// A gate with an explicit proposal-backlog cap whose telemetry lands in
+    /// `log_dir`, so a test can assert the reason the gate reported.
+    fn gate_with_cap(state_dir: &Path, log_dir: &Path, owner: &str, cap: usize) -> GeneratorGate {
+        let telemetry = Telemetry::with_log_dir(owner.to_string(), log_dir);
+        telemetry.start();
+        GeneratorGate::new(
+            GenerationConfig {
+                enabled: true,
+                low_water_reserve: 5,
+                lease_ttl_secs: 300,
+                proposal_backlog_cap: cap,
+            },
+            PathBuf::from("/workspace"),
+            state_dir.to_path_buf(),
+            Vec::new(),
+            telemetry,
+        )
+    }
+
+    /// An unadmitted proposal exactly as the named generator files it.
+    fn proposal(id: &str, provenance: &str) -> Bead {
+        let mut proposal = bead(id);
+        proposal.labels = vec![
+            provenance.to_string(),
+            "proposal-pending".to_string(),
+            "human".to_string(),
+        ];
+        proposal
+    }
+
+    /// Drain the gate's telemetry and return every reported gate reason.
+    async fn gate_reasons(gate: &GeneratorGate, log_dir: &Path) -> Vec<String> {
+        gate.telemetry.shutdown().await;
+        let mut reasons = Vec::new();
+        for entry in std::fs::read_dir(log_dir).unwrap().flatten() {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            for line in std::fs::read_to_string(entry.path()).unwrap().lines() {
+                let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                if event["event_type"] == "generation.gate_evaluated" {
+                    if let Some(reason) = event["data"]["reason"].as_str() {
+                        reasons.push(reason.to_string());
+                    }
+                }
+            }
+        }
+        reasons
     }
 
     #[tokio::test]
@@ -725,6 +866,7 @@ mod tests {
                 enabled: true,
                 low_water_reserve: 2,
                 lease_ttl_secs: 300,
+                proposal_backlog_cap: 10,
             },
             PathBuf::from("/workspace"),
             dir.path().to_path_buf(),
@@ -781,6 +923,168 @@ mod tests {
             gate.prepare("weave", &store, &HashSet::new()).await,
             GeneratorPermit::Ordinary
         );
+    }
+
+    #[tokio::test]
+    async fn below_reserve_with_a_full_proposal_backlog_withholds_the_override() {
+        // needle-b117f398: the frontier is below the reserve only because the
+        // generator's own proposals are held for admission. Generating again
+        // cannot raise it, so the override must not fire.
+        let dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let gate = gate_with_cap(dir.path(), logs.path(), "worker-a", 3);
+        let proposals = vec![
+            proposal("weave-one", "weave-generated"),
+            proposal("weave-two", "weave-generated"),
+            proposal("pulse-one", "pulse-finding"),
+        ];
+        // The held proposals are on the ready frontier too, which proves they
+        // are excluded from the eligible count rather than absent from it.
+        let mut store = GateStore::healthy(proposals.clone());
+        store.all_beads = proposals;
+
+        assert_eq!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::Ordinary,
+            "a backlog at the cap must fall back to the ordinary cooldown"
+        );
+
+        // The won lease is kept, so other workers do not re-run the inventory
+        // query for this workspace and strand until it expires.
+        let other_logs = tempfile::tempdir().unwrap();
+        let other = gate_with_cap(dir.path(), other_logs.path(), "worker-b", 3);
+        assert_eq!(
+            other.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::Contended
+        );
+
+        assert_eq!(
+            gate_reasons(&other, other_logs.path()).await,
+            vec!["contended".to_string()]
+        );
+
+        let reasons = gate_reasons(&gate, logs.path()).await;
+        assert!(
+            reasons.iter().any(|reason| reason == "proposal_backlog"),
+            "the suppression must be reported as proposal_backlog: {reasons:?}"
+        );
+        assert!(
+            !reasons.iter().any(|reason| reason == "low_water"),
+            "no low-water override may be reported: {reasons:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn genuinely_empty_workspace_still_gets_the_low_water_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let gate = gate_with_cap(dir.path(), logs.path(), "worker-a", 3);
+        let store = GateStore::healthy(Vec::new());
+
+        assert!(matches!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::LowWater { .. }
+        ));
+        let reasons = gate_reasons(&gate, logs.path()).await;
+        assert_eq!(reasons, vec!["low_water".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn proposal_backlog_below_the_cap_still_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let gate = gate_with_cap(dir.path(), logs.path(), "worker-a", 3);
+        let mut store = GateStore::healthy(Vec::new());
+        store.all_beads = vec![
+            proposal("weave-one", "weave-generated"),
+            proposal("pulse-one", "pulse-finding"),
+        ];
+
+        assert!(matches!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::LowWater { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_open_unadmitted_generated_proposals_count_toward_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let gate = gate_with_cap(dir.path(), logs.path(), "worker-a", 1);
+
+        let mut admitted = bead("admitted");
+        admitted.labels = vec!["weave-generated".to_string()];
+        let mut closed = proposal("closed", "weave-generated");
+        closed.status = BeadStatus::Closed;
+        let mut deferred = proposal("deferred", "pulse-finding");
+        deferred.status = BeadStatus::Deferred;
+        let unravel = proposal("unravel", "unravel-proposal");
+        let mut unattributed = bead("unattributed");
+        unattributed.labels = vec!["proposal-pending".to_string(), "human".to_string()];
+
+        let mut store = GateStore::healthy(Vec::new());
+        store.all_beads = vec![admitted, closed, deferred, unravel, unattributed];
+
+        assert!(matches!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::LowWater { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn zero_proposal_backlog_cap_disables_the_check() {
+        // A cap of zero restores the pre-cap behaviour: the backlog is never
+        // counted, so even an inventory that cannot be read does not matter.
+        let dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let gate = gate_with_cap(dir.path(), logs.path(), "worker-a", 0);
+        let mut store = GateStore::healthy(Vec::new());
+        store.all_beads = (0..50)
+            .map(|index| proposal(&format!("weave-{index}"), "weave-generated"))
+            .collect();
+        store.fail_list.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::LowWater { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn proposal_backlog_count_failure_degrades_to_ordinary() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let gate = gate_with_cap(dir.path(), logs.path(), "worker-a", 3);
+        let store = GateStore::healthy(Vec::new());
+        store.fail_list.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::Ordinary
+        );
+        let reasons = gate_reasons(&gate, logs.path()).await;
+        assert_eq!(reasons, vec!["gate_disabled".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn healthy_reserve_never_queries_the_proposal_backlog() {
+        // The inventory query is only paid for on the low-water path.
+        let dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let gate = gate_with_cap(dir.path(), logs.path(), "worker-a", 3);
+        let store = GateStore::healthy(
+            (0..5)
+                .map(|index| bead(&format!("ready-{index}")))
+                .collect(),
+        );
+        store.fail_list.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::Ordinary
+        );
+        let reasons = gate_reasons(&gate, logs.path()).await;
+        assert_eq!(reasons, vec!["backlog_healthy".to_string()]);
     }
 
     #[test]

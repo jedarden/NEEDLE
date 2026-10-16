@@ -4649,6 +4649,18 @@ pub struct GenerationConfig {
     /// bounds retry frequency after a generator finds no new work.
     #[serde(default = "GenerationConfig::default_lease_ttl_secs")]
     pub lease_ttl_secs: u64,
+
+    /// Open, unadmitted generated proposals (`proposal-pending` beads filed
+    /// by Weave as `weave-generated` or by Pulse as `pulse-finding`) at or
+    /// above which a workspace below the reserve does NOT get the low-water
+    /// override. Proposals never count as eligible-ready work until an
+    /// operator admits them, so without this cap a thin workspace receives a
+    /// fresh proposal pass every lease period (needle-b117f398). The gate
+    /// reports such a pass as `proposal_backlog`; the generator's ordinary
+    /// cooldown still applies. Zero disables the check, restoring the
+    /// unbounded pre-cap behaviour.
+    #[serde(default = "GenerationConfig::default_proposal_backlog_cap")]
+    pub proposal_backlog_cap: usize,
 }
 
 impl Default for GenerationConfig {
@@ -4657,6 +4669,7 @@ impl Default for GenerationConfig {
             enabled: Self::default_enabled(),
             low_water_reserve: Self::default_low_water_reserve(),
             lease_ttl_secs: Self::default_lease_ttl_secs(),
+            proposal_backlog_cap: Self::default_proposal_backlog_cap(),
         }
     }
 }
@@ -4672,6 +4685,10 @@ impl GenerationConfig {
 
     fn default_lease_ttl_secs() -> u64 {
         300
+    }
+
+    fn default_proposal_backlog_cap() -> usize {
+        10
     }
 }
 
@@ -9178,7 +9195,12 @@ fn validate_ci_watch_field(field: &str, key_path: &str) -> Result<(), ConfigErro
 }
 
 fn validate_generation_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
-    let valid_fields = ["enabled", "low_water_reserve", "lease_ttl_secs"];
+    let valid_fields = [
+        "enabled",
+        "low_water_reserve",
+        "lease_ttl_secs",
+        "proposal_backlog_cap",
+    ];
     if valid_fields.contains(&field) {
         Ok(())
     } else {
@@ -10076,6 +10098,18 @@ impl ConfigLoader {
                                 env_var = %key,
                                 value = %value,
                                 "invalid value for strands.generation.lease_ttl_secs — expected integer"
+                            );
+                        }
+                    }
+                    "strands.generation.proposal_backlog_cap" => {
+                        if let Ok(v) = value.parse::<usize>() {
+                            config.strands.generation.proposal_backlog_cap = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for strands.generation.proposal_backlog_cap — expected integer"
                             );
                         }
                     }
@@ -12196,7 +12230,7 @@ strands:
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".needle.yaml"),
-            "strands:\n  generation:\n    enabled: true\n    low_water_reserve: 4\n    lease_ttl_secs: 600\n",
+            "strands:\n  generation:\n    enabled: true\n    low_water_reserve: 4\n    lease_ttl_secs: 600\n    proposal_backlog_cap: 7\n",
         )
         .unwrap();
 
@@ -12207,7 +12241,40 @@ strands:
 
         assert_eq!(config.strands.generation.low_water_reserve, 4);
         assert_eq!(config.strands.generation.lease_ttl_secs, 600);
+        assert_eq!(config.strands.generation.proposal_backlog_cap, 7);
         assert!(sources.contains_key("strands.generation"));
+    }
+
+    #[test]
+    fn workspace_generation_override_without_cap_keeps_the_default_cap() {
+        // A workspace file written before the cap existed must not silently
+        // disable it: serde fills the omitted key with the shipped default.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "strands:\n  generation:\n    enabled: true\n    low_water_reserve: 5\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert_eq!(config.strands.generation.low_water_reserve, 5);
+        assert_eq!(config.strands.generation.proposal_backlog_cap, 10);
+    }
+
+    #[test]
+    fn proposal_backlog_cap_is_a_valid_generation_key_path() {
+        assert!(validate_generation_field(
+            "proposal_backlog_cap",
+            "strands.generation.proposal_backlog_cap"
+        )
+        .is_ok());
+        assert!(
+            validate_generation_field("proposal_cap", "strands.generation.proposal_cap").is_err()
+        );
     }
 
     #[test]
@@ -12437,6 +12504,7 @@ strands:
         assert!(!config.enabled);
         assert_eq!(config.low_water_reserve, 2);
         assert_eq!(config.lease_ttl_secs, 300);
+        assert_eq!(config.proposal_backlog_cap, 10);
     }
 
     #[test]
@@ -14360,6 +14428,7 @@ agent:
             ("NEEDLE_STRANDS__GENERATION__ENABLED", "false"),
             ("NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE", "6"),
             ("NEEDLE_STRANDS__GENERATION__LEASE_TTL_SECS", "420"),
+            ("NEEDLE_STRANDS__GENERATION__PROPOSAL_BACKLOG_CAP", "4"),
         ];
 
         for (key, value) in values {
@@ -14373,10 +14442,12 @@ agent:
         assert!(!config.strands.generation.enabled);
         assert_eq!(config.strands.generation.low_water_reserve, 6);
         assert_eq!(config.strands.generation.lease_ttl_secs, 420);
+        assert_eq!(config.strands.generation.proposal_backlog_cap, 4);
         for key in [
             "strands.generation.enabled",
             "strands.generation.low_water_reserve",
             "strands.generation.lease_ttl_secs",
+            "strands.generation.proposal_backlog_cap",
         ] {
             assert!(sources.contains_key(key), "missing source for {key}");
         }

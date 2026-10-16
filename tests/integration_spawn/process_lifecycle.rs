@@ -1001,6 +1001,7 @@ async fn worker_strand_process_contracts_low_water_overrides_pulse_cooldown() {
             enabled: true,
             low_water_reserve: 1,
             lease_ttl_secs: 300,
+            proposal_backlog_cap: 10,
         },
         Vec::new(),
     );
@@ -1024,6 +1025,7 @@ async fn worker_strand_process_contracts_contended_pulse_lease_skips_generation(
         enabled: true,
         low_water_reserve: 1,
         lease_ttl_secs: 300,
+        proposal_backlog_cap: 10,
     };
     let pulse = |worker: &str, generation: GenerationConfig| {
         PulseStrand::new(

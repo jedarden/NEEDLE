@@ -699,7 +699,9 @@ pub enum EventKind {
         strand_name: String,
         workspace: String,
         /// Why the permit resolved the way it did: `low_water`, `contended`,
-        /// `backlog_healthy`, or `gate_disabled`.
+        /// `backlog_healthy`, `proposal_backlog` (the workspace already holds
+        /// `proposal_backlog_cap` unadmitted generated proposals), or
+        /// `gate_disabled`.
         reason: String,
         eligible_ready: usize,
         low_water_reserve: usize,
