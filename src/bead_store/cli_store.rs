@@ -4070,6 +4070,18 @@ mod issue_patch_tests {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
+    fn shown_issue(output: &str) -> serde_json::Value {
+        let value: serde_json::Value = serde_json::from_str(output).unwrap();
+        match value {
+            serde_json::Value::Array(mut issues) => {
+                assert_eq!(issues.len(), 1, "bead show must return one issue");
+                issues.remove(0)
+            }
+            issue @ serde_json::Value::Object(_) => issue,
+            other => panic!("unexpected bead show response: {other}"),
+        }
+    }
+
     #[tokio::test]
     async fn patch_preserves_unmentioned_issue_fields() {
         let test_root =
@@ -4131,8 +4143,7 @@ mod issue_patch_tests {
         let id = BeadId::from(issue_id.as_str());
         store.patch_issue(&id, &patch).await.unwrap();
 
-        let shown: serde_json::Value =
-            serde_json::from_str(&run!(&["show", &issue_id, "--json"])).unwrap();
+        let shown = shown_issue(&run!(&["show", &issue_id, "--json"]));
         assert_eq!(shown["title"], "Outcome issue");
         assert_eq!(shown["description"], "Agent-owned body");
         assert_eq!(shown["notes"], "Agent note");
@@ -4160,8 +4171,7 @@ mod issue_patch_tests {
             .patch_issue(&BeadId::from(blocker_id.as_str()), &invalid)
             .await
             .is_err());
-        let closed: serde_json::Value =
-            serde_json::from_str(&run!(&["show", &blocker_id, "--json"])).unwrap();
+        let closed = shown_issue(&run!(&["show", &blocker_id, "--json"]));
         assert!(!closed["labels"]
             .as_array()
             .unwrap()
@@ -4178,8 +4188,7 @@ mod issue_patch_tests {
             )
             .await
             .unwrap();
-        let after: serde_json::Value =
-            serde_json::from_str(&run!(&["show", &issue_id, "--json"])).unwrap();
+        let after = shown_issue(&run!(&["show", &issue_id, "--json"]));
         assert_eq!(after["manual_blocked"], false);
         assert_eq!(after["status"], "open");
         assert!(after["dependencies"]
