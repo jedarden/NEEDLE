@@ -4950,6 +4950,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5005,6 +5006,7 @@ mod tests {
                 beads_processed: 1,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5077,6 +5079,7 @@ mod tests {
                     beads_processed: 1,
                     beads_completed: 0,
                     config_reload_generation: 0,
+                    otlp_degraded: None,
                     state: None,
                 })
                 .unwrap();
@@ -5167,6 +5170,7 @@ mod tests {
                     beads_processed: 1,
                     beads_completed: 0,
                     config_reload_generation: 0,
+                    otlp_degraded: None,
                     state: None,
                 })
                 .unwrap();
@@ -5282,6 +5286,7 @@ mod tests {
                     beads_processed: 1,
                     beads_completed: 0,
                     config_reload_generation: 0,
+                    otlp_degraded: None,
                     state: None,
                 })
                 .unwrap();
@@ -5372,6 +5377,7 @@ mod tests {
                 beads_processed: 1,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5467,6 +5473,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5537,6 +5544,7 @@ mod tests {
                 beads_processed: 10,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5610,6 +5618,7 @@ mod tests {
                 beads_processed: 1,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5689,6 +5698,7 @@ mod tests {
                 beads_processed: 1,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5772,6 +5782,7 @@ mod tests {
                 beads_processed: 5,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5859,6 +5870,7 @@ mod tests {
                 beads_processed: 10,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5960,6 +5972,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -5975,6 +5988,7 @@ mod tests {
                 beads_processed: 100,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -6041,6 +6055,7 @@ mod tests {
                 beads_processed: 342,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -6056,6 +6071,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -6622,6 +6638,7 @@ mod tests {
                 beads_processed: 5,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -6769,6 +6786,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -6820,6 +6838,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -6867,6 +6886,7 @@ mod tests {
                 beads_processed: 10,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -6983,6 +7003,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -7196,6 +7217,7 @@ mod tests {
                 beads_processed: 5,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -7256,6 +7278,7 @@ mod tests {
                 beads_processed: 10,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -7310,6 +7333,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -7365,6 +7389,7 @@ mod tests {
                     beads_processed: i as u64,
                     beads_completed: 0,
                     config_reload_generation: 0,
+                    otlp_degraded: None,
                     state: None,
                 })
                 .unwrap();
@@ -7383,6 +7408,7 @@ mod tests {
                 beads_processed: 100,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -7691,6 +7717,7 @@ mod tests {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(idle_entry).unwrap();
@@ -7743,6 +7770,7 @@ mod tests {
             beads_processed: 10,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(active_entry).unwrap();
@@ -7795,6 +7823,7 @@ mod tests {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(recent_entry).unwrap();
@@ -7848,6 +7877,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             };
             registry.register(entry).unwrap();
@@ -7901,6 +7931,7 @@ mod tests {
             beads_processed: 10,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(active_entry).unwrap();
@@ -7917,6 +7948,7 @@ mod tests {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(recent_entry).unwrap();
@@ -7933,6 +7965,7 @@ mod tests {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(idle_entry).unwrap();
@@ -8022,6 +8055,7 @@ mod tests {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(future_entry).unwrap();
@@ -8077,6 +8111,7 @@ mod tests {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(idle_entry).unwrap();
@@ -9267,6 +9302,7 @@ mod tests {
                 beads_processed: 5,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -9316,6 +9352,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -9365,6 +9402,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -9414,6 +9452,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -9463,6 +9502,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -9523,6 +9563,7 @@ mod tests {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         };
         registry.register(entry).unwrap();
@@ -9617,6 +9658,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             };
             registry.register(entry).unwrap();
@@ -10363,6 +10405,7 @@ mod tests {
             beads_processed,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         }
     }
@@ -10466,6 +10509,7 @@ mod tests {
                 beads_processed: 1,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -10544,6 +10588,7 @@ mod tests {
                 beads_processed: 1,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -10606,6 +10651,7 @@ mod tests {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -10667,6 +10713,7 @@ mod tests {
                 beads_processed: 1,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();

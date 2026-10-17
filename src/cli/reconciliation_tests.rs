@@ -45,6 +45,7 @@ fn worker(id: &str, pid: u32) -> WorkerEntry {
         beads_completed: 0,
         config_reload_generation: 0,
         state: None,
+        otlp_degraded: None,
     }
 }
 

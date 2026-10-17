@@ -361,6 +361,7 @@ async fn test_no_heartbeat_but_in_registry() {
         beads_processed: 0,
         beads_completed: 0,
         config_reload_generation: 0,
+        otlp_degraded: None,
         state: None,
     };
     registry.register(worker_entry).unwrap();

@@ -1187,6 +1187,7 @@ mod tests {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: Some(state),
         }
     }

@@ -1707,6 +1707,15 @@ pub fn init_tracing_subscriber(
     session_id: String,
     config: &crate::config::Config,
 ) -> Result<OtlpReloadHandle> {
+    Ok(init_tracing_subscriber_with_status(worker_id, session_id, config)?.0)
+}
+
+#[cfg(feature = "otlp")]
+fn init_tracing_subscriber_with_status(
+    worker_id: String,
+    session_id: String,
+    config: &crate::config::Config,
+) -> Result<(OtlpReloadHandle, Option<Vec<String>>)> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let (writer, use_ansi) = worker_log_writer(config, &worker_id);
@@ -1734,7 +1743,8 @@ pub fn init_tracing_subscriber(
         warn_missing_otlp_header_env(&missing_header_variables);
     }
 
-    Ok(otlp_reload_handle)
+    let otlp_degraded = (!missing_header_variables.is_empty()).then_some(missing_header_variables);
+    Ok((otlp_reload_handle, otlp_degraded))
 }
 
 #[cfg(feature = "otlp")]
@@ -1824,9 +1834,18 @@ fn build_boot_otlp_layer(
 #[cfg(not(feature = "otlp"))]
 fn init_tracing_subscriber(
     worker_id: String,
-    _session_id: String,
+    session_id: String,
     config: &crate::config::Config,
 ) -> Result<OtlpReloadHandle> {
+    Ok(init_tracing_subscriber_with_status(worker_id, session_id, config)?.0)
+}
+
+#[cfg(not(feature = "otlp"))]
+fn init_tracing_subscriber_with_status(
+    worker_id: String,
+    _session_id: String,
+    config: &crate::config::Config,
+) -> Result<(OtlpReloadHandle, Option<Vec<String>>)> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let (writer, use_ansi) = worker_log_writer(config, &worker_id);
@@ -1900,8 +1919,8 @@ fn run_worker(
 
     eprintln!("NEEDLE worker boot: initializing tracing subscriber...");
     let session_id = generate_session_id_for_worker();
-    let _otlp_reload_handle =
-        init_tracing_subscriber(qualified_id.clone(), session_id.clone(), &config)?;
+    let (_otlp_reload_handle, otlp_degraded) =
+        init_tracing_subscriber_with_status(qualified_id.clone(), session_id.clone(), &config)?;
     eprintln!("NEEDLE worker boot: tracing subscriber initialized");
 
     eprintln!("NEEDLE worker boot: creating telemetry...");
@@ -2080,6 +2099,7 @@ fn run_worker(
                         beads_completed: 0,
                         config_reload_generation: 0,
                         state: Some(crate::types::WorkerState::AdmissionBlocked),
+                        otlp_degraded: None,
                     };
                     if let Err(e) = registry.register(entry) {
                         tracing::warn!(
@@ -2150,6 +2170,7 @@ fn run_worker(
             config_sources,
         ))
     })?;
+    worker.set_otlp_degraded(otlp_degraded);
 
     // Boot timeout guard: self-abort if active initialization took >60 s.
     // The bounded resource backoff is an intentional precondition wait, just
@@ -4592,6 +4613,12 @@ fn cmd_status(
                                 "  {} — {} completed / {} claims, state: {state}{alive}",
                                 ws.entry.id, ws.entry.beads_completed, ws.entry.beads_processed,
                             );
+                            if let Some(missing) = &ws.entry.otlp_degraded {
+                                println!(
+                                    "    OTLP: DEGRADED (missing header env: {})",
+                                    missing.join(", ")
+                                );
+                            }
                         }
                     }
                     println!();
@@ -4688,6 +4715,7 @@ fn cmd_status(
                         "beads_completed": ws.entry.beads_completed,
                         "beads_processed": ws.entry.beads_processed,
                         "state": ws.state,
+                        "otlp_degraded": ws.entry.otlp_degraded,
                         "current_bead": ws.current_bead,
                         "pid_alive": ws.pid_alive,
                         "uptime_secs": ws.uptime_secs,

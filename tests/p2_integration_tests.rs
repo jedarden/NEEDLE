@@ -417,6 +417,7 @@ fn make_worker_entry(id: &str, provider: Option<&str>, model: Option<&str>) -> W
         beads_processed: 0,
         beads_completed: 0,
         config_reload_generation: 0,
+        otlp_degraded: None,
         state: Some(WorkerState::Executing),
     }
 }
@@ -822,6 +823,7 @@ async fn mend_strand_cleans_dead_zero_activity_worker_logs_immediately() {
             beads_processed: 0,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         })
         .unwrap();
@@ -891,6 +893,7 @@ async fn mend_strand_preserves_active_worker_logs() {
             beads_processed: 10,
             beads_completed: 0,
             config_reload_generation: 0,
+            otlp_degraded: None,
             state: None,
         })
         .unwrap();
@@ -1346,6 +1349,7 @@ async fn registry_concurrent_registration_no_corruption() {
                     beads_processed: 0,
                     beads_completed: 0,
                     config_reload_generation: 0,
+                    otlp_degraded: None,
                     state: None,
                 })
                 .unwrap();
@@ -1389,6 +1393,7 @@ async fn registry_deregister_during_concurrent_registrations() {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();
@@ -1410,6 +1415,7 @@ async fn registry_deregister_during_concurrent_registrations() {
                 beads_processed: 0,
                 beads_completed: 0,
                 config_reload_generation: 0,
+                otlp_degraded: None,
                 state: None,
             })
             .unwrap();

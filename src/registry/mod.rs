@@ -152,6 +152,10 @@ pub struct WorkerEntry {
     /// revision 24 §4.6 / N-T33).
     #[serde(default)]
     pub state: Option<crate::types::WorkerState>,
+    /// Names of environment variables missing from optional OTLP header
+    /// references at boot. Values are intentionally never persisted.
+    #[serde(default)]
+    pub otlp_degraded: Option<Vec<String>>,
 }
 
 /// The user-facing configuration dump published by a running worker.
@@ -638,6 +642,7 @@ mod tests {
             beads_completed: 0,
             config_reload_generation: 0,
             state: None,
+            otlp_degraded: None,
         }
     }
 
@@ -646,6 +651,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = Registry::new(dir.path());
         reg.register(make_entry("alpha")).unwrap();
+
+        let mut entry = make_entry("otlp-degraded");
+        entry.otlp_degraded = Some(vec![
+            "NEEDLE_TEST_OTLP_AUTHORIZATION".to_string(),
+            "NEEDLE_TEST_OTLP_TENANT".to_string(),
+        ]);
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("NEEDLE_TEST_OTLP_AUTHORIZATION"));
+        assert!(json.contains("NEEDLE_TEST_OTLP_TENANT"));
+        assert!(!json.contains("Bearer secret-value"));
+        let round_tripped: WorkerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.otlp_degraded, entry.otlp_degraded);
+        let mut old_entry = serde_json::to_value(entry).unwrap();
+        old_entry.as_object_mut().unwrap().remove("otlp_degraded");
+        let old_entry: WorkerEntry = serde_json::from_value(old_entry).unwrap();
+        assert_eq!(old_entry.otlp_degraded, None);
 
         reg.update_state("alpha", Some(WorkerState::AdmissionBlocked));
         let entry = reg.get("alpha").unwrap().expect("entry present");

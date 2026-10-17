@@ -871,6 +871,9 @@ pub struct Worker {
     /// Source annotations belonging to the configuration snapshot in use.
     config_sources: SourceMap,
     worker_name: String,
+    /// Names of missing optional OTLP header environment variables observed
+    /// by the boot tracing initializer. Only names reach the registry.
+    otlp_degraded: Option<Vec<String>>,
     /// Cached qualified worker ID (agent-default + identifier).
     /// Set at construction time to prevent inconsistencies if config.agent.default changes.
     qualified_id: String,
@@ -1513,6 +1516,7 @@ impl Worker {
             config,
             config_sources,
             worker_name,
+            otlp_degraded: None,
             qualified_id, // Cache the qualified ID at construction time
             home_store: store.clone(),
             store,
@@ -2219,6 +2223,7 @@ impl Worker {
             beads_completed: 0,
             config_reload_generation: self.config_reload_generation,
             state: Some(WorkerState::Booting),
+            otlp_degraded: self.otlp_degraded.clone(),
         };
         if let Err(e) = self.registry.register(entry.clone()) {
             // Log to both tracing and stderr for visibility
@@ -9290,9 +9295,14 @@ impl Worker {
             beads_completed: self.beads_completed,
             config_reload_generation: self.config_reload_generation,
             state: Some(self.state.clone()),
+            otlp_degraded: self.otlp_degraded.clone(),
         };
         self.registry.register(entry)?;
         self.publish_live_config_snapshot()
+    }
+
+    pub(crate) fn set_otlp_degraded(&mut self, missing_header_variables: Option<Vec<String>>) {
+        self.otlp_degraded = missing_header_variables.filter(|variables| !variables.is_empty());
     }
 
     /// Publish the safe, user-facing portion of the running configuration.
@@ -15077,6 +15087,7 @@ mod tests {
     async fn registry_entry_tracks_resolved_adapter_model_and_provider() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
+        worker.set_otlp_degraded(Some(vec!["NEEDLE_TEST_OTLP_AUTHORIZATION".to_string()]));
         worker.boot().await.unwrap();
 
         let entries = worker.registry.list().unwrap();
@@ -15086,7 +15097,12 @@ mod tests {
             .expect("booted worker should be registered");
         assert_eq!(entry.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(entry.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            entry.otlp_degraded.as_deref(),
+            Some(["NEEDLE_TEST_OTLP_AUTHORIZATION".to_string()].as_slice())
+        );
 
+        worker.set_otlp_degraded(None);
         worker.update_registry_entry().unwrap();
         let entries = worker.registry.list().unwrap();
         let entry = entries
@@ -15095,6 +15111,7 @@ mod tests {
             .expect("updated worker should remain registered");
         assert_eq!(entry.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(entry.provider.as_deref(), Some("anthropic"));
+        assert_eq!(entry.otlp_degraded, None);
     }
 
     // ── restore_home_store tests ──
