@@ -683,7 +683,7 @@ const RACE_LOST_EXCLUSION_TTL: Duration = Duration::from_secs(30);
 fn handling_watchdog_timeout_secs(config: &Config) -> u64 {
     config
         .validation
-        .outcome_timeout_seconds
+        .handler_timeout_seconds()
         .saturating_add(120)
 }
 
@@ -5337,7 +5337,7 @@ impl Worker {
         );
         // This wrap used to be a bare `Duration::from_secs(60)` "workaround"
         // safety net around the handler's OWN configurable timeout
-        // (`validation.outcome_timeout_seconds`, enforced inside
+        // (the outcome and flush budgets, enforced inside
         // `handle_with_cancellation`). Because 60 < any workspace's real
         // override (e.g. a full monorepo build+test gate needing 30 min),
         // this outer wrap always fired first and silently capped every
@@ -5349,7 +5349,7 @@ impl Worker {
         let outer_handler_timeout_secs = self
             .config
             .validation
-            .outcome_timeout_seconds
+            .handler_timeout_seconds()
             .saturating_add(30);
         let handling_future = async {
             let handler_future = self.outcome_handler.handle_with_cancellation(
@@ -6856,9 +6856,15 @@ impl Worker {
                     .as_ref()
                     .map(ResolvedStoreContext::store)
                     .unwrap_or_else(|| self.store.clone());
-                let result =
-                    tokio::time::timeout(Duration::from_secs(30), store.release_claim(&handle))
-                        .await;
+                // Checkpoint-shaped budget: a fenced release commits and
+                // auto-publishes the checkpoint, which measured ~37.5s on the
+                // loaded fleet store — the generic 30s wrap mislabeled slow
+                // releases as ownership loss (needle-ca653876).
+                let result = tokio::time::timeout(
+                    Duration::from_secs(crate::bead_store::backend::SYNC_OP_TIMEOUT_SECS),
+                    store.release_claim(&handle),
+                )
+                .await;
                 return match result {
                     Ok(Ok(crate::bead_store::ClaimMutationResult::Applied)) => {
                         Ok(ClaimRelease::Released)
@@ -6883,7 +6889,12 @@ impl Worker {
                 };
             }
         }
-        match tokio::time::timeout(Duration::from_secs(30), self.store.release(bead_id)).await {
+        match tokio::time::timeout(
+            Duration::from_secs(crate::bead_store::backend::SYNC_OP_TIMEOUT_SECS),
+            self.store.release(bead_id),
+        )
+        .await
+        {
             Ok(Ok(())) => Ok(ClaimRelease::Released),
             Ok(Err(error)) if operation_failed_with(&error, "release", 4) => {
                 tracing::debug!(
@@ -6983,16 +6994,92 @@ impl Worker {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("applying bead action without current_bead"))?;
 
-        if action == BeadAction::Superseded || self.claim_ownership_lost.load(Ordering::Acquire) {
+        if action == BeadAction::Superseded {
             return self.finish_superseded(&bead.id).await;
         }
+        let ownership_uncertain = self.claim_ownership_lost.load(Ordering::Acquire);
 
         if let Some(reason) = self.store.workspace_pause_reason() {
+            tracing::warn!(workspace = %bead.workspace.display(), bead_id = %bead.id,
+                reason = %reason, "workspace synchronization paused before the terminal action");
+            // A pause set by a flush timeout/failure must not strand the
+            // claim (needle-ca653876): the ghost-claim defect was exactly
+            // this branch returning without ever releasing. Recover a claim
+            // this worker still holds: a fenced release does not consult the
+            // checkpoint guard, so it is safe to attempt while paused, and
+            // the plain release's own guard re-checks sync and refuses on a
+            // genuinely untrusted checkpoint history. Anything but a live
+            // claim (agent closed it, already released, another owner) keeps
+            // the historical preserve semantics. Even if lease renewal made
+            // ownership uncertain during the slow flush, the retained fencing
+            // token can safely try the release; an unprotected claim cannot.
+            let can_attempt_release = if ownership_uncertain {
+                match self.claim_handle.as_ref() {
+                    Some(handle) => {
+                        let handle = handle.lock().await;
+                        handle.bead_id == bead.id && handle.is_protected()
+                    }
+                    None => false,
+                }
+            } else {
+                true
+            };
+            if can_attempt_release && self.holds_live_claim(&bead.id).await {
+                match self.release_terminal_claim(&bead.id).await {
+                    Ok(ClaimRelease::Released | ClaimRelease::AlreadyLeft) => {
+                        self.claim_ownership_lost.store(false, Ordering::Release);
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            pause_reason = %reason,
+                            "released the still-held claim despite the workspace pause"
+                        );
+                        let _ = self.telemetry.emit_try_lock(
+                            EventKind::BeadReleased {
+                                bead_id: bead.id.clone(),
+                                reason: "handler_action:paused_workspace_recovery".to_string(),
+                            },
+                            chrono::Utc::now(),
+                        );
+                        self.last_outcome = Some("infrastructure_failure".to_string());
+                        self.set_state(WorkerState::Logging)?;
+                        return Ok(());
+                    }
+                    Ok(ClaimRelease::Superseded) => {
+                        if self.holds_live_claim(&bead.id).await {
+                            // The fenced release was unsupported or failed
+                            // without taking effect; the claim is still ours,
+                            // so ownership was not lost. Restore the flag and
+                            // preserve rather than mislabeling stale ownership.
+                            self.claim_ownership_lost.store(false, Ordering::Release);
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                "paused-workspace claim recovery did not take effect; preserving bead state"
+                            );
+                        } else {
+                            return self.finish_superseded(&bead.id).await;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %error,
+                            "paused-workspace claim recovery failed; preserving bead state"
+                        );
+                    }
+                }
+            }
+            if self.claim_ownership_lost.load(Ordering::Acquire) {
+                return self.finish_superseded(&bead.id).await;
+            }
             tracing::warn!(workspace = %bead.workspace.display(), bead_id = %bead.id,
                 reason = %reason, "preserving bead state while workspace synchronization is paused");
             self.last_outcome = Some("infrastructure_failure".to_string());
             self.set_state(WorkerState::Logging)?;
             return Ok(());
+        }
+
+        if ownership_uncertain {
+            return self.finish_superseded(&bead.id).await;
         }
 
         tracing::debug!(
@@ -10436,7 +10523,7 @@ fn report_restart_required_config(telemetry: &Telemetry, keys: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bead_store::{BeadStore, Filters, RepairReport};
+    use crate::bead_store::{BeadStore, ClaimMutationResult, Filters, RepairReport};
     use crate::telemetry::{Sink, TelemetryEvent};
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use async_trait::async_trait;
@@ -10507,12 +10594,12 @@ mod tests {
         // workspace configures, not just longer than the old 50s default.
         let mut config = Config::default();
         config.validation.outcome_timeout_seconds = 50;
-        assert_eq!(handling_watchdog_timeout_secs(&config), 170);
+        assert_eq!(handling_watchdog_timeout_secs(&config), 350);
 
         config.validation.outcome_timeout_seconds = 1800;
         assert_eq!(
             handling_watchdog_timeout_secs(&config),
-            1920,
+            2100,
             "a workspace's real configured timeout must not be capped by a stale hardcoded watchdog ceiling"
         );
 
@@ -11732,6 +11819,13 @@ mod tests {
         /// cannot change a description (bead-rs `update` only carries
         /// status/assignee).
         fail_update_description: bool,
+        /// Sticky sync pause, mirroring `CliBeadStore::set_sync_pause` — set
+        /// directly in tests to emulate a flush timeout/failure that already
+        /// called `pause_workspace()` before `apply_bead_action()` runs.
+        sync_pause: Mutex<Option<String>>,
+        flush_delay: Duration,
+        supports_fenced_release: bool,
+        fenced_release_calls: Mutex<usize>,
         /// Every `close` the store was asked to perform, in order.
         close_calls: Mutex<Vec<BeadId>>,
     }
@@ -11741,6 +11835,10 @@ mod tests {
             MockStore {
                 beads: Mutex::new(beads),
                 fail_update_description: false,
+                sync_pause: Mutex::new(None),
+                flush_delay: Duration::ZERO,
+                supports_fenced_release: false,
+                fenced_release_calls: Mutex::new(0),
                 close_calls: Mutex::new(Vec::new()),
             }
         }
@@ -11749,8 +11847,22 @@ mod tests {
             Self::new(vec![])
         }
 
+        fn with_flush_delay(mut self, delay: Duration) -> Self {
+            self.flush_delay = delay;
+            self
+        }
+
+        fn with_fenced_release(mut self) -> Self {
+            self.supports_fenced_release = true;
+            self
+        }
+
         fn close_calls(&self) -> Vec<BeadId> {
             self.close_calls.lock().unwrap().clone()
+        }
+
+        fn pause_workspace_with(&self, reason: &str) {
+            *self.sync_pause.lock().unwrap() = Some(reason.to_string());
         }
     }
 
@@ -11791,6 +11903,24 @@ mod tests {
             bead.assignee = None;
             Ok(())
         }
+        async fn release_claim(&self, handle: &ClaimHandle) -> Result<ClaimMutationResult> {
+            if !handle.is_protected() {
+                self.release(&handle.bead_id).await?;
+                return Ok(ClaimMutationResult::Applied);
+            }
+            if !self.supports_fenced_release {
+                return Ok(ClaimMutationResult::Unsupported);
+            }
+            *self.fenced_release_calls.lock().unwrap() += 1;
+            let current = self.show(&handle.bead_id).await?;
+            if current.status != BeadStatus::InProgress
+                || current.assignee.as_deref() != Some(handle.assignee.as_str())
+            {
+                return Ok(ClaimMutationResult::LostOwnership);
+            }
+            self.release(&handle.bead_id).await?;
+            Ok(ClaimMutationResult::Applied)
+        }
         async fn block(&self, id: &BeadId) -> Result<()> {
             let mut beads = self.beads.lock().unwrap();
             let bead = beads
@@ -11801,7 +11931,14 @@ mod tests {
             Ok(())
         }
         async fn flush(&self) -> Result<()> {
+            tokio::time::sleep(self.flush_delay).await;
             Ok(())
+        }
+        fn workspace_pause_reason(&self) -> Option<String> {
+            self.sync_pause.lock().unwrap().clone()
+        }
+        fn pause_workspace(&self, reason: String) {
+            *self.sync_pause.lock().unwrap() = Some(reason);
         }
         async fn reopen(&self, id: &BeadId) -> Result<()> {
             let mut beads = self.beads.lock().unwrap();
@@ -14692,6 +14829,137 @@ mod tests {
         let current = interrupted_store.show(&interrupted.id).await.unwrap();
         assert_eq!(current.status, BeadStatus::Open);
         assert_eq!(current.assignee, None);
+    }
+
+    #[tokio::test]
+    async fn paused_workspace_releases_a_still_held_claim_instead_of_stranding_it() {
+        // needle-ca653876: `prepare_release_events()` calls `pause_workspace()`
+        // on a flush timeout/failure before `apply_bead_action()` ever runs.
+        // The old code treated every pause as "preserve the bead, do
+        // nothing else" -- which left this worker's own live claim
+        // in_progress forever, since the release was never retried. A pause
+        // must not block releasing a claim this worker still actually holds.
+        let mut bead = make_test_bead("needle-paused-live-claim");
+        bead.status = BeadStatus::InProgress;
+        let store = Arc::new(MockStore::new(vec![bead.clone()]));
+        let mut worker = make_worker(store.clone());
+        worker.boot().await.unwrap();
+        let holder = worker.qualified_id();
+        bead.assignee = Some(holder.clone());
+        store
+            .beads
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|candidate| candidate.id == bead.id)
+            .unwrap()
+            .assignee = Some(holder);
+        worker.state = WorkerState::Handling;
+        worker.current_bead = Some(bead.clone());
+        store.pause_workspace_with("checkpoint flush timed out before release");
+
+        // The action itself is irrelevant: a workspace pause is checked
+        // before any action-specific handling runs.
+        worker.apply_bead_action(BeadAction::Closed).await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Logging);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(
+            current.status,
+            BeadStatus::Open,
+            "the live claim must be released even though the workspace stayed paused"
+        );
+        assert_eq!(current.assignee, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_flush_timeout_releases_the_claim_in_the_worker_cycle() {
+        // Drive both timeout layers and the terminal action with one fake
+        // store. A slow flush must set the pause and still leave no ghost claim.
+        let workspace = tempfile::tempdir().unwrap();
+        let mut bead = make_test_bead("needle-slow-flush-release");
+        bead.workspace = workspace.path().to_path_buf();
+        bead.status = BeadStatus::InProgress;
+        let store = Arc::new(
+            MockStore::new(vec![bead.clone()])
+                .with_flush_delay(Duration::from_secs(2))
+                .with_fenced_release(),
+        );
+        let mut worker = make_worker(store.clone());
+        worker.boot().await.unwrap();
+        worker.config.validation.outcome_timeout_seconds = 1;
+        worker.config.validation.store_flush_timeout_seconds = 1;
+        worker.outcome_handler =
+            OutcomeHandler::new(worker.config.clone(), worker.telemetry.clone());
+        let holder = worker.qualified_id();
+        bead.assignee = Some(holder.clone());
+        store.beads.lock().unwrap()[0].assignee = bead.assignee.clone();
+        worker.claim_handle = Some(Arc::new(tokio::sync::Mutex::new(ClaimHandle::fenced(
+            bead.id.clone(),
+            "test-workspace".to_string(),
+            holder,
+            Some(1),
+            Some(1),
+            "test-fencing-token".to_string(),
+            Utc::now() + chrono::Duration::seconds(120),
+            crate::claim::ClaimCapabilities {
+                fenced_claim: true,
+                renewable_lease: true,
+                guarded_mutations: true,
+                credential_stdin: true,
+            },
+        ))));
+        worker.state = WorkerState::Handling;
+        worker.current_bead = Some(bead.clone());
+        worker.exec_output = Some((
+            AgentOutcome {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            false,
+        ));
+
+        let action = worker.do_handle().await;
+        assert_eq!(action, BeadAction::Errored);
+        assert!(store.workspace_pause_reason().is_some());
+        // A renewal probe can become uncertain while the flush waits. The
+        // retained fence still allows safe release of this exact claim.
+        worker.claim_ownership_lost.store(true, Ordering::Release);
+        worker.apply_bead_action(action).await.unwrap();
+
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Open);
+        assert_eq!(current.assignee, None);
+        assert_eq!(*store.fenced_release_calls.lock().unwrap(), 1);
+        assert_eq!(*worker.state(), WorkerState::Logging);
+    }
+
+    #[tokio::test]
+    async fn paused_workspace_still_preserves_a_claim_this_worker_does_not_hold() {
+        // The recovery path must not reach for a claim it doesn't own: a
+        // bead already taken over by another worker (or already closed by
+        // the agent) keeps the historical preserve-on-pause semantics.
+        let mut bead = make_test_bead("needle-paused-foreign-claim");
+        bead.status = BeadStatus::InProgress;
+        bead.assignee = Some("some-other-worker".to_string());
+        let store = Arc::new(MockStore::new(vec![bead.clone()]));
+        let mut worker = make_worker(store.clone());
+        worker.boot().await.unwrap();
+        worker.state = WorkerState::Handling;
+        worker.current_bead = Some(bead.clone());
+        store.pause_workspace_with("checkpoint flush timed out before release");
+
+        worker.apply_bead_action(BeadAction::Closed).await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Logging);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(
+            current.status,
+            BeadStatus::InProgress,
+            "a claim this worker does not hold must not be touched: {current:?}"
+        );
+        assert_eq!(current.assignee, Some("some-other-worker".to_string()));
     }
 
     // ── request_shutdown API ──

@@ -1410,13 +1410,32 @@ impl OutcomeHandler {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, anyhow::Error>>,
     {
-        match tokio::time::timeout(std::time::Duration::from_secs(30), op()).await {
+        self.timeout_op_for(std::time::Duration::from_secs(30), op, operation_name)
+            .await
+    }
+
+    /// [`timeout_op`](Self::timeout_op) with an explicit budget, for
+    /// operations whose healthy runtime exceeds the generic 30s — a
+    /// checkpoint flush is three checkpoint-shaped subprocesses and measured
+    /// ~37.5s on the loaded fleet store (needle-ca653876).
+    async fn timeout_op_for<T, F, Fut>(
+        &self,
+        timeout: std::time::Duration,
+        op: F,
+        operation_name: &str,
+    ) -> Result<Option<T>, anyhow::Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, anyhow::Error>>,
+    {
+        match tokio::time::timeout(timeout, op()).await {
             Ok(Ok(result)) => Ok(Some(result)),
             Ok(Err(e)) => Err(e),
             Err(_) => {
                 tracing::error!(
                     operation = operation_name,
-                    "bead store operation timed out after 30s"
+                    timeout_secs = timeout.as_secs(),
+                    "bead store operation timed out"
                 );
                 Ok(None)
             }
@@ -1437,7 +1456,10 @@ impl OutcomeHandler {
     /// 1. Flush the configured backend's durable checkpoint.
     /// 2. Return telemetry events that would be emitted during release.
     ///
-    /// A flush failure pauses the workspace and leaves the bead untouched.
+    /// A flush failure pauses the workspace and leaves the bead untouched by
+    /// this handler — but the flush pausing must not strand the claim
+    /// (needle-ca653876): `apply_bead_action()` recovers a still-held claim
+    /// with a fenced release, which does not consult the checkpoint guard.
     async fn prepare_release_events(
         &self,
         store: &dyn BeadStore,
@@ -1455,7 +1477,13 @@ impl OutcomeHandler {
             Utc::now(),
         );
 
-        match self.timeout_op(|| store.flush(), "flush").await {
+        let flush_timeout = std::time::Duration::from_secs(
+            self.config.validation.store_flush_timeout_seconds.max(1),
+        );
+        match self
+            .timeout_op_for(flush_timeout, || store.flush(), "flush")
+            .await
+        {
             Ok(Some(())) => {
                 tracing::debug!(
                     bead_id = %bead.id,
@@ -1473,16 +1501,42 @@ impl OutcomeHandler {
             Ok(None) => {
                 tracing::warn!(
                     bead_id = %bead.id,
+                    timeout_secs = flush_timeout.as_secs(),
                     "flush timed out before release will be attempted by apply_bead_action()"
                 );
+                // Name the bead whose release is now at risk: this event is
+                // what makes a stranded claim greppable in telemetry.
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::BeadReleaseFailed {
+                        bead_id: bead.id.clone(),
+                        reason: format!(
+                            "checkpoint flush timed out after {}s before release; \
+                             fenced release recovery will be attempted",
+                            flush_timeout.as_secs()
+                        ),
+                    },
+                    Utc::now(),
+                );
                 store.pause_workspace("checkpoint flush timed out before release".to_string());
-                anyhow::bail!("checkpoint flush timed out; preserving bead state");
+                anyhow::bail!(
+                    "checkpoint flush timed out; preserving bead state pending fenced release"
+                );
             }
             Err(e) => {
                 tracing::warn!(
                     bead_id = %bead.id,
                     error = %e,
                     "flush failed before release will be attempted by apply_bead_action()"
+                );
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::BeadReleaseFailed {
+                        bead_id: bead.id.clone(),
+                        reason: format!(
+                            "checkpoint flush failed before release: {e:#}; \
+                             fenced release recovery will be attempted"
+                        ),
+                    },
+                    Utc::now(),
                 );
                 store.pause_workspace(format!("checkpoint flush failed before release: {e:#}"));
                 return Err(e.context("checkpoint flush failed; preserving bead state"));
@@ -3630,14 +3684,16 @@ impl OutcomeHandler {
         }
 
         // Wrap the handler in a timeout to prevent indefinite hangs.
-        // This is a safety net in case the internal br call timeouts don't work.
-        // Configurable via `validation.outcome_timeout_seconds` (default 50) —
-        // see GitHub issue jedarden/NEEDLE#8: a gate running a real verification
+        // This is a safety net in case internal store call timeouts fail.
+        // The configurable outcome budget leaves an additional flush budget
+        // so this wrapper cannot cancel a checkpoint operation before its
+        // bead-specific timeout event runs (needle-ca653876). See GitHub issue
+        // jedarden/NEEDLE#8: a gate running a real verification
         // workload (container test suite, secret scan, fresh-model diff verifier)
         // needs minutes, not seconds.
         let bead_id = bead.id.clone();
         let telemetry = self.telemetry.clone();
-        let timeout_secs = self.config.validation.outcome_timeout_seconds;
+        let timeout_secs = self.config.validation.handler_timeout_seconds();
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
@@ -4241,7 +4297,13 @@ impl OutcomeHandler {
 
         // Completion requires a durable checkpoint. A workspace sync failure
         // must not emit the queued BeadCompleted event or retry finished work.
-        match self.timeout_op(|| store.flush(), "flush").await {
+        let publication_timeout = std::time::Duration::from_secs(
+            self.config.validation.store_flush_timeout_seconds.max(1),
+        );
+        match self
+            .timeout_op_for(publication_timeout, || store.flush(), "flush")
+            .await
+        {
             Ok(Some(())) => {
                 tracing::debug!(bead_id = %bead.id, "flushed bead state to JSONL after success");
             }
@@ -9946,8 +10008,9 @@ mod tests {
                 self.inner.block(id).await
             }
             async fn flush(&self) -> Result<()> {
-                // Simulate a slow flush that times out.
-                tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+                // Simulate a slow flush that exceeds the checkpoint-shaped
+                // flush budget (default 180s, needle-ca653876).
+                tokio::time::sleep(std::time::Duration::from_secs(185)).await;
                 Ok(())
             }
             async fn reopen(&self, id: &BeadId) -> Result<()> {
@@ -9995,7 +10058,8 @@ mod tests {
             }
         }
 
-        let handler = test_handler();
+        let helper = crate::telemetry::test_utils::TestHelper::new("slow-flush-timeout");
+        let handler = OutcomeHandler::new(Config::default(), helper.telemetry().clone());
         let store = Arc::new(SlowFlushStore {
             inner: MockBeadStore::new(BeadStatus::InProgress),
         });
@@ -10006,7 +10070,12 @@ mod tests {
             .handle(store.as_ref(), &bead, &test_output(1), false)
             .await;
 
-        assert_eq!(started.elapsed(), std::time::Duration::from_secs(30));
+        assert_eq!(
+            started.elapsed(),
+            std::time::Duration::from_secs(
+                crate::config::ValidationConfig::default_store_flush_timeout_seconds()
+            )
+        );
         assert!(result
             .unwrap_err()
             .to_string()
@@ -10016,6 +10085,14 @@ mod tests {
             .actions()
             .iter()
             .all(|action| !matches!(action, StoreAction::Release(_))));
+        helper.sync().await;
+        let events = helper.events_by_type("bead.release.failed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data["bead_id"], bead.id.as_ref());
+        assert!(events[0].data["reason"]
+            .as_str()
+            .unwrap()
+            .contains("checkpoint flush timed out"));
     }
 
     #[tokio::test]
@@ -10162,8 +10239,18 @@ mod tests {
         let yaml = "validation:\n  outcome_timeout_seconds: 300\n";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.validation.outcome_timeout_seconds, 300);
+        assert_eq!(config.validation.store_flush_timeout_seconds, 180);
+        assert_eq!(config.validation.handler_timeout_seconds(), 480);
         // stderr_cap_bytes still defaults even though only outcome_timeout_seconds was set.
         assert_eq!(config.validation.stderr_cap_bytes, 4096);
+    }
+
+    #[test]
+    fn validation_store_flush_timeout_seconds_parses_override() {
+        let yaml = "validation:\n  store_flush_timeout_seconds: 61\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.validation.store_flush_timeout_seconds, 61);
+        assert_eq!(config.validation.handler_timeout_seconds(), 111);
     }
 
     /// A store whose `show()` genuinely sleeps (a real `.await` yield point,
@@ -10186,7 +10273,7 @@ mod tests {
             self.inner.ready(filters).await
         }
         async fn show(&self, id: &BeadId) -> Result<Bead> {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             self.inner.show(id).await
         }
         async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
@@ -10243,10 +10330,9 @@ mod tests {
     async fn handle_with_cancellation_respects_configured_timeout() {
         // A bead store whose `show()` genuinely sleeps (a real .await yield
         // point, unlike a blocking `std::process::Command` gate — see below)
-        // for 2s, with outcome_timeout_seconds configured to 1s: far shorter
-        // than the previous hardcoded 50s and shorter than the store's own
-        // inner 30s timeout_op. If the outer timeout fires here, the
-        // *configured* value is what's enforced, not the old constant.
+        // for 3s, with a 1s outcome budget and a 1s flush allowance. The
+        // outer handler deadline is 2s, leaving both configured budgets but
+        // still bounding an operation that never reaches a flush.
         //
         // Note: this deliberately does NOT use a slow `verification:` gate
         // command to trigger the timeout. `CommandGate::run_command` calls
@@ -10265,6 +10351,7 @@ mod tests {
         let config = Config {
             validation: ValidationConfig {
                 outcome_timeout_seconds: 1,
+                store_flush_timeout_seconds: 1,
                 ..Default::default()
             },
             ..Config::default()
@@ -10283,7 +10370,7 @@ mod tests {
             .unwrap();
         let elapsed = start.elapsed();
 
-        assert_eq!(elapsed, std::time::Duration::from_secs(1));
+        assert_eq!(elapsed, std::time::Duration::from_secs(2));
         assert_eq!(result.bead_action, BeadAction::Errored);
         assert!(result.telemetry_events.is_empty());
     }
@@ -10996,9 +11083,10 @@ mod tests {
         let (_guard, _home) = isolated_home();
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
-        // `handle_success` goes straight to `store.show()`, which sleeps 2s —
-        // the 1s handler timeout fires and drops the `handle` future.
+        // `handle_success` goes straight to `store.show()`, which sleeps 3s —
+        // the 2s handler timeout fires and drops the `handle` future.
         config.validation.outcome_timeout_seconds = 1;
+        config.validation.store_flush_timeout_seconds = 1;
         let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
         let attempt_id = uuid::Uuid::now_v7().to_string();
         helper.telemetry().set_attempt_id(attempt_id.clone());
@@ -11262,9 +11350,10 @@ mod tests {
         assert_row_satisfies_v1_contract("errored after resolved", &rows[2]);
 
         // Cycle 4 is torn down by the handler timeout. Pause the clock for
-        // the deliberate 2s `show()` and narrow the handler budget to 1s.
+        // the deliberate 3s `show()` and narrow the two budgets to 1s each.
         tokio::time::pause();
         handler.config.validation.outcome_timeout_seconds = 1;
+        handler.config.validation.store_flush_timeout_seconds = 1;
         handler.set_attempt_context(AttemptContext::default());
         let slow = SlowShowStore {
             inner: MockBeadStore::new(BeadStatus::Done),

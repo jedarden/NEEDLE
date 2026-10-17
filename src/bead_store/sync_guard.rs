@@ -96,7 +96,9 @@ pub(super) fn guarded_operation(name: &str) -> bool {
 impl CliBeadStore {
     async fn checkpoint_status(&self) -> Result<SyncStatus> {
         let args = ["sync", "status", "--format", "json"].map(str::to_string);
-        let stdout = self.run_argv_unchecked("sync_status", &args, 30).await?;
+        let stdout = self
+            .run_argv_unchecked("sync_status", &args, super::backend::SYNC_OP_TIMEOUT_SECS)
+            .await?;
         serde_json::from_str(&stdout).context("bead-rs sync status returned an invalid contract")
     }
 
@@ -125,7 +127,10 @@ impl CliBeadStore {
             .create(true)
             .truncate(false)
             .open(&path)?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        // The lock is held for a flush-duration, so waiting for it needs the
+        // same checkpoint-shaped budget (needle-ca653876).
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(super::backend::SYNC_OP_TIMEOUT_SECS);
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => break,
@@ -143,11 +148,17 @@ impl CliBeadStore {
             "aligned" if status.published_consistently() => return Ok(Some(file)),
             "remote-advanced" => {
                 let args = ["sync", "reconcile", "--actor", "needle-sync"].map(str::to_string);
-                self.run_argv_unchecked("sync_reconcile", &args, 30).await?;
+                self.run_argv_unchecked(
+                    "sync_reconcile",
+                    &args,
+                    super::backend::SYNC_OP_TIMEOUT_SECS,
+                )
+                .await?;
             }
             "behind" | "absent" => {
                 let args = ["sync", "flush-only"].map(str::to_string);
-                self.run_argv_unchecked("sync_flush", &args, 30).await?;
+                self.run_argv_unchecked("sync_flush", &args, super::backend::SYNC_OP_TIMEOUT_SECS)
+                    .await?;
             }
             _ => bail!(
                 "workspace_sync_paused: {}: {}",

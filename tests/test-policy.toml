@@ -461,7 +461,10 @@ version = 1
 # +1 Mend claim-identity verdict telemetry contract (needle-d6c1de04): the
 # private emitter and its credential-free verdict payload are only observable
 # from the unit tier.
-max_tests = 4277
+# +4 flush-timeout release contracts (needle-ca653876): configuration,
+# bead-specific timeout telemetry, paused workspace ownership safety, and the
+# worker cycle's fenced release after a slow fake flush.
+max_tests = 4281
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -1040,6 +1043,13 @@ kind = "sleep"
 max_occurrences = 3
 owner = "component:util"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/worker/mod.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "needle-ca653876"
+reason = "A paused-time fake flush must cross its configured deadline to prove the worker still releases the fenced claim in the same cycle."
 
 [[unit_exception]]
 path = "src/worker/mod.rs"

@@ -754,6 +754,29 @@ fn operation(
     }
 }
 
+/// Timeout for checkpoint-shaped operations: `sync flush-only` and fenced
+/// claim mutations, whose commit auto-publishes the checkpoint.
+///
+/// A no-op `bead sync flush-only` measured ~37.5s on the loaded fleet store
+/// (needle-ca653876, 2026-10-17) — store size plus fleet load, not a backend
+/// regression — so the generic 30s default kills healthy operations
+/// mid-flight. 180s keeps roughly 5x headroom; used both by the store's
+/// sync-guard subprocesses and the descriptors below.
+pub(crate) const SYNC_OP_TIMEOUT_SECS: u64 = 180;
+
+/// Like [`operation`], but with the checkpoint-shaped
+/// [`SYNC_OP_TIMEOUT_SECS`] budget instead of the store's generic default.
+fn slow_operation(
+    argv: &[&str],
+    strategy: Option<&str>,
+    parse: Option<ParseShape>,
+) -> BeadOperationSpec {
+    BeadOperationSpec {
+        timeout_secs: Some(SYNC_OP_TIMEOUT_SECS),
+        ..operation(argv, strategy, parse)
+    }
+}
+
 fn common_operations() -> HashMap<String, BeadOperationSpec> {
     [
         ("ready", operation(&[], None, Some(ParseShape::JsonLines))),
@@ -933,7 +956,7 @@ fn builtin_bead_rs() -> BeadBackend {
     );
     operations.insert(
         "release_fenced".into(),
-        operation(
+        slow_operation(
             &[
                 "release",
                 "{id}",
@@ -947,7 +970,7 @@ fn builtin_bead_rs() -> BeadBackend {
     );
     operations.insert(
         "update_fenced".into(),
-        operation(
+        slow_operation(
             &[
                 "update",
                 "{id}",
@@ -963,7 +986,7 @@ fn builtin_bead_rs() -> BeadBackend {
     );
     operations.insert(
         "close_fenced".into(),
-        operation(
+        slow_operation(
             &[
                 "close",
                 "{id}",
@@ -979,7 +1002,7 @@ fn builtin_bead_rs() -> BeadBackend {
     );
     operations.insert(
         "resolve_fenced".into(),
-        operation(
+        slow_operation(
             &[
                 "resolve",
                 "{id}",
@@ -1088,7 +1111,7 @@ fn builtin_bead_rs() -> BeadBackend {
     );
     operations.insert(
         "flush".into(),
-        operation(&["sync", "flush-only"], None, None),
+        slow_operation(&["sync", "flush-only"], None, None),
     );
     operations.insert(
         "reopen".into(),

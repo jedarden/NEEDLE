@@ -7278,6 +7278,17 @@ pub struct ValidationConfig {
     #[serde(default = "ValidationConfig::default_fallback_gate")]
     pub fallback_gate: bool,
 
+    /// Timeout (seconds) for the outcome handler's checkpoint-flush wrapper.
+    ///
+    /// A pre-release `bead sync flush-only` is checkpoint-shaped: it runs the
+    /// sync guard (status, possibly reconcile), the flush itself, and a
+    /// publication verify — subprocesses that measured ~37.5s total on a
+    /// loaded fleet store (needle-ca653876, 2026-10-17), well past the 30s
+    /// budget every other store op uses. Default 180 keeps roughly 5x that
+    /// headroom without making a genuinely hung flush unobservable.
+    #[serde(default = "ValidationConfig::default_store_flush_timeout_seconds")]
+    pub store_flush_timeout_seconds: u64,
+
     /// Language-default verification gate for workspaces that declare none
     /// (plan section 4.4 step 6).
     #[serde(default)]
@@ -7343,6 +7354,7 @@ impl Default for ValidationConfig {
             outcome_timeout_seconds: Self::default_outcome_timeout_seconds(),
             stderr_cap_bytes: Self::default_stderr_cap_bytes(),
             fallback_gate: Self::default_fallback_gate(),
+            store_flush_timeout_seconds: Self::default_store_flush_timeout_seconds(),
             default_gates: DefaultGatesConfig::default(),
         }
     }
@@ -7352,11 +7364,20 @@ impl ValidationConfig {
     pub fn default_outcome_timeout_seconds() -> u64 {
         50
     }
+    /// The handler may spend its outcome budget before it starts publishing a
+    /// checkpoint. Its outer timeout must leave the full flush budget intact.
+    pub fn handler_timeout_seconds(&self) -> u64 {
+        self.outcome_timeout_seconds
+            .saturating_add(self.store_flush_timeout_seconds.max(1))
+    }
     fn default_stderr_cap_bytes() -> usize {
         4096
     }
     fn default_fallback_gate() -> bool {
         true
+    }
+    pub fn default_store_flush_timeout_seconds() -> u64 {
+        180
     }
 }
 
