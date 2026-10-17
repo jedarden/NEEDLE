@@ -464,7 +464,9 @@ version = 1
 # +4 flush-timeout release contracts (needle-ca653876): configuration,
 # bead-specific timeout telemetry, paused workspace ownership safety, and the
 # worker cycle's fenced release after a slow fake flush.
-max_tests = 4281
+# +4 operator-managed worker environment parser contracts (needle-0a3f0010):
+# comments/blank lines, malformed assignments, missing files, and permissions.
+max_tests = 4285
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -598,7 +600,8 @@ contract = 246
 # the shell-mediated exit-127 release with an unchanged failure count, and
 # the executed-rejection no-regression arm climbing to quarantine.
 
-e2e = 859
+# +1 operator-managed worker environment launch probe (needle-0a3f0010).
+e2e = 860
 soak = 0
 fuzz = 0
 
@@ -657,7 +660,8 @@ tier = "e2e"
 # activity reset idle deadlines, closed output pipes retain timeout enforcement,
 # and worker cancellation kills and reaps the process group.
 # +1 attempt-archive harness transcript copy/status contract (needle-310a29eb).
-max_tests = 449
+# +1 operator-managed worker environment launch probe (needle-0a3f0010).
+max_tests = 450
 owner = "component:process-integration"
 
 [[harness]]

@@ -1301,6 +1301,21 @@ an environment reference in `headers`, for example
 `Authorization: env:NEEDLE_OTLP_AUTHORIZATION`. The environment variable must
 contain the complete header value (such as `Bearer <token>`).
 
+Workers also load an optional operator-managed environment file at
+`~/.config/needle/workers/env` before launch. Use one `KEY=VALUE` assignment per
+line; comments and blank lines are accepted. Keep the file mode `600`. To
+materialize it from the operator's secret store without putting the value in
+the repository, pipe the selected field into the file:
+
+```text
+bao kv get -field=<key> secret/<cluster>/<app> > ~/.config/needle/workers/env
+chmod 600 ~/.config/needle/workers/env
+```
+
+The file is applied by both `needle run` and supervisor-launched workers. A
+missing file leaves the inherited environment unchanged. Launch warnings never
+include file contents.
+
 ### Webhooks (Hooks)
 
 ```yaml

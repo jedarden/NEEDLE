@@ -29,6 +29,7 @@ use crate::telemetry::{self, EventKind, Telemetry};
 use crate::types::{Bead, BeadStatus, IdleAction};
 use crate::upgrade;
 use crate::worker::Worker;
+use crate::worker_env;
 
 pub mod audit;
 pub mod file_contention;
@@ -2383,12 +2384,21 @@ fn launch_in_tmux(
         .to_string_lossy()
         .to_string();
 
-    let inner_cmd = format!(
-        "NEEDLE_INNER=1 {} {} 2>> {}",
-        shell_escape(&self_exe.display().to_string()),
-        inner_args
+    let worker_env = worker_env::load();
+    let mut env_args = vec!["env".to_string()];
+    env_args.extend(
+        worker_env
             .iter()
-            .map(|a| shell_escape(a))
+            .map(|(key, value)| format!("{key}={value}")),
+    );
+    env_args.push("NEEDLE_INNER=1".to_string());
+    env_args.push(self_exe.display().to_string());
+    env_args.extend(inner_args);
+    let inner_cmd = format!(
+        "{} 2>> {}",
+        env_args
+            .iter()
+            .map(|arg| shell_escape(arg))
             .collect::<Vec<_>>()
             .join(" "),
         shell_escape(&stderr_log)

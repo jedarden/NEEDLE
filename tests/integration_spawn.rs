@@ -113,5 +113,7 @@ mod verify_bash_wrapper_exclusion;
 mod verify_deleted_binary_hot_reload;
 #[path = "integration_spawn/verify_process_discovery.rs"]
 mod verify_process_discovery;
+#[path = "integration_spawn/worker_env.rs"]
+mod worker_env;
 #[path = "integration_spawn/zcode_headless_adapter.rs"]
 mod zcode_headless_adapter;

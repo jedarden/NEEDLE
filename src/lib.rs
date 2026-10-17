@@ -115,4 +115,5 @@ pub mod verification_fingerprint;
 pub mod version_probe;
 pub mod wip;
 pub mod worker;
+pub mod worker_env;
 pub mod workspace_equality;

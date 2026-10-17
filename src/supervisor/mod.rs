@@ -29,6 +29,7 @@ use crate::config::{CliOverrides, Config, ConfigLoader};
 use crate::registry::{is_pid_alive, Registry};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::upgrade;
+use crate::worker_env;
 
 /// Default interval for polling the ready queue (seconds).
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 10;
@@ -932,6 +933,8 @@ impl Supervisor {
                 if let Some(timeout) = self.config.agent_timeout {
                     cmd.arg("--timeout").arg(timeout.to_string());
                 }
+
+                worker_env::apply_to_command(&mut cmd);
 
                 // Spawn in background (detached process)
                 cmd.stdin(std::process::Stdio::null())
