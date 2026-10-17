@@ -998,6 +998,19 @@ impl GuardedApplier<'_> {
                 Ok(crate::validation::GateResult::Pass) => {
                     shipped_verified = true;
                 }
+                Ok(crate::validation::GateResult::PassRewritten(detail)) => {
+                    tracing::info!(
+                        bead_id = %bead.id,
+                        detail = %detail,
+                        "resolve complete: shipped work landed on the upstream under a \
+                         rewritten commit"
+                    );
+                    let _ = self.telemetry.emit(
+                        crate::outcome::shipped_work_rewritten_event(&bead.id, &detail),
+                        Utc::now(),
+                    );
+                    shipped_verified = true;
+                }
                 Ok(crate::validation::GateResult::Fail(reason)) => {
                     tracing::warn!(
                         bead_id = %bead.id,

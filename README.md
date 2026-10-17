@@ -75,6 +75,9 @@ worker at a repository you care about.
 NEEDLE accepts a closure it checks that the dispatch produced a commit — on a path outside
 `notes/` and `.beads/` — that has been **pushed to the branch's upstream** (agents are
 instructed to commit and push; a bead note explaining why no code was needed also passes).
+In a checkout shared by several workers the gate judges the dispatch's own commits, not
+whatever sits at `HEAD`: another bead's not-yet-pushed commit on top does not fail it, and a
+commit rebased to a new SHA counts once an identical patch is on the upstream.
 A workspace whose branch has no upstream — a plain `git init`, or `git remote add` without
 `git push -u` — cannot be checked at all, so the quickstart's `git push -u` in step 3 is not
 optional. For a repository that is genuinely local-only, disable the gate instead:

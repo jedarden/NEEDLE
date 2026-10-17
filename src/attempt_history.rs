@@ -443,7 +443,7 @@ pub fn capture_failure_evidence_with_limit(
                 .into_iter()
                 .filter_map(|(name, result)| {
                     let raw = match result {
-                        GateResult::Pass => return None,
+                        GateResult::Pass | GateResult::PassRewritten(_) => return None,
                         GateResult::Fail(reason) => first_error_block(reason).to_string(),
                         GateResult::Unsatisfiable(reason) => first_error_block(reason).to_string(),
                         GateResult::ExecutionError { command, reason } => {

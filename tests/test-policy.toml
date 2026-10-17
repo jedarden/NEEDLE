@@ -427,7 +427,17 @@ version = 1
 # requires evidence), and two config cases (defaults/overrides, threshold
 # range validation). The filters and the strand's creation loop are private,
 # so the unit tier is the cheapest correct home.
-max_tests = 4243
+# +11 reviewed shipped-work regressions (needle-9798bd7e): eight git-fixture
+# cases for the gate's private check_commit (rebased commit with identical
+# patch passes as PassRewritten, also when the rewrite folded in .beads/;
+# never-landed content fails; no new commit unchanged; another bead's
+# unpushed tip over pushed own work passes; other beads' commits are not
+# credited; own unpushed commit beneath a foreign tip fails naming it; an
+# unpushed trivial commit does not fail), one attribution parser case, one
+# GateResult::PassRewritten contract case and one telemetry-event case. The
+# classifier and the event builder are private; the fixtures reuse the
+# module's existing git helpers, so the unit tier is the cheapest home.
+max_tests = 4254
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

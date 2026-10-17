@@ -53,6 +53,13 @@ use crate::config::{ConfigTier, ReloadTier};
 pub enum GateResult {
     /// The gate passed validation.
     Pass,
+    /// The gate passed, but only by recognising the dispatch's work on the
+    /// upstream under a different commit: the commit HEAD holds was rewritten
+    /// (a concurrent `git pull --rebase`, an amend) and an identical
+    /// `git patch-id --stable` landed instead (needle-9798bd7e). Telemetry
+    /// keeps it apart from a plain [`GateResult::Pass`]; the string names the
+    /// commits and their landed counterparts.
+    PassRewritten(String),
     /// The gate failed validation with a reason.
     Fail(String),
     /// The gate's precondition cannot be satisfied by any work in this
@@ -70,13 +77,13 @@ pub enum GateResult {
 impl GateResult {
     /// Returns true if the gate passed.
     pub fn passed(&self) -> bool {
-        matches!(self, GateResult::Pass)
+        matches!(self, GateResult::Pass | GateResult::PassRewritten(_))
     }
 
     /// Returns the failure reason if this is a `Fail` result.
     pub fn failure_reason(&self) -> Option<&str> {
         match self {
-            GateResult::Pass => None,
+            GateResult::Pass | GateResult::PassRewritten(_) => None,
             GateResult::Fail(reason) => Some(reason),
             GateResult::Unsatisfiable(_) => None,
             GateResult::ExecutionError { .. } => None,
@@ -1301,6 +1308,16 @@ mod tests {
     #[test]
     fn gate_result_pass_has_no_reason() {
         assert!(GateResult::Pass.failure_reason().is_none());
+    }
+
+    #[test]
+    fn gate_result_pass_rewritten_passes_without_a_reason() {
+        let result = GateResult::PassRewritten("abc1234 landed as def5678".to_string());
+        assert!(result.passed());
+        assert!(result.failure_reason().is_none());
+        assert!(!result.is_unsatisfiable());
+        assert!(!result.is_execution_error());
+        assert!(GateReport::new(HashMap::from([("shipped_work".to_string(), result)])).all_passed);
     }
 
     // ── GateReport tests ──

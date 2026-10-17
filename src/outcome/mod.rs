@@ -400,7 +400,7 @@ fn operator_store_gate_reason(gate_report: Option<&GateReport>) -> Option<String
         .iter()
         .filter_map(|(gate, result)| {
             let detail = match result {
-                GateResult::Pass => return None,
+                GateResult::Pass | GateResult::PassRewritten(_) => return None,
                 GateResult::Fail(reason) => reason.clone(),
                 GateResult::Unsatisfiable(reason) => reason.clone(),
                 GateResult::ExecutionError { command, reason } => {
@@ -645,7 +645,7 @@ fn attempt_failure_summary(
                         "gate `{name}` could not run ({reason}) — command: {command}"
                     ));
                 }
-                GateResult::Pass => {}
+                GateResult::Pass | GateResult::PassRewritten(_) => {}
             }
         }
     }
@@ -861,6 +861,24 @@ fn is_build_gate_failure(gate: &str, reason: &str) -> bool {
         || reason.contains("definition-of-done")
 }
 
+/// Telemetry for a shipped-work pass that needed patch-equivalence: the
+/// dispatch's commit was rewritten under a new SHA before it was judged, and
+/// its identical patch is what reached the upstream (needle-9798bd7e). A
+/// plain pass emits nothing extra, so this event is how a rewritten landing
+/// stays distinguishable from a commit pushed as made.
+pub(crate) fn shipped_work_rewritten_event(bead_id: &BeadId, detail: &str) -> EventKind {
+    EventKind::Log {
+        phase: "shipped_work".to_string(),
+        level: "info".to_string(),
+        bead_id: Some(bead_id.clone()),
+        context: serde_json::json!({
+            "gate": "shipped_work",
+            "verdict": "pass_rewritten",
+            "detail": detail,
+        }),
+    }
+}
+
 /// Convert a gate report into the ledger's per-gate entries, ordered by name.
 ///
 /// Gate execution is not individually timed today, so `duration_ms` is 0
@@ -875,7 +893,10 @@ fn gate_result_entries(gate_report: Option<&GateReport>) -> Vec<crate::telemetry
         .iter()
         .map(|(name, result)| {
             let status = match result {
-                GateResult::Pass => "pass",
+                // The attempt-resolved v3 contract enumerates `pass`; the
+                // rewritten distinction travels in its own `log.entry` event
+                // (`shipped_work_rewritten_event`).
+                GateResult::Pass | GateResult::PassRewritten(_) => "pass",
                 GateResult::Fail(_) => "fail",
                 GateResult::Unsatisfiable(_) => "unsatisfiable",
                 GateResult::ExecutionError { .. } => "execution_error",
@@ -3592,6 +3613,27 @@ impl OutcomeHandler {
         }
     }
 
+    /// Record a shipped-work verdict of [`GateResult::PassRewritten`]: log
+    /// it and emit [`shipped_work_rewritten_event`]. A telemetry error is
+    /// logged, never allowed to undo a verdict that already passed.
+    fn emit_shipped_work_rewritten(&self, bead: &Bead, detail: &str) {
+        tracing::info!(
+            bead_id = %bead.id,
+            detail = %detail,
+            "shipped work landed on the upstream under a rewritten commit"
+        );
+        if let Err(e) = self
+            .telemetry
+            .emit(shipped_work_rewritten_event(&bead.id, detail), Utc::now())
+        {
+            tracing::warn!(
+                bead_id = %bead.id,
+                error = %e,
+                "failed to emit shipped_work pass_rewritten telemetry"
+            );
+        }
+    }
+
     /// Success: verification already passed, now verify bead closure.
     ///
     /// CRITICAL: This is only called when verification PASSED.
@@ -3733,7 +3775,13 @@ impl OutcomeHandler {
                                 .handle_gate_failure(store, bead, &report, gate_telemetry)
                                 .await;
                         }
-                        Ok(crate::validation::GateResult::Pass) => {
+                        Ok(
+                            verdict @ (crate::validation::GateResult::Pass
+                            | crate::validation::GateResult::PassRewritten(_)),
+                        ) => {
+                            if let crate::validation::GateResult::PassRewritten(detail) = &verdict {
+                                self.emit_shipped_work_rewritten(bead, detail);
+                            }
                             // Shipped work verified — but a bypass of the
                             // Definition-of-Done hook during this dispatch is
                             // still a failed gate, whatever the commit
@@ -3919,7 +3967,13 @@ impl OutcomeHandler {
                     match verify_shipped_work(&current, &bead.workspace, store, fallback.as_ref())
                         .await
                     {
-                        Ok(crate::validation::GateResult::Pass) => {
+                        Ok(
+                            verdict @ (crate::validation::GateResult::Pass
+                            | crate::validation::GateResult::PassRewritten(_)),
+                        ) => {
+                            if let crate::validation::GateResult::PassRewritten(detail) = &verdict {
+                                self.emit_shipped_work_rewritten(bead, detail);
+                            }
                             // Shipped code does not establish acceptance. The
                             // agent may have deliberately left required CI,
                             // deployment or observation work pending. Only an
@@ -4275,7 +4329,7 @@ impl OutcomeHandler {
                     GateResult::Fail(reason) => reason.clone(),
                     GateResult::Unsatisfiable(reason) => reason.clone(),
                     GateResult::ExecutionError { reason, .. } => reason.clone(),
-                    GateResult::Pass => String::new(),
+                    GateResult::Pass | GateResult::PassRewritten(_) => String::new(),
                 };
                 (name.clone(), reason)
             })
@@ -6130,6 +6184,37 @@ mod tests {
             ),
             ..AttemptContext::default()
         }
+    }
+
+    #[test]
+    fn shipped_work_rewritten_pass_is_distinct_telemetry() {
+        let detail = "abc1234 landed as def5678";
+        match shipped_work_rewritten_event(&BeadId::from("needle-1a2b3c4d"), detail) {
+            EventKind::Log {
+                phase,
+                context,
+                level,
+                bead_id,
+            } => {
+                assert_eq!(phase, "shipped_work");
+                assert_eq!(level, "info");
+                assert_eq!(bead_id.as_deref(), Some("needle-1a2b3c4d"));
+                assert_eq!(context["gate"], "shipped_work");
+                assert_eq!(context["verdict"], "pass_rewritten");
+                assert_eq!(context["detail"], detail);
+            }
+            other => panic!("expected a log.entry event, got {other:?}"),
+        }
+        let entries =
+            gate_result_entries(Some(&GateReport::new(std::collections::HashMap::from([(
+                "shipped_work".to_string(),
+                GateResult::PassRewritten(detail.to_string()),
+            )]))));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].status, "pass",
+            "the attempt-resolved v3 schema enumerates pass, fail and execution_error"
+        );
     }
 
     #[test]
