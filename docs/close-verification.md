@@ -46,6 +46,8 @@ A close reason with neither shape, or with no command NEEDLE can re-run, is
 rejected: the bead is reopened and released with reason
 `close reason carries no verification evidence`, and the attempt counts toward
 the failure ceiling like any other gate failure.
+The block must itself name a runnable command; a test quoted in the bead body
+does not substitute for the agent's own verification claim.
 
 ## Re-run policy
 
@@ -86,6 +88,10 @@ quoting it. Claimed commands are deliberately **not** scoped this way: an
 agent claiming `go test` ran in a Rust repo is claiming something false, and
 the re-run exists to catch that.
 
+Marker checks use committed HEAD, and acceptance commands from both the
+claimed bead and its current description are merged. An in-flight edit to a
+build marker or the description cannot remove a test from the close check.
+
 Quote acceptance commands in backticks when authoring beads
 (see [bead-authoring.md](bead-authoring.md)).
 
@@ -102,6 +108,11 @@ workspace's committed HEAD (`git archive`, the same mechanism as
 uncommitted state — including other workers' in-flight edits — cannot make a
 re-run pass or fail. On success the extraction is removed; on failure it is
 left in place for diagnosis.
+
+Gate resolution also reads `.needle.yaml` and build markers from committed
+HEAD. An uncommitted opt-out or a locally deleted definition-of-done script
+cannot change which verifier runs. If HEAD moves while verification runs,
+completion is withheld as an execution error.
 
 ## Verdicts
 

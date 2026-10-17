@@ -155,6 +155,7 @@ impl FallbackVerificationRuntime {
     /// passed in so this runtime stays config-free. `default_gates` carries
     /// only the Node policy ([`crate::validation::fallback::
     /// node_verifier_command`]); every other selection keeps its builtin.
+    #[cfg(test)]
     pub(crate) async fn verify(
         &self,
         bead: &Bead,
@@ -162,7 +163,25 @@ impl FallbackVerificationRuntime {
         stderr_cap_bytes: usize,
         default_gates: &crate::config::DefaultGatesConfig,
     ) -> FallbackVerdict {
-        let detected = crate::validation::fallback::select_verifier(&bead.workspace);
+        self.verify_from_tree(
+            bead,
+            &bead.workspace,
+            timeout,
+            stderr_cap_bytes,
+            default_gates,
+        )
+        .await
+    }
+
+    pub(crate) async fn verify_from_tree(
+        &self,
+        bead: &Bead,
+        committed_tree: &std::path::Path,
+        timeout: Duration,
+        stderr_cap_bytes: usize,
+        default_gates: &crate::config::DefaultGatesConfig,
+    ) -> FallbackVerdict {
+        let detected = crate::validation::fallback::select_verifier(committed_tree);
 
         // needle-bb1052d4: a Node workspace answers to the default_gates
         // Node policy, not to the marker's builtin `npm test`. With no

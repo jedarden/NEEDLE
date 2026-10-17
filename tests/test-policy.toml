@@ -482,7 +482,9 @@ max_tests = 4277
 # +6 p2 file-contention integration fixture (needle-4386d7bd).
 # +1 clean-state definition-of-done priority over the Go default
 # (needle-165ab6f6), exercised through the public outcome boundary.
-push = 685
+# +1 committed gate-selection snapshot despite uncommitted shared-tree edits
+# (needle-165ab6f6).
+push = 686
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -703,7 +705,9 @@ tier = "push"
 # with env_clear and an isolated HOME.
 # +1 gate-less Go workspace selects its committed definition-of-done script
 # ahead of the language default (needle-165ab6f6).
-max_tests = 137
+# +1 shared-checkout edits cannot alter the committed verifier choice
+# (needle-165ab6f6).
+max_tests = 138
 owner = "component:pluck-mend-explore"
 
 [[harness]]

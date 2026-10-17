@@ -350,7 +350,7 @@ impl GateSubject {
         &self.tree
     }
 
-    async fn capture(workspace: &Path) -> Result<Self> {
+    pub(crate) async fn capture(workspace: &Path) -> Result<Self> {
         let revision = git_stdout(workspace, &["rev-parse", "--verify", "HEAD^{commit}"]).await?;
         validate_git_oid("commit", &revision)?;
         let tree_expression = format!("{revision}^{{tree}}");
@@ -366,7 +366,7 @@ impl GateSubject {
     /// Verify both that the captured commit still names the captured tree and
     /// that the workspace still points at that commit. Git objects are
     /// immutable, but HEAD in a shared checkout is not.
-    async fn verify_current(&self, workspace: &Path) -> Result<()> {
+    pub(crate) async fn verify_current(&self, workspace: &Path) -> Result<()> {
         let tree_expression = format!("{}^{{tree}}", self.revision);
         let resolved_tree = git_stdout(
             workspace,
@@ -722,7 +722,7 @@ impl CommandGate {
 /// This creates a clean copy of the captured commit in a temporary directory
 /// using `git archive`. This is used for running gates in isolation from
 /// uncommitted changes and from a concurrently moving workspace HEAD.
-async fn extract_committed_state(
+pub(crate) async fn extract_committed_state(
     workspace: &Path,
     bead_id: &str,
     subject: &GateSubject,

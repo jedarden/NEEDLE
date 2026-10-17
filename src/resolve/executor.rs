@@ -189,9 +189,6 @@ pub struct DecisionExecutor {
     /// Whether `complete` must pass shipped-work verification before the
     /// executor closes. Same switch as the dispatch path's gate.
     enforce_shipped_work: bool,
-    /// Host fallback policy, used to distinguish an explicit no-gate opt-out
-    /// from a workspace where no verifier was found.
-    fallback_gate_enabled: bool,
     quarantine_after_failures: u32,
 }
 
@@ -199,7 +196,6 @@ impl DecisionExecutor {
     /// Create an executor from the worker's resolved configuration.
     pub fn new(config: Config, telemetry: Telemetry) -> Self {
         let enforce_shipped_work = config.worker.enforce_shipped_work;
-        let fallback_gate_enabled = config.validation.fallback_gate;
         let quarantine_after_failures = config.outcome.quarantine_after_failures;
         DecisionExecutor {
             outcome: OutcomeHandler::new(config, telemetry.clone()),
@@ -207,7 +203,6 @@ impl DecisionExecutor {
             telemetry,
             mitosis: None,
             enforce_shipped_work,
-            fallback_gate_enabled,
             quarantine_after_failures,
         }
     }
@@ -1065,43 +1060,42 @@ impl GuardedApplier<'_> {
         // Resolve closes the bead itself, so there is no agent close reason to
         // inspect. Re-run executable acceptance commands from the bead's own
         // description against committed state before applying Complete.
-        let acceptance_commands = close_verification::collect_rerun_commands(
-            bead.id.as_ref(),
+        let acceptance_commands = match close_verification::collect_committed_rerun_commands(
+            bead,
             &[],
-            current.body.as_deref(),
-            &bead.workspace,
-        );
-        if acceptance_commands.is_empty() && gate_report.is_none() {
-            // A clean tree says what was committed, but gives no verdict on
-            // whether this bead's acceptance criteria hold. Preserve only an
-            // explicit workspace or host opt-out from verification.
-            let opted_out = if bead.workspace.is_absolute() {
-                match crate::config::gates_for_workspace(&bead.workspace) {
-                    Ok(gates) => {
-                        gates.declared || !gates.fallback_gate.unwrap_or(self.fallback_gate_enabled)
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            bead_id = %bead.id,
-                            error = %error,
-                            "resolve complete: could not confirm an explicit gate opt-out"
-                        );
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            if !opted_out {
+            &[bead.body.as_deref(), current.body.as_deref()],
+        )
+        .await
+        {
+            Ok(commands) => commands,
+            Err(error) => {
                 tracing::warn!(
                     bead_id = %bead.id,
-                    "resolve complete: no verifier or executable acceptance command was available"
+                    error = %error,
+                    "resolve complete: could not inspect committed acceptance markers"
                 );
                 return self
                     .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
                     .await
                     .map(|released| release_result(released, ReleaseCause::Unverifiable));
             }
+        };
+        if acceptance_commands.is_empty()
+            && gate_report.is_none()
+            && !gate_telemetry.explicit_opt_out
+        {
+            // A clean tree says what was committed, but gives no verdict on
+            // whether this bead's acceptance criteria hold. Only the gate
+            // resolution against committed state can establish an opt-out;
+            // an uncommitted `.needle.yaml` must not grant one here.
+            tracing::warn!(
+                bead_id = %bead.id,
+                "resolve complete: no verifier or executable acceptance command was available"
+            );
+            return self
+                .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                .await
+                .map(|released| release_result(released, ReleaseCause::Unverifiable));
         }
         if !acceptance_commands.is_empty() {
             match self
@@ -4106,6 +4100,11 @@ mod tests {
             "gates:\n  - type: command\n    commands:\n      - 'false'\n    run_in: workspace\n",
         )
         .expect("write gate configuration");
+        run_fixture_git(&workspace, &["add", "--", ".needle.yaml"]);
+        run_fixture_git(
+            &workspace,
+            &["commit", "-q", "-m", "configure failing gate"],
+        );
         // The configured gate rejects before shipped-work verification can
         // close the bead, even though the bead carries work evidence.
         let store = RecordingStore::new(workspace).with_stored_notes("did the work");

@@ -60,6 +60,7 @@ pub(crate) struct ErroredReleasePenalty {
 pub(crate) struct GateResolutionTelemetry {
     pub(crate) gates_source: &'static str,
     pub(crate) command_gates_resolved: u32,
+    pub(crate) explicit_opt_out: bool,
 }
 
 impl GateResolutionTelemetry {
@@ -67,6 +68,14 @@ impl GateResolutionTelemetry {
         Self {
             gates_source: "none",
             command_gates_resolved: 0,
+            explicit_opt_out: false,
+        }
+    }
+
+    fn opted_out() -> Self {
+        Self {
+            explicit_opt_out: true,
+            ..Self::none()
         }
     }
 
@@ -77,8 +86,26 @@ impl GateResolutionTelemetry {
         Self {
             gates_source: "bead_workspace",
             command_gates_resolved: command_gates_resolved as u32,
+            explicit_opt_out: false,
         }
     }
+}
+
+fn committed_gate_selection_error(
+    command: &str,
+    reason: impl Into<String>,
+) -> (bool, Option<GateReport>, GateResolutionTelemetry) {
+    let report = GateReport::new(
+        std::iter::once((
+            "gate_subject".to_string(),
+            GateResult::ExecutionError {
+                command: command.to_string(),
+                reason: reason.into(),
+            },
+        ))
+        .collect(),
+    );
+    (false, Some(report), GateResolutionTelemetry::none())
 }
 
 /// The first line of a normalized failure summary, capped for a bead title.
@@ -1565,15 +1592,71 @@ impl OutcomeHandler {
             );
             return Ok((true, None, GateResolutionTelemetry::none()));
         }
+        // Resolve configuration and build markers from the same committed
+        // kind of tree that command gates execute. An uncommitted `gates: []`
+        // or a deleted DoD script in the shared checkout must not change
+        // which verifier judges HEAD.
+        let subject = match crate::validation::GateSubject::capture(&bead.workspace).await {
+            Ok(subject) => subject,
+            Err(error) => {
+                return Ok(committed_gate_selection_error(
+                    "git rev-parse HEAD",
+                    format!("failed to capture committed gate subject: {error:#}"),
+                ));
+            }
+        };
+        let selection_dir =
+            match crate::validation::extract_committed_state(&bead.workspace, &bead.id, &subject)
+                .await
+            {
+                Ok(dir) => dir,
+                Err(error) => {
+                    return Ok(committed_gate_selection_error(
+                        "git archive HEAD",
+                        format!("failed to inspect committed gate configuration: {error:#}"),
+                    ));
+                }
+            };
+        let result = self
+            .run_verification_gates_from_committed_tree(bead, &selection_dir)
+            .await;
+        if let Err(error) = tokio::fs::remove_dir_all(&selection_dir).await {
+            tracing::warn!(
+                bead_id = %bead.id,
+                path = %selection_dir.display(),
+                error = %error,
+                "could not remove committed gate-selection extraction"
+            );
+        }
+        if let Err(error) = subject.verify_current(&bead.workspace).await {
+            return Ok(committed_gate_selection_error(
+                "git rev-parse HEAD",
+                format!("committed gate subject changed during verification: {error:#}"),
+            ));
+        }
+        match result {
+            Ok(verdict) => Ok(verdict),
+            Err(error) => Ok(committed_gate_selection_error(
+                "resolve committed workspace gates",
+                format!("could not resolve or run committed gates: {error:#}"),
+            )),
+        }
+    }
+
+    async fn run_verification_gates_from_committed_tree(
+        &self,
+        bead: &Bead,
+        committed_tree: &std::path::Path,
+    ) -> Result<(bool, Option<GateReport>, GateResolutionTelemetry)> {
         let GatesConfig {
             gates: mut workspace_gates,
             verification: workspace_verification,
             declared,
             fallback_gate: workspace_fallback_gate,
-        } = crate::config::gates_for_workspace(&bead.workspace).with_context(|| {
+        } = crate::config::gates_for_workspace(committed_tree).with_context(|| {
             format!(
-                "failed to load validation gates from the bead's workspace config {}",
-                bead.workspace.join(".needle.yaml").display()
+                "failed to load validation gates from the bead's committed workspace config {}",
+                committed_tree.join(".needle.yaml").display()
             )
         })?;
 
@@ -1586,13 +1669,12 @@ impl OutcomeHandler {
         if workspace_gates.is_empty()
             && workspace_verification.is_empty()
             && !declared
-            && !bead
-                .workspace
+            && !committed_tree
                 .join(crate::validation::fallback::DEFINITION_OF_DONE_SCRIPT)
                 .is_file()
         {
             if let Some(detected) = crate::validation::default_gates::detect(
-                &bead.workspace,
+                committed_tree,
                 &self.config.validation.default_gates,
             ) {
                 tracing::info!(
@@ -1624,7 +1706,7 @@ impl OutcomeHandler {
                     workspace = %bead.workspace.display(),
                     "bead's workspace declares no validation gates — running none"
                 );
-                return Ok((true, None, GateResolutionTelemetry::none()));
+                return Ok((true, None, GateResolutionTelemetry::opted_out()));
             }
             // needle-66b015d6 part 3: the workspace's own
             // `validation.fallback_gate` decides whether the built-in gate is
@@ -1642,7 +1724,7 @@ impl OutcomeHandler {
                     "validation.fallback_gate is false — built-in fallback gate opted out; \
                      the dispatch is judged on the agent's exit code alone"
                 );
-                return Ok((true, None, GateResolutionTelemetry::none()));
+                return Ok((true, None, GateResolutionTelemetry::opted_out()));
             }
             tracing::info!(
                 bead_id = %bead.id,
@@ -1655,7 +1737,7 @@ impl OutcomeHandler {
             // instead of waving the dispatch through. A workspace whose files
             // select nothing is judged by the clean-tree check inside, which
             // passes with the counted `not_detected` WARN.
-            return self.run_fallback_gate(bead).await;
+            return self.run_fallback_gate(bead, committed_tree).await;
         }
         let gate_telemetry = GateResolutionTelemetry::bead_workspace(
             workspace_gates.len() + workspace_verification.len(),
@@ -1679,8 +1761,8 @@ impl OutcomeHandler {
             crate::validation::validate_gate_command_paths(
                 &workspace_gates,
                 &workspace_verification,
-                &bead.workspace,
-                Some(&bead.workspace.join(".needle.yaml")),
+                committed_tree,
+                Some(&committed_tree.join(".needle.yaml")),
             )
         {
             for error in &errors {
@@ -1772,14 +1854,16 @@ impl OutcomeHandler {
     async fn run_fallback_gate(
         &self,
         bead: &Bead,
+        committed_tree: &std::path::Path,
     ) -> Result<(bool, Option<GateReport>, GateResolutionTelemetry)> {
         let timeout =
             std::time::Duration::from_secs(self.config.validation.outcome_timeout_seconds);
         let stderr_cap_bytes = self.config.validation.stderr_cap_bytes;
         match self
             .fallback_verification
-            .verify(
+            .verify_from_tree(
                 bead,
+                committed_tree,
                 timeout,
                 stderr_cap_bytes,
                 &self.config.validation.default_gates,
@@ -4264,12 +4348,43 @@ impl OutcomeHandler {
             ));
         };
 
-        let commands = close_verification::collect_rerun_commands(
+        // The agent must substantiate its own close. A bead-authored test is
+        // added to the re-run, but cannot turn an empty or unsafe claim into
+        // a valid `verified:` block.
+        if close_verification::collect_rerun_commands(
             bead.id.as_ref(),
             &claimed,
-            description,
+            None,
             &bead.workspace,
-        );
+        )
+        .is_empty()
+        {
+            return Ok(close_verification::CloseEvidenceVerdict::Fail(
+                GateReport::single_failure(
+                    close_verification::GATE_NAME,
+                    close_verification::MISSING_EVIDENCE_REASON,
+                ),
+            ));
+        }
+
+        // The claimed bead is the acceptance boundary. The agent may update
+        // the live description during its dispatch, so retain commands from
+        // both versions; removing a failing test cannot make a close pass.
+        let commands = match close_verification::collect_committed_rerun_commands(
+            bead,
+            &claimed,
+            &[bead.body.as_deref(), description],
+        )
+        .await
+        {
+            Ok(commands) => commands,
+            Err(error) => {
+                return Ok(close_verification::CloseEvidenceVerdict::ExecutionError {
+                    command: "git archive HEAD".to_string(),
+                    reason: format!("could not inspect committed acceptance markers: {error:#}"),
+                });
+            }
+        };
         if commands.is_empty() {
             tracing::warn!(
                 bead_id = %bead.id,
@@ -7266,6 +7381,25 @@ mod tests {
                 .any(|action| matches!(action, StoreAction::Reopen(_))));
             assert!(runner.requests().is_empty(), "unsafe claims must never run");
         }
+
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-body-only");
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        let (handler, _extraction) = close_evidence_handler(&helper, runner.clone());
+        let store = test_store(BeadStatus::Done)
+            .with_close_reason("done\n```verified:\nrm -rf / exit=0\n```");
+        let workspace = committed_git_workspace(&[("go.mod", "module example.test/evidence\n")]);
+        let mut bead = TestBead {
+            bead: bead_in_workspace(BeadStatus::InProgress, workspace.path()),
+            _workspace: workspace,
+        };
+        bead.body = Some("Acceptance: `go test ./...`".to_string());
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
+        assert!(runner.requests().is_empty());
     }
 
     #[tokio::test]
@@ -7386,6 +7520,16 @@ mod tests {
         use crate::process_runner::{FakeProcessRunner, ProcessOutput};
 
         let (_guard, _home) = isolated_home();
+        let go_bead = || {
+            let workspace = committed_git_workspace(&[
+                ("README.md", "test workspace\n"),
+                ("go.mod", "module example.test/close-evidence\n"),
+            ]);
+            TestBead {
+                bead: bead_in_workspace(BeadStatus::InProgress, workspace.path()),
+                _workspace: workspace,
+            }
+        };
         let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-acceptance");
         let runner = Arc::new(FakeProcessRunner::new());
         runner.push_output(ProcessOutput::success(b"ok\n".to_vec()));
@@ -7394,12 +7538,7 @@ mod tests {
         let store = test_store(BeadStatus::Done)
             .with_close_reason("done\n```verified:\ncargo test --lib exit=0\n```")
             .with_description("## Complete when\n- `go test ./internal/crypto/` passes\n");
-        let bead = test_bead(BeadStatus::InProgress);
-        std::fs::write(
-            bead.workspace.join("go.mod"),
-            "module example.test/close-evidence\n",
-        )
-        .unwrap();
+        let bead = go_bead();
 
         let result = handler
             .handle(&store, &bead, &test_output(0), false)
@@ -7414,6 +7553,37 @@ mod tests {
             requests[1].arguments(),
             ["-c", "go test ./internal/crypto/"],
             "the bead's own acceptance command must re-run even though the agent omitted it"
+        );
+
+        // Neither removing an acceptance command from the live description
+        // nor deleting the build marker from the checkout may erase a test
+        // named by the committed, claimed bead.
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-edited-body");
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(b"ok\n".to_vec()));
+        runner.push_output(ProcessOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: Vec::new(),
+            stderr: b"named acceptance failed\n".to_vec(),
+        });
+        let (handler, _extraction) = close_evidence_handler(&helper, runner.clone());
+        let store = test_store(BeadStatus::Done)
+            .with_close_reason("done\n```verified:\ncargo test --lib exit=0\n```")
+            .with_description("acceptance command removed");
+        let mut bead = go_bead();
+        bead.body = Some("Acceptance: `go test ./internal/crypto/`".to_string());
+        std::fs::remove_file(bead.workspace.join("go.mod")).unwrap();
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
+        assert_eq!(runner.requests().len(), 2);
+        assert_eq!(
+            runner.requests()[1].arguments(),
+            ["-c", "go test ./internal/crypto/"]
         );
     }
 

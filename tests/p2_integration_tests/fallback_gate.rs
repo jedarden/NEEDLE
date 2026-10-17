@@ -536,10 +536,21 @@ async fn run_fixture_with_config(
     marker: &str,
     log: &Path,
 ) -> (needle::types::HandlerResult, Vec<StoreAction>, String) {
+    run_fixture_with_mutation(environment, config, marker, log, |_| {}).await
+}
+
+async fn run_fixture_with_mutation(
+    environment: &IsolatedEnvironment,
+    config: &Config,
+    marker: &str,
+    log: &Path,
+    mutate: impl FnOnce(&Path),
+) -> (needle::types::HandlerResult, Vec<StoreAction>, String) {
     for tool in ["go", "cargo", "npm", "pytest"] {
         install_tool_shim(environment, tool, log, 0);
     }
     let workspace = marker_fixture(marker, log);
+    mutate(workspace.path());
     let store = OutcomeStore::new(bead(workspace.path(), marker));
     let log_dir = tempfile::tempdir().expect("telemetry log directory");
     let telemetry = Telemetry::with_log_dir(WORKER.to_string(), log_dir.path());
@@ -797,6 +808,44 @@ async fn definition_of_done_precedes_language_default_in_gate_less_workspace() {
     assert!(
         !log_text.lines().any(|line| line.starts_with("go ")),
         "language default skipped the workspace's definition of done: {log_text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn uncommitted_gate_selection_changes_cannot_bypass_head_verification() {
+    let environment = IsolatedEnvironment::new(true);
+    let config = config_with_default_gates();
+
+    let dod_log = environment.home().join("deleted-dod.log");
+    let (result, _, log) = run_fixture_with_mutation(
+        &environment,
+        &config,
+        "definition-of-done",
+        &dod_log,
+        |workspace| {
+            std::fs::remove_file(workspace.join("scripts/definition-of-done.sh"))
+                .expect("remove DoD only from worktree");
+        },
+    )
+    .await;
+    assert_eq!(result.outcome, needle::types::Outcome::Success);
+    assert!(log.contains("definition-of-done|"), "{log}");
+    assert!(!log.lines().any(|line| line.starts_with("go ")), "{log}");
+
+    let config_log = environment.home().join("untracked-config.log");
+    let (result, _, log) =
+        run_fixture_with_mutation(&environment, &config, "go", &config_log, |workspace| {
+            write_file(workspace, ".needle.yaml", "gates: []\n")
+        })
+        .await;
+    assert_eq!(result.outcome, needle::types::Outcome::Success);
+    assert!(
+        log.lines().any(|line| line.starts_with("go vet ./...")),
+        "{log}"
+    );
+    assert!(
+        log.lines().any(|line| line.starts_with("go build ./...")),
+        "{log}"
     );
 }
 

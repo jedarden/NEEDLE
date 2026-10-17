@@ -445,6 +445,50 @@ pub(crate) fn collect_rerun_commands(
     commands
 }
 
+/// Resolve bead-authored acceptance commands against committed build markers.
+/// A deleted `go.mod` or `Cargo.toml` in another worker's checkout must not
+/// suppress a test named by the claimed bead. Claimed commands need no marker
+/// lookup and can skip the extraction when there is no quoted acceptance.
+pub(crate) async fn collect_committed_rerun_commands(
+    bead: &Bead,
+    claimed: &[String],
+    descriptions: &[Option<&str>],
+) -> anyhow::Result<Vec<String>> {
+    if descriptions
+        .iter()
+        .flatten()
+        .all(|description| extract_acceptance_commands(description).is_empty())
+    {
+        return Ok(collect_rerun_commands(
+            bead.id.as_ref(),
+            claimed,
+            None,
+            &bead.workspace,
+        ));
+    }
+
+    let committed =
+        crate::validation::extract_head_for_verification(&bead.workspace, &bead.id).await?;
+    let mut commands = collect_rerun_commands(bead.id.as_ref(), claimed, None, &committed);
+    for description in descriptions.iter().flatten() {
+        for command in collect_rerun_commands(bead.id.as_ref(), &[], Some(description), &committed)
+        {
+            if !commands.contains(&command) {
+                commands.push(command);
+            }
+        }
+    }
+    if let Err(error) = tokio::fs::remove_dir_all(&committed).await {
+        tracing::warn!(
+            bead_id = %bead.id,
+            path = %committed.display(),
+            error = %error,
+            "could not remove acceptance marker extraction"
+        );
+    }
+    Ok(commands)
+}
+
 /// Collapse runs of whitespace so a claimed command and the same command
 /// mined from the description dedupe against each other.
 fn normalize_whitespace(command: &str) -> String {
