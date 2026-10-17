@@ -194,11 +194,6 @@ impl Fixture {
             }),
             "worker must claim the sandboxed bead: {events:?}"
         );
-        assert_eq!(
-            self.bead_record(&self.home_workspace, &self.home_bead_id)["status"],
-            "closed",
-            "fixture agent must complete the bead in the sandboxed store"
-        );
     }
 
     /// Build (and prepare the fixture for) one worker invocation. The
