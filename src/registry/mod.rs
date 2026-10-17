@@ -13,11 +13,22 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+
+/// How long a registry *reader* waits for the shared lock before giving up.
+///
+/// Readers serve `needle status` and `needle list`; a process wedged while
+/// holding the exclusive lock used to block them forever, which is one of
+/// the ways the fleet-verification command could hang for over an hour.
+/// Writers keep the blocking acquisition — a registration must not be
+/// dropped just because another worker happens to hold the lock — so this
+/// bound is deliberately read-only.
+pub const READ_LOCK_WAIT: Duration = Duration::from_secs(2);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PID liveness checking (platform-specific)
@@ -217,6 +228,7 @@ impl Default for RegistryFile {
 #[derive(Clone)]
 pub struct Registry {
     path: PathBuf,
+    read_lock_wait: Duration,
 }
 
 impl Registry {
@@ -226,7 +238,14 @@ impl Registry {
     pub fn new(state_dir: &Path) -> Self {
         Registry {
             path: state_dir.join("workers.json"),
+            read_lock_wait: READ_LOCK_WAIT,
         }
+    }
+
+    /// Override the reader lock-wait budget (tests).
+    pub fn with_read_lock_wait(mut self, wait: Duration) -> Self {
+        self.read_lock_wait = wait;
+        self
     }
 
     /// Create a registry using the default state directory (`~/.needle/state`).
@@ -573,14 +592,38 @@ impl Registry {
     }
 
     /// Read the registry file, returning a default if it doesn't exist.
+    ///
+    /// The shared lock is acquired with a bounded wait (see
+    /// [`READ_LOCK_WAIT`]): readers feed `needle status`/`needle list`, and
+    /// a lock holder wedged mid-write must degrade those commands to an
+    /// error rather than hang them. Writers go through [`Self::modify`],
+    /// which still blocks.
     fn read(&self) -> Result<RegistryFile> {
         let lock = self.open_lock()?;
-        FileExt::lock_shared(&lock).with_context(|| {
-            format!(
-                "failed to acquire shared registry lock: {}",
-                self.lock_path().display()
-            )
-        })?;
+        let deadline = Instant::now() + self.read_lock_wait;
+        loop {
+            match FileExt::try_lock_shared(&lock) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "registry shared lock not acquired within {:?}: {}",
+                            self.read_lock_wait,
+                            self.lock_path().display()
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to acquire shared registry lock: {}",
+                            self.lock_path().display()
+                        )
+                    });
+                }
+            }
+        }
         self.read_locked()
     }
 
@@ -644,6 +687,50 @@ mod tests {
             state: None,
             otlp_degraded: None,
         }
+    }
+
+    #[test]
+    fn read_fails_fast_when_another_holder_keeps_the_exclusive_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path()).with_read_lock_wait(Duration::from_millis(150));
+
+        // Hold the registry's stable lock from an independent open file
+        // description, the way a writer wedged mid-registration would.
+        // flock conflicts are between open file descriptions, so this blocks
+        // the reader even though both descriptors live in this process.
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(reg.lock_path())
+            .unwrap();
+        FileExt::lock_exclusive(&holder).unwrap();
+
+        let started = Instant::now();
+        let error = reg
+            .list_all()
+            .expect_err("a perpetually held lock must time readers out");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "the reader should wait out its budget before failing, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the reader must fail fast instead of hanging, took {elapsed:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("registry shared lock not acquired"),
+            "the error should name the lock wait, got: {error:#}"
+        );
+
+        // Once the holder lets go, reads work again.
+        drop(holder);
+        assert!(reg.list_all().unwrap().is_empty());
     }
 
     #[test]

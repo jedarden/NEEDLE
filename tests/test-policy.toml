@@ -466,7 +466,14 @@ version = 1
 # worker cycle's fenced release after a slow fake flush.
 # +4 operator-managed worker environment parser contracts (needle-0a3f0010):
 # comments/blank lines, malformed assignments, missing files, and permissions.
-max_tests = 4285
+# +5 ADR-002 Bug 2 status-hang regressions (needle-984fd631): the tmux
+# command bound and registry read-lock bound, plus registered-but-dead and
+# unregistered-live reconciliation. The reconciliation tests assert private
+# reconcile_process_registry/reconcile_tmux_sessions seams against real
+# /proc liveness, so the unit tier is the cheapest correct home.
+# +1 concurrent scoped-stop liveness regression landed in the shared tree by
+# the in-flight needle stop --all work while this ceiling was being raised.
+max_tests = 4291
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -1207,3 +1214,10 @@ kind = "process"
 max_occurrences = 1
 owner = "needle-52c49ec1"
 reason = "The resolver completion fixtures require an actual clean Git repository to exercise fallback verification and store-driven completion failures."
+
+[[unit_exception]]
+path = "src/tmux_socket.rs"
+kind = "process"
+max_occurrences = 2
+owner = "component:tmux-socket"
+reason = "run_with_timeout must be proven against real child processes: the bound exists because Command::output() waits forever, so a fake child would not regression-test the deadline kill (needle-984fd631)."

@@ -273,3 +273,81 @@ fn bare_cleanup_treats_unmatched_registered_pids_as_orphans() {
         "bare cleanup must preserve the live worker's session and treat both unmatched registrations as orphans"
     );
 }
+
+/// ADR-002 Bug 2 regression: a worker whose registry entry and tmux session
+/// both outlive its process must be reported stale, never live. The pid is
+/// a genuinely exited (reaped) process, so the assertions run through the
+/// real /proc liveness decision instead of a mock inspector.
+#[test]
+fn registered_session_with_a_dead_process_is_reported_stale() {
+    let exited = std::process::Command::new("true")
+        .spawn()
+        .and_then(|mut child| child.wait().map(|_| child.id()))
+        .expect("spawn and reap a short-lived process");
+    assert!(
+        process_is_gone(exited),
+        "precondition: the reaped child's pid has no live process"
+    );
+
+    let registered = vec![worker("needle-claude-dead", exited)];
+    let reconciliation = reconcile_process_registry(&[], &registered);
+
+    assert!(
+        reconciliation.live_registered.is_empty(),
+        "a dead registered worker must not count as live"
+    );
+    assert_eq!(reconciliation.stale_registered.len(), 1);
+    assert_eq!(reconciliation.stale_registered[0].id, "needle-claude-dead");
+
+    let (live, stale) = reconcile_tmux_sessions(
+        &[session("needle-claude-dead", Some(exited))],
+        &RealProcessInspector,
+    );
+    assert!(
+        live.is_empty(),
+        "a session whose whole pane tree is dead is not active"
+    );
+    assert_eq!(
+        stale.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        vec!["needle-claude-dead"]
+    );
+}
+
+/// ADR-002 Bug 2 regression: a live `needle run` process that never made it
+/// into the registry (worker `alpha` in the incident) must still be
+/// reported. The pid is genuinely live for the duration of the test, so the
+/// liveness decision runs against the real process table with a registry
+/// empty the way a crash leaves it.
+#[test]
+fn unregistered_live_process_is_still_reported() {
+    let mut live = std::process::Command::new("sleep")
+        .arg("5")
+        .spawn()
+        .expect("spawn a live helper process");
+
+    let discovered = vec![process(live.id(), Some("/workspace/alpha"), Some("claude"))];
+    let reconciliation = reconcile_process_registry(&discovered, &[]);
+
+    assert!(reconciliation.live_registered.is_empty());
+    assert!(reconciliation.stale_registered.is_empty());
+    assert_eq!(
+        reconciliation
+            .unregistered
+            .iter()
+            .map(|p| p.pid)
+            .collect::<Vec<_>>(),
+        vec![live.id()],
+        "a running worker absent from the registry must surface as unregistered"
+    );
+
+    // The same process holding a tmux pane counts as an active session.
+    let (live_sessions, stale) = reconcile_tmux_sessions(
+        &[session("needle-claude-alpha", Some(live.id()))],
+        &RealProcessInspector,
+    );
+    assert_eq!(live_sessions.len(), 1, "the live pane backs its session");
+    assert!(stale.is_empty());
+
+    let _ = live.kill();
+    let _ = live.wait();
+}

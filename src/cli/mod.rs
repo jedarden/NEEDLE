@@ -2794,6 +2794,9 @@ fn is_needle_binary_name(name: &str) -> bool {
 /// process must not make its old session look active.
 #[cfg(unix)]
 fn is_needle_process(pid: u32) -> bool {
+    if process_is_uninterruptible(pid) {
+        return false;
+    }
     let cmdline_path = Path::new("/proc").join(pid.to_string()).join("cmdline");
     let cmdline_bytes = match std::fs::read(cmdline_path) {
         Ok(bytes) => bytes,
@@ -2864,6 +2867,10 @@ impl ProcessInspector for RealProcessInspector {
 #[cfg(unix)]
 fn is_needle_run_process(pid: u32) -> bool {
     use std::fs;
+
+    if process_is_uninterruptible(pid) {
+        return false;
+    }
 
     let cmdline_path = Path::new("/proc").join(pid.to_string()).join("cmdline");
     let cmdline_bytes = match fs::read(&cmdline_path) {
@@ -8685,19 +8692,35 @@ struct TmuxSession {
 
 /// List all tmux sessions whose names start with `needle-`.
 fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
-    let output = crate::tmux_socket::command()
-        .args([
-            "list-sessions",
-            "-F",
-            "#{session_name}\t#{session_created}\t#{session_attached}\t#{pane_pid}",
-        ])
-        .output();
+    let timeout = crate::tmux_socket::command_timeout();
+    let mut command = crate::tmux_socket::command();
+    command.args([
+        "list-sessions",
+        "-F",
+        "#{session_name}\t#{session_created}\t#{session_attached}\t#{pane_pid}",
+    ]);
+    let output = crate::tmux_socket::run_with_timeout(command, timeout);
 
     let output = match output {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // tmux not installed — no sessions.
             return Ok(vec![]);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            // A tmux client waits on its server indefinitely, so a wedged
+            // server used to hang every command that opens with
+            // list-sessions — `needle status` was observed blocked for over
+            // an hour this way. Degrade instead: report no sessions (the
+            // process-table scan below still finds live workers) and say so.
+            tracing::warn!(
+                timeout = ?timeout,
+                "tmux list-sessions did not answer; treating tmux as unavailable"
+            );
+            return Err(e).context(format!(
+                "tmux list-sessions did not answer within {timeout:?}; \
+                 tmux server may be wedged (adjust NEEDLE_TMUX_TIMEOUT_SECS to change the bound)"
+            ));
         }
         Err(e) => {
             return Err(e).context("failed to run tmux list-sessions");
@@ -8763,6 +8786,34 @@ fn occupied_worker_ids(agent: &str) -> Result<HashSet<String>> {
 // Process table discovery
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// The state character from a `/proc/<pid>/status` `State:` line, e.g. `'D'`
+/// for `State:\tD (disk sleep)`.
+fn proc_state_char(status_content: &str) -> Option<char> {
+    status_content
+        .lines()
+        .find(|line| line.starts_with("State:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|state| state.chars().next())
+}
+
+/// Whether the process is in uninterruptible sleep (`State: D`).
+///
+/// Reading `/proc/<pid>/cmdline` takes the target's mmap lock, and a process
+/// stalled in uninterruptible sleep holds that lock for as long as it stays
+/// stuck — so a cmdline read can block indefinitely, which is exactly how a
+/// fleet command is supposed to never hang. Callers treat such a process as
+/// unclassifiable: a worker wedged at the kernel level is indistinguishable
+/// here from an exited one, and the scan terminating is worth more than
+/// reporting a process that cannot be inspected.
+#[cfg(unix)]
+fn process_is_uninterruptible(pid: u32) -> bool {
+    let status_path = Path::new("/proc").join(pid.to_string()).join("status");
+    std::fs::read_to_string(status_path)
+        .ok()
+        .and_then(|content| proc_state_char(&content))
+        == Some('D')
+}
+
 /// A needle process discovered from the process table.
 #[derive(Debug, Clone)]
 pub struct DiscoveredProcess {
@@ -8814,22 +8865,28 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
 
         // Read the process's PPID to build parent-child mapping during the scan.
         // This avoids race conditions from re-reading /proc later.
-        let ppid: Option<u32> = {
-            let status_path = entry.path().join("status");
-            if let Ok(content) = fs::read_to_string(&status_path) {
-                content
-                    .lines()
-                    .find(|line| line.starts_with("PPid:\t") || line.starts_with("PPID:\t"))
-                    .and_then(|line| line.split(':').nth(1))
-                    .and_then(|v| v.trim().parse().ok())
-            } else {
-                None
-            }
-        };
+        let status_content = fs::read_to_string(entry.path().join("status")).ok();
+        let ppid: Option<u32> = status_content.as_deref().and_then(|content| {
+            content
+                .lines()
+                .find(|line| line.starts_with("PPid:\t") || line.starts_with("PPID:\t"))
+                .and_then(|line| line.split(':').nth(1))
+                .and_then(|v| v.trim().parse().ok())
+        });
 
         // Add to parent-child mapping if we have both PPID and PID
         if let Some(parent_pid) = ppid {
             ppid_to_children.entry(parent_pid).or_default().push(pid);
+        }
+
+        // Skip uninterruptible processes before any cmdline read: that read
+        // can block for as long as the process stays stuck (see
+        // `process_is_uninterruptible`), and one wedged process anywhere on
+        // the host must not hang the whole scan. This runs after the
+        // parent-child mapping insert so the skipped process's descendants
+        // still resolve correctly.
+        if status_content.as_deref().and_then(proc_state_char) == Some('D') {
+            continue;
         }
 
         // Read the process's command line.
