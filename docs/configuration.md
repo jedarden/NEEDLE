@@ -1023,6 +1023,8 @@ strands:
     enabled: false              # Opt-in (default: false)
     max_beads_per_run: 5       # Maximum beads to create per run
     cooldown_hours: 24          # Minimum hours between runs
+    duplicate_similarity_threshold: 0.35  # Drop near-duplicates at/above this similarity; 0 disables
+    duplicate_closed_lookback_days: 30    # Closed beads this recent also suppress duplicates; 0 = open beads only
     doc_patterns:
       - "README*"
       - "AGENTS.md"
@@ -1043,6 +1045,62 @@ strands:
       - name: clippy
         command: cargo clippy --all-targets -- -D warnings
 ```
+
+#### Weave candidate filters (duplicates and evidence at HEAD)
+
+Every candidate Weave's agent proposes passes two deterministic filters before
+it is filed (needle-ddf36d66). A 2026-10-16 triage of 7,632 open generated
+proposals found about half were near-duplicates and, of 67 strong candidates
+checked against the code, 36 were already implemented or stale: the generator
+worked from documentation rather than from the code at HEAD.
+
+**Near-duplicates.** The candidate's title and description are reduced to
+their distinctive words (lower-cased, split on non-alphanumerics, words under
+three characters and common filler words removed; Weave's own evidence section
+and provenance footer are ignored). If the Jaccard similarity of that word set
+to any bead that is not closed, any bead closed within
+`duplicate_closed_lookback_days` (by its last update time; bead-rs list
+output has no close time), or any candidate already filed in the same pass is
+at or above `duplicate_similarity_threshold`, the candidate is dropped. The
+default 0.35 was calibrated on the 2026-10-16 inventories of bead-rs,
+mta-my-way and NEEDLE: replayed over their open generated proposals it keeps
+36%, 39% and 49% of them (the triage judged ~50% distinct), and it catches
+rephrasings
+such as "Require authentication on public trip and journal read endpoints" vs
+"Enforce authentication on public trips and journal GET endpoints". It is a
+word-overlap measure, so beads that differ only by one name (for example
+"Migrate X workspace to bead-rs" for different X) also count as similar; lower
+the threshold to catch more rephrasings, raise it to admit more look-alikes,
+or set `0` to disable the check. Exact title matches are dropped as before.
+
+**Evidence at HEAD.** The built-in prompt lets the agent read and search the
+workspace (read-only) and requires each candidate to carry an `evidence` list.
+Each item is one of:
+
+| `kind` | Fields | Verified how |
+|---|---|---|
+| `file_line` | `location` (`path:line`, `path:line:col` or `path:start-end`), `quote` | The file exists in the checkout, inside the workspace (not `.git`/`.beads`), and the whitespace-normalized quote (at least 5 characters) appears within two lines of the cited line |
+| `missing_artifact` | `path` | The path does not exist in the checkout |
+| `failing_command` | `command`, `observed` | Both present and non-empty; NEEDLE never re-runs a model-supplied command |
+
+Every item must verify, and at least one must be a `file_line` outside the
+documentation files Weave was shown (`doc_patterns`), a `missing_artifact`, or
+a `failing_command` — a documentation quote alone proves only that the plan
+mentions something. Verified evidence is appended to the filed bead under
+`## Evidence at HEAD`. The check reads the workspace checkout as it is when
+Weave runs (HEAD plus any uncommitted edits in a shared checkout). It applies
+whichever template produced the response, so a custom `prompt_template` must
+ask for the `evidence` list.
+
+Each dropped candidate emits `generation.candidate_dropped` with `reason`
+`duplicate` (with `matched_bead` and `similarity` for a near-duplicate),
+`no_evidence` (nothing cited, or documentation only) or `evidence_unverified`
+(a citation is malformed or the checkout contradicts it, e.g. a "missing"
+file that exists), plus the candidate `title` and a `detail` string. Both
+keys can also be set from the environment
+(`NEEDLE_STRANDS__WEAVE__DUPLICATE_SIMILARITY_THRESHOLD`,
+`NEEDLE_STRANDS__WEAVE__DUPLICATE_CLOSED_LOOKBACK_DAYS`); a threshold outside
+0.0-1.0 is a configuration error.
 
 ### Low-water Generation (Weave and Pulse cooldown override)
 

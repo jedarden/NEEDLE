@@ -415,7 +415,19 @@ version = 1
 # finding fires at audit.tree_drift.min_paths, names paths with the commit
 # they match, and files P0 operational-defect + escalation. Pure classifier
 # over fixture git output; the git-running collector is never invoked.
-max_tests = 4224
+# +19 Weave candidate filters (needle-ddf36d66): twelve pure cases in
+# src/strand/weave/candidate_filter.rs (rephrased duplicate caught, distinct
+# gap kept, closed-bead lookback window, zero threshold, boilerplate excluded
+# from similarity, file:line quote verification incl. off-by-one/column/
+# absolute forms, fabricated and unsafe citations, missing artifact that
+# exists, failing-command shape, documentation-only citations, absent
+# evidence, bounded rendering), five WeaveStrand cases (duplicate of an open
+# bead reported with its match, in-response rephrasings filed once, no
+# unverifiable candidate filed, evidence carried into the filed body, prompt
+# requires evidence), and two config cases (defaults/overrides, threshold
+# range validation). The filters and the strand's creation loop are private,
+# so the unit tier is the cheapest correct home.
+max_tests = 4243
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -344,8 +344,8 @@ async fn weave_creates_beads_from_agent_response() {
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
 
     let agent_response = r#"[
-        {"title": "Add error handling to auth module", "body": "The auth module lacks proper error handling for expired tokens.", "priority": 2},
-        {"title": "Document API endpoints", "body": "REST API endpoints are undocumented.", "priority": 3}
+        {"title": "Add error handling to auth module", "body": "The auth module lacks proper error handling for expired tokens.", "priority": 2, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+        {"title": "Document API endpoints", "body": "REST API endpoints are undocumented.", "priority": 3, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}
     ]"#;
 
     // Weave requires doc files in workspace to analyze.
@@ -412,11 +412,11 @@ async fn weave_respects_max_beads_guardrail() {
 
     // Agent proposes 5 beads but max is 2.
     let agent_response = r#"[
-        {"title": "Bead one", "body": "First", "priority": 3},
-        {"title": "Bead two", "body": "Second", "priority": 3},
-        {"title": "Bead three", "body": "Third", "priority": 3},
-        {"title": "Bead four", "body": "Fourth", "priority": 3},
-        {"title": "Bead five", "body": "Fifth", "priority": 3}
+        {"title": "Bead one", "body": "First", "priority": 3, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+        {"title": "Bead two", "body": "Second", "priority": 3, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+        {"title": "Bead three", "body": "Third", "priority": 3, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+        {"title": "Bead four", "body": "Fourth", "priority": 3, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+        {"title": "Bead five", "body": "Fifth", "priority": 3, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}
     ]"#;
 
     let config = WeaveConfig {

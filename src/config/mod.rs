@@ -5065,9 +5065,26 @@ pub struct WeaveConfig {
     /// Custom prompt template for the gap analysis agent invocation.
     ///
     /// Template variables: `{doc_files}`, `{existing_beads}`, `{workspace}`.
-    /// When `None`, the built-in template is used.
+    /// When `None`, the built-in template is used. Evidence at HEAD is
+    /// enforced on the response whichever template produced it, so a custom
+    /// template must ask for each candidate's `evidence` list.
     #[serde(default)]
     pub prompt_template: Option<String>,
+
+    /// Near-duplicate threshold (needle-ddf36d66): a candidate whose
+    /// normalized title+description word set has Jaccard similarity at or
+    /// above this to an open bead, a bead closed within
+    /// `duplicate_closed_lookback_days`, or a candidate filed earlier in the
+    /// same pass is dropped and reported as `duplicate`. Range 0.0-1.0;
+    /// zero disables the check. Default 0.35.
+    #[serde(default = "WeaveConfig::default_duplicate_similarity_threshold")]
+    pub duplicate_similarity_threshold: f64,
+
+    /// How many days a closed bead keeps suppressing near-duplicate
+    /// candidates. Zero compares against beads that are not closed only.
+    /// Default 30.
+    #[serde(default = "WeaveConfig::default_duplicate_closed_lookback_days")]
+    pub duplicate_closed_lookback_days: u32,
 }
 
 impl Default for WeaveConfig {
@@ -5079,6 +5096,8 @@ impl Default for WeaveConfig {
             exclude_workspaces: Vec::new(),
             doc_patterns: Self::default_doc_patterns(),
             prompt_template: None,
+            duplicate_similarity_threshold: Self::default_duplicate_similarity_threshold(),
+            duplicate_closed_lookback_days: Self::default_duplicate_closed_lookback_days(),
         }
     }
 }
@@ -5096,6 +5115,12 @@ impl WeaveConfig {
             "AGENTS.md".to_string(),
             "docs/**/*".to_string(),
         ]
+    }
+    fn default_duplicate_similarity_threshold() -> f64 {
+        0.35
+    }
+    fn default_duplicate_closed_lookback_days() -> u32 {
+        30
     }
 }
 
@@ -9329,7 +9354,12 @@ fn validate_explore_field(field: &str, key_path: &str) -> Result<(), ConfigError
 
 /// Validate WeaveConfig field names.
 fn validate_weave_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
-    let valid_fields = ["exclude_workspaces", "max_stale_days"];
+    let valid_fields = [
+        "exclude_workspaces",
+        "max_stale_days",
+        "duplicate_similarity_threshold",
+        "duplicate_closed_lookback_days",
+    ];
     if !valid_fields.contains(&field) {
         return Err(ConfigError::new(
             key_path.to_string(),
@@ -10183,6 +10213,30 @@ impl ConfigLoader {
                             );
                         }
                     }
+                    "strands.weave.duplicate_similarity_threshold" => {
+                        if let Ok(v) = value.parse::<f64>() {
+                            config.strands.weave.duplicate_similarity_threshold = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for strands.weave.duplicate_similarity_threshold — expected float"
+                            );
+                        }
+                    }
+                    "strands.weave.duplicate_closed_lookback_days" => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.strands.weave.duplicate_closed_lookback_days = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for strands.weave.duplicate_closed_lookback_days — expected integer"
+                            );
+                        }
+                    }
                     "strands.generation.proposal_backlog_cap" => {
                         if let Ok(v) = value.parse::<usize>() {
                             config.strands.generation.proposal_backlog_cap = v;
@@ -10521,6 +10575,14 @@ impl ConfigLoader {
                     "{} exceeds practical fleet limit of 50",
                     config.worker.max_workers
                 ),
+            ));
+        }
+
+        let duplicate_threshold = config.strands.weave.duplicate_similarity_threshold;
+        if !(0.0..=1.0).contains(&duplicate_threshold) {
+            errors.push(ConfigError::new(
+                "strands.weave.duplicate_similarity_threshold".to_string(),
+                format!("must be between 0.0 and 1.0 (0 disables), got {duplicate_threshold}"),
             ));
         }
 
@@ -12578,6 +12640,45 @@ strands:
         assert_eq!(config.alert_cooldown_minutes, 60);
         assert_eq!(config.exhaustion_threshold, 3);
         assert!(config.alert_destination.is_none());
+    }
+
+    #[test]
+    fn default_weave_duplicate_policy_and_its_overrides() {
+        let config = WeaveConfig::default();
+        assert_eq!(config.duplicate_similarity_threshold, 0.35);
+        assert_eq!(config.duplicate_closed_lookback_days, 30);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "strands:\n  weave:\n    enabled: true\n    duplicate_similarity_threshold: 0.5\n    duplicate_closed_lookback_days: 7\n",
+        )
+        .unwrap();
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+        assert_eq!(config.strands.weave.duplicate_similarity_threshold, 0.5);
+        assert_eq!(config.strands.weave.duplicate_closed_lookback_days, 7);
+
+        assert!(validate_key_path("strands.weave.duplicate_similarity_threshold").is_ok());
+        assert!(validate_key_path("strands.weave.duplicate_closed_lookback_days").is_ok());
+    }
+
+    #[test]
+    fn out_of_range_duplicate_threshold_is_a_validation_error() {
+        let mut config = Config::default();
+        config.strands.weave.duplicate_similarity_threshold = 1.5;
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.full_path == "strands.weave.duplicate_similarity_threshold"),
+            "{errors:?}"
+        );
+        assert!(ConfigLoader::validate(&Config::default())
+            .iter()
+            .all(|error| error.full_path != "strands.weave.duplicate_similarity_threshold"));
     }
 
     #[test]

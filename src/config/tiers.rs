@@ -318,6 +318,14 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("strands.explore.stuck_threshold_secs", ReloadTier::Live),
     ("strands.weave.max_beads_per_run", ReloadTier::Live),
     ("strands.weave.cooldown_hours", ReloadTier::Live),
+    (
+        "strands.weave.duplicate_similarity_threshold",
+        ReloadTier::Live,
+    ),
+    (
+        "strands.weave.duplicate_closed_lookback_days",
+        ReloadTier::Live,
+    ),
     // Unravel's fields are `max_beads_per_run` / `cooldown_hours`; the
     // `max_per_run` / `cooldown_days` spellings in the original plan were
     // never fields, and `cooldown_days` cannot be an alias of a

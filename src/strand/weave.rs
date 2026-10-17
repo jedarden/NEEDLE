@@ -8,7 +8,11 @@
 //! - **Opt-in only.** Disabled by default.
 //! - **Max beads per run.** Configurable, default 5.
 //! - **Cooldown.** Minimum hours between runs, default 24h.
-//! - **Dedup.** Tracks previously created titles to prevent duplicates.
+//! - **Dedup.** Tracks previously created titles to prevent duplicates, and
+//!   drops near-duplicates of open or recently closed beads
+//!   ([`candidate_filter`]).
+//! - **Evidence at HEAD.** A candidate is filed only when it cites evidence
+//!   the checkout confirms ([`candidate_filter`]).
 //! - **Workspace exclusion.** Configurable list of forbidden workspaces.
 //! - **Weave-generated label.** All created beads are labeled for filtering.
 
@@ -30,6 +34,8 @@ use crate::dispatch::AgentAdapter;
 use crate::process_guard::ProcessGroupKillGuard;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, InputMethod, StrandResult};
+
+mod candidate_filter;
 
 /// Keep generated prompts comfortably below model context limits after the
 /// agent adds repository instructions and other harness context of its own.
@@ -57,6 +63,11 @@ pub struct ProposedBead {
     pub title: String,
     pub body: String,
     pub priority: u8,
+    /// Evidence at HEAD the agent cites for the gap. Kept as raw JSON so one
+    /// malformed citation drops only its own candidate, not the whole
+    /// response; [`candidate_filter::verify_evidence`] judges it.
+    #[serde(default)]
+    pub evidence: serde_json::Value,
 }
 
 // ─── Persistent state ────────────────────────────────────────────────────────
@@ -371,14 +382,27 @@ impl WeaveStrand {
              Review the documentation above. Identify gaps where documented features, \
              APIs, or workflows are incomplete, missing tests, or have no corresponding \
              implementation bead.\n\n\
-             Use only the supplied context. Do not inspect files, call tools, or modify the \
-             workspace; return the answer directly.\n\n\
-             For each gap found, propose a bead with:\n\
+             The documentation describes intent, not the code. Confirm every gap against \
+             the code at HEAD before proposing it: you may read and search files in this \
+             workspace, read-only. Do not modify files, commit, create beads, or run long \
+             builds or test suites. A gap the code already closes is not a gap; leave it out.\n\n\
+             For each confirmed gap, propose a bead with:\n\
              - title: concise description of what's missing\n\
              - body: what needs to be done to close the gap\n\
-             - priority: 1 (critical), 2 (important), or 3 (nice-to-have)\n\n\
-             Output a JSON array of objects with \"title\", \"body\", and \"priority\" fields.\n\
-             Do not propose beads that duplicate any existing open beads listed above.\n\
+             - priority: 1 (critical), 2 (important), or 3 (nice-to-have)\n\
+             - evidence: a list of the concrete evidence at HEAD, each one of:\n\
+             \x20 {{\"kind\": \"file_line\", \"location\": \"path/to/file:LINE\", \"quote\": \"text copied exactly from that line\"}}\n\
+             \x20 {{\"kind\": \"missing_artifact\", \"path\": \"path/that/does/not/exist\"}}\n\
+             \x20 {{\"kind\": \"failing_command\", \"command\": \"the command you ran\", \"observed\": \"the failure it printed\"}}\n\n\
+             Evidence is checked mechanically against the checkout, and a candidate is \
+             discarded unless every item verifies: a quote must appear on the cited line, \
+             a missing artifact must really be absent, and paths are relative to the \
+             workspace root. At least one item must be a file_line outside the \
+             documentation above, a missing_artifact, or a failing_command; citing the \
+             documentation alone is not evidence of a gap.\n\n\
+             Output a JSON array of objects with \"title\", \"body\", \"priority\", and \"evidence\" fields.\n\
+             Do not propose beads that duplicate any existing beads listed above; \
+             near-duplicates are discarded automatically.\n\
              If no gaps are found, respond with: NO_GAPS"
         )
     }
@@ -629,6 +653,11 @@ impl WeaveStrand {
             .iter()
             .map(|b| b.title.to_lowercase())
             .collect();
+        let mut duplicates = candidate_filter::DuplicateIndex::from_inventory(
+            &existing_beads,
+            Utc::now(),
+            self.config.duplicate_closed_lookback_days,
+        );
 
         for proposed_bead in &proposed {
             // Guard: max beads per run.
@@ -642,30 +671,78 @@ impl WeaveStrand {
 
             // Guard: dedup against seen titles.
             if state.is_duplicate(&proposed_bead.title) {
-                tracing::debug!(
-                    title = proposed_bead.title,
-                    "weave strand: skipping duplicate (seen before)"
+                self.emit_candidate_dropped(
+                    candidate_filter::REASON_DUPLICATE,
+                    &proposed_bead.title,
+                    None,
+                    None,
+                    "title was filed by an earlier weave pass".to_string(),
                 );
                 continue;
             }
 
             // Guard: dedup against existing beads.
             if existing_titles.contains(&proposed_bead.title.to_lowercase()) {
-                tracing::debug!(
-                    title = proposed_bead.title,
-                    "weave strand: skipping duplicate (already exists)"
+                self.emit_candidate_dropped(
+                    candidate_filter::REASON_DUPLICATE,
+                    &proposed_bead.title,
+                    None,
+                    None,
+                    "an existing bead has the same title".to_string(),
                 );
                 state.mark_seen(&proposed_bead.title);
                 continue;
             }
 
+            // Guard: near-duplicate of an open bead, a recently closed one,
+            // or a candidate filed earlier in this pass.
+            let tokens =
+                candidate_filter::similarity_tokens(&proposed_bead.title, &proposed_bead.body);
+            if let Some((matched, similarity)) =
+                duplicates.best_match(&tokens, self.config.duplicate_similarity_threshold)
+            {
+                self.emit_candidate_dropped(
+                    candidate_filter::REASON_DUPLICATE,
+                    &proposed_bead.title,
+                    Some(matched.clone()),
+                    Some(similarity),
+                    format!(
+                        "similarity {similarity:.2} to {matched} is at or above {:.2}",
+                        self.config.duplicate_similarity_threshold
+                    ),
+                );
+                state.mark_seen(&proposed_bead.title);
+                continue;
+            }
+
+            // Guard: the gap must be proven by evidence the checkout confirms.
+            let evidence = match candidate_filter::verify_evidence(
+                &proposed_bead.evidence,
+                &self.workspace,
+                &self.config.doc_patterns,
+            ) {
+                Ok(evidence) => evidence,
+                Err(rejection) => {
+                    self.emit_candidate_dropped(
+                        rejection.reason,
+                        &proposed_bead.title,
+                        None,
+                        None,
+                        rejection.detail,
+                    );
+                    continue;
+                }
+            };
+
             // Clamp priority to valid range.
             let priority = proposed_bead.priority.clamp(1, 3);
 
-            // Create the bead with weave-generated label.
+            // Create the bead with weave-generated label, carrying the
+            // evidence that proved the gap.
             let body = format!(
-                "{}\n\n---\nPriority: P{priority}\nCreated by: weave strand",
-                proposed_bead.body
+                "{}\n\n{}\n\n---\nPriority: P{priority}\nCreated by: weave strand",
+                proposed_bead.body,
+                candidate_filter::render_evidence(&evidence)
             );
             match store
                 .create_bead(
@@ -681,6 +758,7 @@ impl WeaveStrand {
                         title = proposed_bead.title,
                         "weave strand: created bead"
                     );
+                    duplicates.insert(bead_id.to_string(), tokens);
                     state.mark_seen(&proposed_bead.title);
                     created += 1;
                 }
@@ -720,6 +798,37 @@ impl WeaveStrand {
                 strand_name: "weave".to_string(),
                 workspace: self.workspace.display().to_string(),
                 detail: format!("{created} bead(s) created from documentation gaps"),
+            },
+            Utc::now(),
+        );
+    }
+
+    /// Record a candidate the filters discarded instead of filing.
+    fn emit_candidate_dropped(
+        &self,
+        reason: &str,
+        title: &str,
+        matched_bead: Option<String>,
+        similarity: Option<f64>,
+        detail: String,
+    ) {
+        tracing::info!(
+            workspace = %self.workspace.display(),
+            reason,
+            title,
+            matched_bead = matched_bead.as_deref().unwrap_or(""),
+            detail = %detail,
+            "weave strand: dropped candidate"
+        );
+        let _ = self.telemetry.emit(
+            EventKind::GenerationCandidateDropped {
+                strand_name: "weave".to_string(),
+                workspace: self.workspace.display().to_string(),
+                reason: reason.to_string(),
+                title: title.to_string(),
+                matched_bead,
+                similarity,
+                detail,
             },
             Utc::now(),
         );
@@ -1372,6 +1481,7 @@ mod tests {
             exclude_workspaces: vec![],
             doc_patterns: vec!["README*".to_string()],
             prompt_template: None,
+            ..WeaveConfig::default()
         }
     }
 
@@ -1562,7 +1672,7 @@ timeout_secs: 5
 
         // The fleet's eligible-ready frontier is empty, so it sits below the
         // reserve and the low-water gate lets this generator run anyway.
-        let response = r#"[{"title": "Replenished gap", "body": "body", "priority": 2}]"#;
+        let response = r#"[{"title": "Replenished gap", "body": "body", "priority": 2, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}]"#;
         let strand = WeaveStrand::new(
             make_enabled_config(),
             workspace,
@@ -1600,7 +1710,7 @@ timeout_secs: 5
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(
-                r#"[{"title":"Should not exist","body":"body","priority":2}]"#,
+                r#"[{"title":"Should not exist","body":"body","priority": 2, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}]"#,
             )),
             Telemetry::new("worker-a".to_string()),
         )
@@ -1639,7 +1749,7 @@ timeout_secs: 5
 
         // The first empty worker sees the empty frontier, wins the
         // workspace-plus-strand lease, and fills the gap.
-        let first_response = r#"[{"title": "Replenished gap", "body": "body", "priority": 2}]"#;
+        let first_response = r#"[{"title": "Replenished gap", "body": "body", "priority": 2, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}]"#;
         let first = WeaveStrand::new(
             make_enabled_config(),
             workspace.clone(),
@@ -1660,7 +1770,7 @@ timeout_secs: 5
         // A second empty worker sees the same empty frontier. The lease the
         // first worker took on this workspace-plus-strand pair is still live,
         // so this one must not ask the generator to fill the same gap.
-        let second_response = r#"[{"title": "Duplicate gap", "body": "body", "priority": 2}]"#;
+        let second_response = r#"[{"title": "Duplicate gap", "body": "body", "priority": 2, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}]"#;
         let second = WeaveStrand::new(
             make_enabled_config(),
             workspace,
@@ -1725,8 +1835,8 @@ timeout_secs: 5
         let state_dir = tempfile::tempdir().unwrap();
 
         let response = r#"[
-            {"title": "Add missing tests", "body": "Tests are missing for module X", "priority": 2},
-            {"title": "Fix broken docs", "body": "The API docs reference deleted endpoints", "priority": 1}
+            {"title": "Add missing tests", "body": "Tests are missing for module X", "priority": 2, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+            {"title": "Fix broken docs", "body": "The API docs reference deleted endpoints", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}
         ]"#;
 
         let strand = WeaveStrand::new(
@@ -1759,10 +1869,10 @@ timeout_secs: 5
         let state_dir = tempfile::tempdir().unwrap();
 
         let response = r#"[
-            {"title": "Gap 1", "body": "body1", "priority": 1},
-            {"title": "Gap 2", "body": "body2", "priority": 1},
-            {"title": "Gap 3", "body": "body3", "priority": 1},
-            {"title": "Gap 4", "body": "body4", "priority": 1}
+            {"title": "Gap 1", "body": "body1", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+            {"title": "Gap 2", "body": "body2", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+            {"title": "Gap 3", "body": "body3", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+            {"title": "Gap 4", "body": "body4", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}
         ]"#;
 
         let config = WeaveConfig {
@@ -1797,8 +1907,8 @@ timeout_secs: 5
 
         // Set cooldown_hours to 0 so cooldown check passes.
         let response = r#"[
-            {"title": "Gap 1", "body": "body1", "priority": 1},
-            {"title": "Gap 2", "body": "body2", "priority": 1}
+            {"title": "Gap 1", "body": "body1", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+            {"title": "Gap 2", "body": "body2", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}
         ]"#;
         let config = WeaveConfig {
             cooldown_hours: 0,
@@ -1826,8 +1936,8 @@ timeout_secs: 5
         let state_dir = tempfile::tempdir().unwrap();
 
         let response = r#"[
-            {"title": "Existing Task", "body": "body", "priority": 1},
-            {"title": "New Gap", "body": "body", "priority": 2}
+            {"title": "Existing Task", "body": "body", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]},
+            {"title": "New Gap", "body": "body", "priority": 2, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}
         ]"#;
 
         let strand = WeaveStrand::new(
@@ -1871,7 +1981,7 @@ timeout_secs: 5
         let (_dir, workspace) = make_test_workspace();
         let state_dir = tempfile::tempdir().unwrap();
 
-        let response = r#"[{"title": "New Gap", "body": "body", "priority": 1}]"#;
+        let response = r#"[{"title": "New Gap", "body": "body", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}]"#;
         let strand = WeaveStrand::new(
             make_enabled_config(),
             workspace.clone(),
@@ -1898,7 +2008,7 @@ timeout_secs: 5
         let (_dir, workspace) = make_test_workspace();
         let state_dir = tempfile::tempdir().unwrap();
 
-        let response = "Here are the gaps:\n```json\n[\n{\"title\": \"Fenced Gap\", \"body\": \"body\", \"priority\": 2}\n]\n```\n";
+        let response = "Here are the gaps:\n```json\n[\n{\"title\": \"Fenced Gap\", \"body\": \"body\", \"priority\": 2, \"evidence\": [{\"kind\": \"missing_artifact\", \"path\": \"src/missing.rs\"}]}\n]\n```\n";
         let strand = WeaveStrand::new(
             make_enabled_config(),
             workspace,
@@ -1915,6 +2025,230 @@ timeout_secs: 5
 
     // ── Parse tests ─────────────────────────────────────────────────────
 
+    /// Drain a strand's telemetry and return each dropped candidate as
+    /// `(reason, title, matched_bead)`.
+    async fn dropped_candidates(
+        telemetry: &Telemetry,
+        log_dir: &Path,
+    ) -> Vec<(String, String, Option<String>)> {
+        telemetry.shutdown().await;
+        let mut dropped = Vec::new();
+        for entry in std::fs::read_dir(log_dir).unwrap().flatten() {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            for line in std::fs::read_to_string(entry.path()).unwrap().lines() {
+                let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                if event["event_type"] == "generation.candidate_dropped" {
+                    dropped.push((
+                        event["data"]["reason"].as_str().unwrap_or("").to_string(),
+                        event["data"]["title"].as_str().unwrap_or("").to_string(),
+                        event["data"]["matched_bead"].as_str().map(str::to_string),
+                    ));
+                }
+            }
+        }
+        dropped
+    }
+
+    fn logged_telemetry(log_dir: &Path) -> Telemetry {
+        let telemetry = Telemetry::with_log_dir("weave-filter".to_string(), log_dir);
+        telemetry.start();
+        telemetry
+    }
+
+    #[tokio::test]
+    async fn near_duplicate_of_an_open_bead_is_dropped_and_reported() {
+        let (_dir, workspace) = make_test_workspace();
+        let state_dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let telemetry = logged_telemetry(logs.path());
+        let mut open = make_bead(
+            "mta-1",
+            "Require authentication on public trip and journal read endpoints",
+        );
+        open.body = Some(
+            "GET /api/trips and /api/journal return user data without authentication.".to_string(),
+        );
+        let response = r#"[
+            {"title": "Enforce authentication on public trips and journal GET endpoints",
+             "body": "The trips and journal read endpoints return user data without authentication.",
+             "priority": 1,
+             "evidence": [{"kind": "missing_artifact", "path": "src/auth_middleware.rs"}]},
+            {"title": "Migrate .eslintignore into eslint.config.js ignores",
+             "body": "ESLint warns that .eslintignore is deprecated on every CI run.",
+             "priority": 3,
+             "evidence": [{"kind": "missing_artifact", "path": "eslint.config.js"}]}
+        ]"#;
+        let strand = WeaveStrand::new(
+            make_enabled_config(),
+            workspace,
+            state_dir.path().to_path_buf(),
+            Box::new(MockAgent::new(response)),
+            telemetry.clone(),
+        );
+        let store = MockStore::new(vec![open]);
+
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::WorkCreated
+        ));
+        let created = store.created_beads();
+        assert_eq!(created.len(), 1, "only the distinct gap is filed");
+        assert_eq!(
+            created[0].0,
+            "Migrate .eslintignore into eslint.config.js ignores"
+        );
+        assert_eq!(
+            dropped_candidates(&telemetry, logs.path()).await,
+            vec![(
+                "duplicate".to_string(),
+                "Enforce authentication on public trips and journal GET endpoints".to_string(),
+                Some("mta-1".to_string())
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn rephrasings_in_one_response_are_filed_once() {
+        let (_dir, workspace) = make_test_workspace();
+        let state_dir = tempfile::tempdir().unwrap();
+        let response = r#"[
+            {"title": "Retire the dead /push/ and /auth/ IngressRoute rules",
+             "body": "The IngressRoute still routes /push/ and /auth/ to the retired service.",
+             "priority": 2,
+             "evidence": [{"kind": "missing_artifact", "path": "k8s/ingressroute-v2.yaml"}]},
+            {"title": "Repoint or retire the /push/ and /auth/ IngressRoute rules",
+             "body": "IngressRoute rules for /push/ and /auth/ still point at the retired service.",
+             "priority": 2,
+             "evidence": [{"kind": "missing_artifact", "path": "k8s/ingressroute-v2.yaml"}]}
+        ]"#;
+        let strand = WeaveStrand::new(
+            make_enabled_config(),
+            workspace,
+            state_dir.path().to_path_buf(),
+            Box::new(MockAgent::new(response)),
+            Telemetry::new("test".to_string()),
+        );
+        let store = MockStore::empty();
+
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::WorkCreated
+        ));
+        assert_eq!(store.created_beads().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn candidates_without_verifiable_evidence_are_never_filed() {
+        let (_dir, workspace) = make_test_workspace();
+        let state_dir = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let telemetry = logged_telemetry(logs.path());
+        // No evidence; documentation-only evidence; and the already-
+        // implemented class: a "missing" artifact that exists at HEAD.
+        let response = r#"[
+            {"title": "Ship the reporting dashboard", "body": "The README promises a dashboard.", "priority": 2},
+            {"title": "Document the test project", "body": "Expand the README overview.", "priority": 3,
+             "evidence": [{"kind": "file_line", "location": "README.md:3", "quote": "A test project."}]},
+            {"title": "Write the project README", "body": "There is no top-level readme.", "priority": 2,
+             "evidence": [{"kind": "missing_artifact", "path": "README.md"}]}
+        ]"#;
+        let strand = WeaveStrand::new(
+            make_enabled_config(),
+            workspace,
+            state_dir.path().to_path_buf(),
+            Box::new(MockAgent::new(response)),
+            telemetry.clone(),
+        );
+        let store = MockStore::empty();
+
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::NoWork
+        ));
+        assert!(store.created_beads().is_empty());
+        let reasons = dropped_candidates(&telemetry, logs.path())
+            .await
+            .into_iter()
+            .map(|(reason, _, _)| reason)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            vec!["no_evidence", "no_evidence", "evidence_unverified"]
+        );
+    }
+
+    #[tokio::test]
+    async fn filed_bead_carries_the_evidence_that_proved_it() {
+        let (_dir, workspace) = make_test_workspace();
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(
+            workspace.join("src/export.rs"),
+            "pub fn export_csv() -> Result<()> {\n    unimplemented!(\"csv export\")\n}\n",
+        )
+        .unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let response = r#"[
+            {"title": "Implement CSV export", "body": "export_csv is a stub.", "priority": 2,
+             "evidence": [{"kind": "file_line", "location": "src/export.rs:2", "quote": "unimplemented!(\"csv export\")"}]}
+        ]"#;
+        let strand = WeaveStrand::new(
+            make_enabled_config(),
+            workspace,
+            state_dir.path().to_path_buf(),
+            Box::new(MockAgent::new(response)),
+            Telemetry::new("test".to_string()),
+        );
+        let store = MockStore::empty();
+
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::WorkCreated
+        ));
+        let created = store.created_beads();
+        assert_eq!(created.len(), 1);
+        let body = &created[0].1;
+        assert!(body.contains("## Evidence at HEAD"), "{body}");
+        assert!(
+            body.contains("- `src/export.rs:2`: `unimplemented!(\"csv export\")`"),
+            "{body}"
+        );
+        assert!(body.ends_with("Created by: weave strand"), "{body}");
+    }
+
+    #[test]
+    fn built_in_prompt_requires_evidence_at_head() {
+        let (_dir, workspace) = make_test_workspace();
+        let strand = WeaveStrand::new(
+            make_enabled_config(),
+            workspace,
+            PathBuf::from("/unused"),
+            Box::new(MockAgent::new("NO_GAPS")),
+            Telemetry::new("test".to_string()),
+        );
+        let prompt = strand.build_prompt("(docs)", "(beads)");
+        for required in [
+            "evidence",
+            "\"kind\": \"file_line\"",
+            "\"kind\": \"missing_artifact\"",
+            "\"kind\": \"failing_command\"",
+            "code at HEAD",
+            "documentation alone is not evidence",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "prompt lacks {required}: {prompt}"
+            );
+        }
+        assert!(
+            !prompt.contains("Do not inspect files"),
+            "the agent must be allowed to read the code it cites"
+        );
+    }
+
     #[test]
     fn parse_no_gaps() {
         let result = WeaveStrand::parse_agent_response("NO_GAPS").unwrap();
@@ -1923,7 +2257,7 @@ timeout_secs: 5
 
     #[test]
     fn parse_json_array() {
-        let input = r#"[{"title": "Fix X", "body": "Do Y", "priority": 1}]"#;
+        let input = r#"[{"title": "Fix X", "body": "Do Y", "priority": 1, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}]"#;
         let result = WeaveStrand::parse_agent_response(input).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].title, "Fix X");
@@ -1932,7 +2266,7 @@ timeout_secs: 5
 
     #[test]
     fn parse_json_object_with_beads_key() {
-        let input = r#"{"beads": [{"title": "Fix X", "body": "Do Y", "priority": 2}]}"#;
+        let input = r#"{"beads": [{"title": "Fix X", "body": "Do Y", "priority": 2, "evidence": [{"kind": "missing_artifact", "path": "src/missing.rs"}]}]}"#;
         let result = WeaveStrand::parse_agent_response(input).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].title, "Fix X");

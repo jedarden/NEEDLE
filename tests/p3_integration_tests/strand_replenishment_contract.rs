@@ -256,7 +256,10 @@ fn generated_response(title: &str) -> String {
     serde_json::json!([{
         "title": title,
         "body": "Generated work for the self-replenishment contract.",
-        "priority": 1
+        "priority": 1,
+        // Weave files only candidates with evidence the checkout confirms
+        // (needle-ddf36d66); the fixture workspace has no src/ at all.
+        "evidence": [{"kind": "missing_artifact", "path": "src/replenishment_gap.rs"}]
     }])
     .to_string()
 }

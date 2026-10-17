@@ -722,6 +722,23 @@ pub enum EventKind {
         workspace: String,
         error: String,
     },
+    /// A generator discarded one candidate instead of filing it.
+    GenerationCandidateDropped {
+        strand_name: String,
+        workspace: String,
+        /// `duplicate` (same title, or near-duplicate of an open bead, a bead
+        /// closed within the lookback window, or a candidate filed earlier in
+        /// the pass), `no_evidence` (nothing cited, or documentation only), or
+        /// `evidence_unverified` (a citation is malformed or the checkout
+        /// contradicts it).
+        reason: String,
+        title: String,
+        /// The bead a near-duplicate matched.
+        matched_bead: Option<String>,
+        /// Jaccard similarity to `matched_bead`.
+        similarity: Option<f64>,
+        detail: String,
+    },
     /// Terminal classification of one selection cycle. Exactly one is emitted
     /// per cycle, so the five outcomes are directly comparable as a single
     /// metric with a label rather than five unrelated counters.
@@ -2060,6 +2077,7 @@ impl EventKind {
             EventKind::GenerationGateEvaluated { .. } => "generation.gate_evaluated",
             EventKind::GenerationWorkCreated { .. } => "generation.work_created",
             EventKind::GenerationCreatorFailed { .. } => "generation.creator_failed",
+            EventKind::GenerationCandidateDropped { .. } => "generation.candidate_dropped",
             EventKind::CycleOutcome { .. } => "cycle.outcome",
             EventKind::ResolveEvaluated { .. } => "strand.resolve.evaluated",
             EventKind::ResolutionApplied { .. } => "bead.resolution.applied",
@@ -2364,6 +2382,7 @@ impl EventKind {
             | EventKind::GenerationGateEvaluated { .. }
             | EventKind::GenerationWorkCreated { .. }
             | EventKind::GenerationCreatorFailed { .. }
+            | EventKind::GenerationCandidateDropped { .. }
             | EventKind::CycleOutcome { .. }
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
@@ -2713,6 +2732,23 @@ impl EventKind {
                 "strand_name": strand_name,
                 "workspace": workspace,
                 "error": error,
+            }),
+            EventKind::GenerationCandidateDropped {
+                strand_name,
+                workspace,
+                reason,
+                title,
+                matched_bead,
+                similarity,
+                detail,
+            } => serde_json::json!({
+                "strand_name": strand_name,
+                "workspace": workspace,
+                "reason": reason,
+                "title": title,
+                "matched_bead": matched_bead,
+                "similarity": similarity,
+                "detail": detail,
             }),
             EventKind::CycleOutcome {
                 outcome,
@@ -4762,6 +4798,7 @@ impl EventKind {
             | EventKind::GenerationGateEvaluated { .. }
             | EventKind::GenerationWorkCreated { .. }
             | EventKind::GenerationCreatorFailed { .. }
+            | EventKind::GenerationCandidateDropped { .. }
             | EventKind::CycleOutcome { .. }
             | EventKind::QueueEmpty
             | EventKind::WeftClaimed { .. }
@@ -9366,6 +9403,15 @@ mod tests {
                 strand_name: "weave".to_string(),
                 workspace: "/ws".to_string(),
                 error: "agent exited 1".to_string(),
+            },
+            EventKind::GenerationCandidateDropped {
+                strand_name: "weave".to_string(),
+                workspace: "/ws".to_string(),
+                reason: "duplicate".to_string(),
+                title: "Gap".to_string(),
+                matched_bead: Some("ws-1".to_string()),
+                similarity: Some(0.5),
+                detail: "similarity 0.50".to_string(),
             },
             EventKind::CycleOutcome {
                 outcome: crate::telemetry::CycleOutcome::Generated,
