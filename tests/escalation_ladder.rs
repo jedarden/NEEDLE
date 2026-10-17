@@ -199,7 +199,37 @@ impl Fixture {
             fixture.workspace.join("docs/plan/plan.md"),
             "# Fixture plan\n\nThe plan intentionally does not explain the external dependency.\n",
         )?;
+        fixture.commit_workspace_config(true)?;
         Ok(fixture)
+    }
+
+    fn commit_workspace_config(&self, initial: bool) -> Result<()> {
+        if initial {
+            let output = Command::new("git")
+                .current_dir(&self.workspace)
+                .args(["init", "-q"])
+                .output()?;
+            ensure_success("git init", output)?;
+        }
+        let output = Command::new("git")
+            .current_dir(&self.workspace)
+            .args(["add", "--", ".needle.yaml", "docs/plan/plan.md"])
+            .output()?;
+        ensure_success("git add fixture config", output)?;
+        let output = Command::new("git")
+            .current_dir(&self.workspace)
+            .args([
+                "-c",
+                "user.name=NEEDLE fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "Record fixture gate configuration",
+            ])
+            .output()?;
+        ensure_success("git commit fixture config", output)?;
+        Ok(())
     }
 
     fn write_adapter(&self) -> Result<()> {
@@ -737,6 +767,7 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
     // ADR-023: three GateError outcomes release a separate bead without ever
     // touching failure-count, then degrade the workspace and file one alert.
     fixture.write_workspace_config(true)?;
+    fixture.commit_workspace_config(false)?;
     fs::write(fixture.workspace.join(".gate-mode"), "enabled")?;
     let gate_bead = fixture.create_bead(
         "Gate error must not penalize work",
@@ -810,6 +841,7 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
 async fn unrunnable_gate_command_releases_without_failure_count() -> Result<()> {
     let fixture = Fixture::new()?;
     fixture.write_workspace_config(true)?;
+    fixture.commit_workspace_config(false)?;
     fs::write(fixture.workspace.join(".gate-mode"), "enabled")?;
     let bead = fixture.create_bead(
         "Unrunnable gate must not penalize work",
@@ -894,6 +926,7 @@ async fn executed_gate_rejection_still_climbs_the_ladder() -> Result<()> {
             fixture.bead.display()
         ),
     )?;
+    fixture.commit_workspace_config(false)?;
     fs::write(fixture.workspace.join(".gate-mode"), "enabled")?;
     let bead = fixture.create_bead(
         "Executed gate rejection still counts",
