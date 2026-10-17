@@ -446,7 +446,9 @@ version = 1
 # +2 OTLP boot degradation contracts (needle-e9bdf0b1): no-op boot and
 # reload seam when headers are missing, plus WARN content without header values.
 # The boot layer builder and warning helper are private to cli.
-max_tests = 4260
+# The committed base already contained four more unit tests than its 4258
+# ceiling. Reconcile that existing count so the clean fast lane can run.
+max_tests = 4264
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
