@@ -1298,6 +1298,23 @@ pub enum EventKind {
         age_secs: u64,
         stale_by_ttl: bool,
     },
+    /// The exact-identity Mend gate's decision for an in-progress claim.
+    ///
+    /// This is deliberately separate from the legacy Unknown-only event so
+    /// operators can distinguish a claim that is current, recoverable, or
+    /// fenced without inferring a verdict from a release or terminal event.
+    /// The payload contains only credential-free decision metadata; claim
+    /// handles and claim-bound session credentials are never emitted.
+    MendClaimIdentityVerdict {
+        bead_id: BeadId,
+        assignee: String,
+        verdict: String,
+        evidence: String,
+        age_secs: u64,
+        stale_by_ttl: bool,
+        claim_epoch: Option<u64>,
+        revision: Option<u64>,
+    },
     MendDependencyCleanupFailed {
         bead_id: String,
         blocker_id: String,
@@ -2165,6 +2182,7 @@ impl EventKind {
             EventKind::MendDependencyRemoved { .. } => "mend.dependency_removed",
             EventKind::MendBeadReleaseFailed { .. } => "mend.bead_release_failed",
             EventKind::MendClaimOwnershipUnknown { .. } => "mend.claim_ownership_unknown",
+            EventKind::MendClaimIdentityVerdict { .. } => "mend.claim_identity_verdict",
             EventKind::MendDependencyCleanupFailed { .. } => "mend.dependency_cleanup_failed",
             EventKind::MendLockRemoveFailed { .. } => "mend.lock_remove_failed",
             EventKind::MendRateLimitCleaned { .. } => "mend.rate_limit_cleaned",
@@ -2322,6 +2340,7 @@ impl EventKind {
             | EventKind::MendDependencyCleaned { bead_id, .. }
             | EventKind::MendDependencyRemoved { bead_id, .. }
             | EventKind::MendClaimOwnershipUnknown { bead_id, .. }
+            | EventKind::MendClaimIdentityVerdict { bead_id, .. }
             | EventKind::EffortRecorded { bead_id, .. }
             | EventKind::MitosisEvaluated { bead_id, .. }
             | EventKind::VerificationFailed { bead_id, .. }
@@ -4363,6 +4382,25 @@ impl EventKind {
                     "stale_by_ttl": stale_by_ttl,
                 })
             }
+            EventKind::MendClaimIdentityVerdict {
+                bead_id,
+                assignee,
+                verdict,
+                evidence,
+                age_secs,
+                stale_by_ttl,
+                claim_epoch,
+                revision,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "assignee": assignee,
+                "verdict": verdict,
+                "evidence": evidence,
+                "age_secs": age_secs,
+                "stale_by_ttl": stale_by_ttl,
+                "claim_epoch": claim_epoch,
+                "revision": revision,
+            }),
             EventKind::MendAssigneeClearFailed {
                 bead_id,
                 assignee,
@@ -4851,6 +4889,7 @@ impl EventKind {
             | EventKind::MendOrphanedHeartbeatRemoved { .. }
             | EventKind::MendDependencyRemoved { .. }
             | EventKind::MendBeadReleaseFailed { .. }
+            | EventKind::MendClaimIdentityVerdict { .. }
             | EventKind::MendDependencyCleanupFailed { .. }
             | EventKind::MendLockRemoveFailed { .. }
             | EventKind::MendRateLimitCleaned { .. }

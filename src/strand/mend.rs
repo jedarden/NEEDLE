@@ -820,6 +820,19 @@ fn emit_claim_identity_verdict(
         "Mend classified exact claim ownership"
     );
     let _ = telemetry.emit(
+        EventKind::MendClaimIdentityVerdict {
+            bead_id: bead.id.clone(),
+            assignee: assignee.to_string(),
+            verdict: verdict.to_string(),
+            evidence: evidence.to_string(),
+            age_secs,
+            stale_by_ttl,
+            claim_epoch: observed.and_then(|claim| claim.claim_epoch),
+            revision: observed.and_then(|claim| claim.revision),
+        },
+        Utc::now(),
+    );
+    let _ = telemetry.emit(
         EventKind::Log {
             phase: "mend_claim_identity".to_string(),
             context: serde_json::json!({
@@ -1018,7 +1031,7 @@ async fn cleanup_in_progress(
             now,
         );
 
-        let reason = match ownership {
+        let (reason, pending_verdict) = match ownership {
             ClaimIdentityVerdict::Current => {
                 emit_claim_identity_verdict(
                     &policy,
@@ -1086,53 +1099,24 @@ async fn cleanup_in_progress(
                 } else {
                     "fresh_heartbeat_reports_idle"
                 };
-                emit_claim_identity_verdict(
-                    &policy,
-                    telemetry,
-                    bead,
-                    assignee,
-                    "superseded",
-                    evidence,
-                    age_secs,
-                    stale_by_ttl,
-                    identity,
-                    observed.as_ref(),
-                );
-                match named {
-                    Some(named) => format!("superseded: fresh heartbeat advertises bead {named}"),
-                    None => "superseded: fresh heartbeat reports idle".to_string(),
-                }
+                (
+                    match named {
+                        Some(named) => {
+                            format!("superseded: fresh heartbeat advertises bead {named}")
+                        }
+                        None => "superseded: fresh heartbeat reports idle".to_string(),
+                    },
+                    Some(("superseded", evidence)),
+                )
             }
-            ClaimIdentityVerdict::Dead { evidence } => {
-                emit_claim_identity_verdict(
-                    &policy,
-                    telemetry,
-                    bead,
-                    assignee,
-                    "dead",
-                    evidence.as_str(),
-                    age_secs,
-                    stale_by_ttl,
-                    identity,
-                    observed.as_ref(),
-                );
-                format!("orphaned: claiming process is dead ({})", evidence.as_str())
-            }
-            ClaimIdentityVerdict::Expired => {
-                emit_claim_identity_verdict(
-                    &policy,
-                    telemetry,
-                    bead,
-                    assignee,
-                    "expired",
-                    "exact_claim_lease_expired",
-                    age_secs,
-                    stale_by_ttl,
-                    identity,
-                    observed.as_ref(),
-                );
-                "expired: exact claim identity reports its lease expired".to_string()
-            }
+            ClaimIdentityVerdict::Dead { evidence } => (
+                format!("orphaned: claiming process is dead ({})", evidence.as_str()),
+                Some(("dead", evidence.as_str())),
+            ),
+            ClaimIdentityVerdict::Expired => (
+                "expired: exact claim identity reports its lease expired".to_string(),
+                Some(("expired", "exact_claim_lease_expired")),
+            ),
         };
 
         tracing::info!(
@@ -1151,6 +1135,20 @@ async fn cleanup_in_progress(
             None => match store.claim_status(&bead.id).await {
                 Ok(observed) => observed,
                 Err(error) => {
+                    if let Some((verdict, evidence)) = pending_verdict {
+                        emit_claim_identity_verdict(
+                            &policy,
+                            telemetry,
+                            bead,
+                            assignee,
+                            verdict,
+                            evidence,
+                            age_secs,
+                            stale_by_ttl,
+                            identity,
+                            None,
+                        );
+                    }
                     tracing::warn!(
                         event_type = "mend.bead_release_failed",
                         bead_id = %bead.id,
@@ -1199,6 +1197,20 @@ async fn cleanup_in_progress(
 
         match store.release_recovery(&bead.id, &observed).await {
             Ok(RecoveryReleaseOutcome::Released) => {
+                if let Some((verdict, evidence)) = pending_verdict {
+                    emit_claim_identity_verdict(
+                        &policy,
+                        telemetry,
+                        bead,
+                        assignee,
+                        verdict,
+                        evidence,
+                        age_secs,
+                        stale_by_ttl,
+                        identity,
+                        Some(&observed),
+                    );
+                }
                 tracing::info!(
                     event_type = "mend.bead_released",
                     bead_id = %bead.id,
@@ -1246,6 +1258,20 @@ async fn cleanup_in_progress(
                 );
             }
             Err(error) => {
+                if let Some((verdict, evidence)) = pending_verdict {
+                    emit_claim_identity_verdict(
+                        &policy,
+                        telemetry,
+                        bead,
+                        assignee,
+                        verdict,
+                        evidence,
+                        age_secs,
+                        stale_by_ttl,
+                        identity,
+                        Some(&observed),
+                    );
+                }
                 tracing::warn!(
                     event_type = "mend.bead_release_failed",
                     bead_id = %bead.id,
@@ -4678,6 +4704,77 @@ mod tests {
         assert_eq!(verdict(ids[6]), "unknown", "bead {}", ids[6]);
         assert_eq!(verdict(ids[7]), "fenced_conflict");
         assert_eq!(verdict(ids[8]), "unknown", "bead {}", ids[8]);
+    }
+
+    #[tokio::test]
+    async fn mend_emits_claim_identity_verdicts() {
+        let telemetry = TestHelper::new("mend-claim-identity-verdicts");
+        let mut bead = make_in_progress_bead("nd-verdicts", "worker-verdicts");
+        bead.workspace = fixture_root("mend-verdicts-workspace");
+        let policy = ClaimCleanupPolicy::MendExact {
+            workspace_identity: canonical_workspace_identity(&bead.workspace),
+        };
+        let observed = ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: bead.assignee.clone(),
+            revision: Some(17),
+            claim_epoch: Some(23),
+        };
+        let cases = [
+            ("current", "heartbeat_matches_live_claim"),
+            ("superseded", "same_session_has_another_active_claim"),
+            ("dead", "heartbeat_pid_dead"),
+            ("expired", "exact_claim_lease_expired"),
+            ("unknown", "claim_identity_unknown"),
+            ("fenced_conflict", "live_claim_no_longer_matches_inventory"),
+        ];
+
+        for (verdict, evidence) in cases {
+            emit_claim_identity_verdict(
+                &policy,
+                telemetry.telemetry(),
+                &bead,
+                bead.assignee.as_deref().unwrap_or_default(),
+                verdict,
+                evidence,
+                301,
+                true,
+                None,
+                Some(&observed),
+            );
+        }
+        telemetry.sync().await;
+
+        let events = telemetry.events_by_type("mend.claim_identity_verdict");
+        assert_eq!(events.len(), cases.len());
+        let emitted: Vec<_> = events
+            .iter()
+            .map(|event| {
+                (
+                    event.data["verdict"].as_str().unwrap_or_default(),
+                    event.data["evidence"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(emitted, cases.to_vec());
+
+        let fenced = events
+            .iter()
+            .find(|event| event.data["verdict"] == "fenced_conflict")
+            .expect("fenced conflict verdict must be emitted");
+        let unknown = events
+            .iter()
+            .find(|event| event.data["verdict"] == "unknown")
+            .expect("unknown verdict must be emitted");
+        assert_ne!(fenced.data["verdict"], unknown.data["verdict"]);
+        assert_eq!(fenced.data["claim_epoch"], serde_json::json!(23));
+        assert_eq!(fenced.data["revision"], serde_json::json!(17));
+
+        for event in events {
+            let serialized = serde_json::to_string(&event).unwrap();
+            assert!(!serialized.contains("fencing-token"));
+            assert!(!serialized.contains("NEEDLE_BEAD_FENCING_TOKEN"));
+        }
     }
 
     async fn mend_recovery_release_is_fenced_cases() {

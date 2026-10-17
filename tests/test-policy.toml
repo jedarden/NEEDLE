@@ -458,7 +458,10 @@ version = 1
 # +5 false-close contracts (needle-165ab6f6): empty close evidence is rejected
 # and Resolve Complete checks passing, failing, unrunnable, and absent
 # acceptance verification through its private executor seam.
-max_tests = 4276
+# +1 Mend claim-identity verdict telemetry contract (needle-d6c1de04): the
+# private emitter and its credential-free verdict payload are only observable
+# from the unit tier.
+max_tests = 4277
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
