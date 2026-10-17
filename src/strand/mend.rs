@@ -389,6 +389,25 @@ enum ClaimIdentityVerdict {
     },
 }
 
+impl ClaimIdentityVerdict {
+    fn telemetry_fields(&self, policy: &ClaimCleanupPolicy) -> (&'static str, &'static str) {
+        match self {
+            Self::Current => ("current", "heartbeat_matches_live_claim"),
+            Self::Superseded { .. } if policy.is_mend_exact() => {
+                ("superseded", "same_session_has_another_active_claim")
+            }
+            Self::Superseded { named: Some(_) } => {
+                ("superseded", "fresh_heartbeat_names_other_claim")
+            }
+            Self::Superseded { named: None } => ("superseded", "fresh_heartbeat_reports_idle"),
+            Self::Dead { evidence } => ("dead", evidence.as_str()),
+            Self::Expired => ("expired", "exact_claim_lease_expired"),
+            Self::FencedConflict => ("fenced_conflict", "live_claim_no_longer_matches_inventory"),
+            Self::Unknown { heartbeat, .. } => ("unknown", heartbeat.as_str()),
+        }
+    }
+}
+
 /// Canonical workspace identity used by claim handles. A path we cannot
 /// canonicalize is not an identity and therefore cannot authorize recovery.
 fn canonical_workspace_identity(workspace: &Path) -> Option<String> {
@@ -798,7 +817,7 @@ fn emit_claim_identity_verdict(
     evidence: &str,
     age_secs: u64,
     stale_by_ttl: bool,
-    identity: Option<&HeartbeatClaimIdentity>,
+    _identity: Option<&HeartbeatClaimIdentity>,
     observed: Option<&ClaimStatus>,
 ) {
     if !policy.is_mend_exact() {
@@ -814,8 +833,6 @@ fn emit_claim_identity_verdict(
         stale_by_ttl,
         claim_epoch = ?observed.and_then(|claim| claim.claim_epoch),
         revision = ?observed.and_then(|claim| claim.revision),
-        worker_session_id = ?identity.map(|claim| claim.worker_session_id.as_str()),
-        attempt_id = ?identity.map(|claim| claim.attempt_id.as_str()),
         workspace = %bead.workspace.display(),
         "Mend classified exact claim ownership"
     );
@@ -842,8 +859,6 @@ fn emit_claim_identity_verdict(
                 "stale_by_ttl": stale_by_ttl,
                 "claim_epoch": observed.and_then(|claim| claim.claim_epoch),
                 "revision": observed.and_then(|claim| claim.revision),
-                "worker_session_id": identity.map(|claim| claim.worker_session_id.as_str()),
-                "attempt_id": identity.map(|claim| claim.attempt_id.as_str()),
                 "workspace": bead.workspace,
             }),
             level: if verdict == "unknown" { "warn" } else { "info" }.to_string(),
@@ -1030,6 +1045,7 @@ async fn cleanup_in_progress(
             heartbeat_ttl,
             now,
         );
+        let (classified_verdict, classified_evidence) = ownership.telemetry_fields(&policy);
 
         let (reason, pending_verdict) = match ownership {
             ClaimIdentityVerdict::Current => {
@@ -1038,8 +1054,8 @@ async fn cleanup_in_progress(
                     telemetry,
                     bead,
                     assignee,
-                    "current",
-                    "heartbeat_matches_live_claim",
+                    classified_verdict,
+                    classified_evidence,
                     age_secs,
                     stale_by_ttl,
                     identity,
@@ -1056,8 +1072,8 @@ async fn cleanup_in_progress(
                     telemetry,
                     bead,
                     assignee,
-                    "unknown",
-                    heartbeat.as_str(),
+                    classified_verdict,
+                    classified_evidence,
                     age_secs,
                     stale_by_ttl,
                     identity,
@@ -1082,8 +1098,8 @@ async fn cleanup_in_progress(
                     telemetry,
                     bead,
                     assignee,
-                    "fenced_conflict",
-                    "live_claim_no_longer_matches_inventory",
+                    classified_verdict,
+                    classified_evidence,
                     age_secs,
                     stale_by_ttl,
                     identity,
@@ -1091,31 +1107,22 @@ async fn cleanup_in_progress(
                 );
                 continue;
             }
-            ClaimIdentityVerdict::Superseded { named } => {
-                let evidence = if policy.is_mend_exact() {
-                    "same_session_has_another_active_claim"
-                } else if named.is_some() {
-                    "fresh_heartbeat_names_other_claim"
-                } else {
-                    "fresh_heartbeat_reports_idle"
-                };
-                (
-                    match named {
-                        Some(named) => {
-                            format!("superseded: fresh heartbeat advertises bead {named}")
-                        }
-                        None => "superseded: fresh heartbeat reports idle".to_string(),
-                    },
-                    Some(("superseded", evidence)),
-                )
-            }
+            ClaimIdentityVerdict::Superseded { named } => (
+                match named {
+                    Some(named) => {
+                        format!("superseded: fresh heartbeat advertises bead {named}")
+                    }
+                    None => "superseded: fresh heartbeat reports idle".to_string(),
+                },
+                Some((classified_verdict, classified_evidence)),
+            ),
             ClaimIdentityVerdict::Dead { evidence } => (
                 format!("orphaned: claiming process is dead ({})", evidence.as_str()),
-                Some(("dead", evidence.as_str())),
+                Some((classified_verdict, classified_evidence)),
             ),
             ClaimIdentityVerdict::Expired => (
                 "expired: exact claim identity reports its lease expired".to_string(),
-                Some(("expired", "exact_claim_lease_expired")),
+                Some((classified_verdict, classified_evidence)),
             ),
         };
 
@@ -4708,72 +4715,176 @@ mod tests {
 
     #[tokio::test]
     async fn mend_emits_claim_identity_verdicts() {
-        let telemetry = TestHelper::new("mend-claim-identity-verdicts");
-        let mut bead = make_in_progress_bead("nd-verdicts", "worker-verdicts");
-        bead.workspace = fixture_root("mend-verdicts-workspace");
-        let policy = ClaimCleanupPolicy::MendExact {
-            workspace_identity: canonical_workspace_identity(&bead.workspace),
-        };
-        let observed = ClaimStatus {
-            status: BeadStatus::InProgress,
-            assignee: bead.assignee.clone(),
-            revision: Some(17),
-            claim_epoch: Some(23),
-        };
+        let heartbeat_dir = tempfile::tempdir().unwrap();
+        let registry_dir = tempfile::tempdir().unwrap();
+        let workspace = fixture_root("mend-verdicts-workspace");
         let cases = [
-            ("current", "heartbeat_matches_live_claim"),
-            ("superseded", "same_session_has_another_active_claim"),
-            ("dead", "heartbeat_pid_dead"),
-            ("expired", "exact_claim_lease_expired"),
-            ("unknown", "claim_identity_unknown"),
-            ("fenced_conflict", "live_claim_no_longer_matches_inventory"),
+            ("current", "current", "heartbeat_matches_live_claim"),
+            ("dead", "dead", "heartbeat_pid_dead"),
+            ("expired", "expired", "exact_claim_lease_expired"),
+            ("unknown", "unknown", "heartbeat_missing"),
+            (
+                "snapshot-conflict",
+                "fenced_conflict",
+                "live_claim_no_longer_matches_inventory",
+            ),
+            (
+                "release-conflict",
+                "fenced_conflict",
+                "recovery_release_compare_and_swap_conflict",
+            ),
         ];
-
-        for (verdict, evidence) in cases {
-            emit_claim_identity_verdict(
-                &policy,
-                telemetry.telemetry(),
-                &bead,
-                bead.assignee.as_deref().unwrap_or_default(),
-                verdict,
-                evidence,
-                301,
-                true,
-                None,
-                Some(&observed),
-            );
+        let beads: Vec<_> = cases
+            .iter()
+            .map(|(name, ..)| {
+                let mut bead = make_in_progress_bead(
+                    &format!("nd-verdict-{name}"),
+                    &format!("worker-verdict-{name}"),
+                );
+                bead.workspace = workspace.clone();
+                bead
+            })
+            .collect();
+        let now = Utc::now();
+        for (index, bead) in beads.iter().enumerate() {
+            let heartbeat = match index {
+                0 => Some(heartbeat_for_claim(
+                    bead,
+                    bead.id.as_ref(),
+                    "session-current-secret",
+                    Some(1),
+                    None,
+                )),
+                1 => {
+                    let mut heartbeat =
+                        make_stale_heartbeat("dead", 99_999_999, Some(bead.id.as_ref()));
+                    heartbeat.qualified_id = bead.assignee.clone().unwrap();
+                    heartbeat.workspace = workspace.clone();
+                    Some(heartbeat)
+                }
+                2 | 5 => Some(heartbeat_for_claim(
+                    bead,
+                    bead.id.as_ref(),
+                    "session-expired-secret",
+                    Some(1),
+                    Some(now - chrono::Duration::seconds(1)),
+                )),
+                3 | 4 => None,
+                _ => unreachable!(),
+            };
+            if let Some(heartbeat) = heartbeat {
+                write_heartbeat(heartbeat_dir.path(), &heartbeat);
+            }
         }
+
+        let (store, release_count, _) = MockBeadStore::new(beads.clone());
+        store.set_claim_snapshot(
+            beads[4].id.clone(),
+            ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: Some("new-worker".to_string()),
+                revision: Some(2),
+                claim_epoch: Some(2),
+            },
+        );
+        store
+            .recovery_conflicts
+            .lock()
+            .unwrap()
+            .insert(beads[5].id.clone());
+
+        let telemetry = TestHelper::new("mend-claim-identity-verdicts");
+        let policy = ClaimCleanupPolicy::MendExact {
+            workspace_identity: canonical_workspace_identity(&workspace),
+        };
+        let released = cleanup_in_progress(
+            &store,
+            &Registry::new(registry_dir.path()),
+            telemetry.telemetry(),
+            None,
+            Some(heartbeat_dir.path()),
+            Duration::from_secs(300),
+            policy.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(released, 2, "only dead and expired claims are released");
+        assert_eq!(release_count.load(Ordering::Relaxed), 2);
+
+        // The backend does not yet retain the old claim's session binding, so
+        // the exact classifier cannot authorize supersession. Exercise its
+        // reserved telemetry arm without inventing that missing authority.
+        let (superseded_verdict, superseded_evidence) = ClaimIdentityVerdict::Superseded {
+            named: Some(BeadId::from("nd-next-claim")),
+        }
+        .telemetry_fields(&policy);
+        let mut superseded_bead =
+            make_in_progress_bead("nd-verdict-superseded", "worker-verdict-superseded");
+        superseded_bead.workspace = workspace;
+        emit_claim_identity_verdict(
+            &policy,
+            telemetry.telemetry(),
+            &superseded_bead,
+            superseded_bead.assignee.as_deref().unwrap(),
+            superseded_verdict,
+            superseded_evidence,
+            301,
+            true,
+            None,
+            None,
+        );
         telemetry.sync().await;
 
         let events = telemetry.events_by_type("mend.claim_identity_verdict");
-        assert_eq!(events.len(), cases.len());
-        let emitted: Vec<_> = events
+        assert_eq!(events.len(), cases.len() + 1);
+        for ((_, expected_verdict, expected_evidence), bead) in cases.iter().zip(&beads) {
+            let matching: Vec<_> = events
+                .iter()
+                .filter(|event| event.bead_id.as_ref() == Some(&bead.id))
+                .collect();
+            assert_eq!(matching.len(), 1, "one decision for {}", bead.id);
+            assert_eq!(matching[0].data["verdict"], *expected_verdict);
+            assert_eq!(matching[0].data["evidence"], *expected_evidence);
+        }
+        let superseded: Vec<_> = events
             .iter()
-            .map(|event| {
-                (
-                    event.data["verdict"].as_str().unwrap_or_default(),
-                    event.data["evidence"].as_str().unwrap_or_default(),
-                )
-            })
+            .filter(|event| event.data["verdict"] == "superseded")
             .collect();
-        assert_eq!(emitted, cases.to_vec());
+        assert_eq!(superseded.len(), 1);
+        assert_eq!(
+            superseded[0].data["evidence"],
+            "same_session_has_another_active_claim"
+        );
+        let decision_for = |bead: &Bead| {
+            &events
+                .iter()
+                .find(|event| event.bead_id.as_ref() == Some(&bead.id))
+                .unwrap()
+                .data["verdict"]
+        };
+        assert_ne!(
+            decision_for(&beads[3]),
+            decision_for(&beads[4]),
+            "unknown must stay distinct from a fenced snapshot"
+        );
+        assert_eq!(telemetry.events_by_type("bead.released").len(), 2);
+        assert_eq!(telemetry.events_by_type("peer.crashed").len(), 2);
+        assert_eq!(
+            telemetry
+                .events_by_type("mend.claim_ownership_unknown")
+                .len(),
+            1
+        );
 
-        let fenced = events
-            .iter()
-            .find(|event| event.data["verdict"] == "fenced_conflict")
-            .expect("fenced conflict verdict must be emitted");
-        let unknown = events
-            .iter()
-            .find(|event| event.data["verdict"] == "unknown")
-            .expect("unknown verdict must be emitted");
-        assert_ne!(fenced.data["verdict"], unknown.data["verdict"]);
-        assert_eq!(fenced.data["claim_epoch"], serde_json::json!(23));
-        assert_eq!(fenced.data["revision"], serde_json::json!(17));
-
-        for event in events {
+        for event in events
+            .into_iter()
+            .chain(telemetry.events_by_type("log.entry"))
+        {
             let serialized = serde_json::to_string(&event).unwrap();
-            assert!(!serialized.contains("fencing-token"));
-            assert!(!serialized.contains("NEEDLE_BEAD_FENCING_TOKEN"));
+            assert!(!serialized.contains("session-current-secret"));
+            assert!(!serialized.contains("attempt-session-current-secret"));
+            assert!(!serialized.contains("session-expired-secret"));
+            assert!(!serialized.contains("attempt-session-expired-secret"));
         }
     }
 
