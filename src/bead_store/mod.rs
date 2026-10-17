@@ -1545,6 +1545,25 @@ pub enum DedupCreate {
     ExistedClosed(BeadId),
 }
 
+/// Outcome-owned changes to an existing issue. Unmentioned fields are read
+/// from the live backend record and left untouched. Label removals and adds
+/// name exact labels; unrelated agent labels are never replaced as a set.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct IssuePatch {
+    pub status: Option<IssuePatchStatus>,
+    pub remove_labels: Vec<String>,
+    pub add_labels: Vec<String>,
+}
+
+/// The outcome status operations bead-rs can compose with label edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssuePatchStatus {
+    /// Set manual blocking while retaining the issue's base status.
+    ManualBlock,
+    /// Set base status open and clear manual blocking.
+    Open,
+}
+
 // ─── BeadStore trait ─────────────────────────────────────────────────────────
 
 /// Abstract interface to the bead backend.
@@ -1925,6 +1944,13 @@ pub trait BeadStore: Send + Sync {
     /// bead's open status or labels.
     async fn clear_manual_block(&self, _id: &BeadId) -> Result<()> {
         bail!("configured bead backend does not implement clear_manual_block")
+    }
+
+    /// Apply only the supplied outcome metadata to the current stored issue
+    /// in one transaction. Stores without an atomic patch primitive fail
+    /// closed; callers must not replace a dispatch-time issue snapshot.
+    async fn patch_issue(&self, _id: &BeadId, _patch: &IssuePatch) -> Result<()> {
+        bail!("configured bead backend does not implement atomic issue patching")
     }
 
     /// Flush local bead changes to JSONL before release.

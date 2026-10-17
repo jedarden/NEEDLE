@@ -20,8 +20,8 @@ use crate::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
 use super::{
     execute_create_id_strategy, execute_labels_strategy, validate_strategy_name, BeadBackend,
     BeadOperationSpec, BeadStore, ClaimAttemptResult, ClaimMutationResult, ClaimStrategy,
-    DedupCreate, Filters, NewChild, ParseShape, ParsedStrategy, RecoveryReleaseOutcome,
-    RepairReport,
+    DedupCreate, Filters, IssuePatch, IssuePatchStatus, NewChild, ParseShape, ParsedStrategy,
+    RecoveryReleaseOutcome, RepairReport,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -1459,7 +1459,7 @@ impl BeadStore for CliBeadStore {
         {
             Ok(output) => output,
             Err(error) if operation_failed_with(&error, "renew_claim_fenced", 4) => {
-                return Ok(ClaimRenewal::LostOwnership)
+                return Ok(ClaimRenewal::LostOwnership);
             }
             Err(error) => return Err(error),
         };
@@ -1631,7 +1631,7 @@ impl BeadStore for CliBeadStore {
         {
             Ok(output) => output,
             Err(error) if operation_failed_with(&error, "resolve_fenced", 4) => {
-                return Ok((ClaimMutationResult::LostOwnership, None))
+                return Ok((ClaimMutationResult::LostOwnership, None));
             }
             Err(error) => return Err(error),
         };
@@ -1814,6 +1814,76 @@ impl BeadStore for CliBeadStore {
     async fn clear_manual_block(&self, id: &BeadId) -> Result<()> {
         self.mutate("clear_manual_block", &[("id", id.to_string())])
             .await
+    }
+    async fn patch_issue(&self, id: &BeadId, patch: &IssuePatch) -> Result<()> {
+        if self.backend.name != "bead-rs" || !self.manifest_supported {
+            bail!(
+                "backend '{}' does not support atomic issue patching",
+                self.backend.name
+            );
+        }
+        let mut operations = Vec::new();
+        for label in &patch.remove_labels {
+            operations.push(serde_json::json!({
+                "op": "label_remove", "id": id.as_ref(), "label": label,
+            }));
+        }
+        for label in &patch.add_labels {
+            operations.push(serde_json::json!({
+                "op": "label_add", "id": id.as_ref(), "label": label,
+            }));
+        }
+        if let Some(status) = patch.status {
+            operations.push(serde_json::json!({
+                "op": "update",
+                "id": id.as_ref(),
+                "status": match status {
+                    IssuePatchStatus::ManualBlock => "blocked",
+                    IssuePatchStatus::Open => "open",
+                },
+            }));
+        }
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let manifest = serde_json::json!({
+            "manifest_version": 1,
+            "operations": operations,
+        });
+        let mut input = tempfile::Builder::new()
+            .prefix(".needle-issue-patch-")
+            .suffix(".json")
+            .tempfile_in(&self.workspace)
+            .with_context(|| {
+                format!(
+                    "failed to create issue patch manifest in {}",
+                    self.workspace.display()
+                )
+            })?;
+        serde_json::to_writer(input.as_file_mut(), &manifest)
+            .context("failed to serialize issue patch manifest")?;
+        input.as_file_mut().write_all(b"\n")?;
+        input.as_file().sync_all()?;
+        let input_path = input
+            .path()
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("issue patch manifest path is not valid UTF-8"))?
+            .to_string();
+        let stdout = self
+            .run_operation("manifest", &HashMap::from([("input", input_path)]))
+            .await
+            .with_context(|| format!("atomic issue patch for {id} failed"))?;
+        let report: serde_json::Value = serde_json::from_str(stdout.trim())
+            .context("atomic issue patch returned invalid manifest JSON")?;
+        if report
+            .get("manifest_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+            || report.get("committed").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            bail!("atomic issue patch did not confirm a committed v1 manifest");
+        }
+        Ok(())
     }
     async fn flush(&self) -> Result<()> {
         self.mutate("flush", &[]).await
@@ -3932,5 +4002,199 @@ mod tests {
             .err()
             .expect("missing credential is rejected");
         assert!(format!("{error:#}").contains("fencing_token"));
+    }
+}
+
+#[cfg(test)]
+mod issue_patch_tests {
+    use super::CliBeadStore;
+    use crate::bead_store::{builtin_bead_backends, BeadStore, IssuePatch, IssuePatchStatus};
+    use crate::process_runner::{ProcessOutput, ProcessRequest, ProcessRunner, TokioProcessRunner};
+    use crate::types::BeadId;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct IsolatedHomeRunner {
+        home: PathBuf,
+        requests: Mutex<Vec<Vec<OsString>>>,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for IsolatedHomeRunner {
+        async fn output(
+            &self,
+            request: ProcessRequest,
+            timeout: Duration,
+        ) -> Result<ProcessOutput> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(request.arguments().to_vec());
+            TokioProcessRunner
+                .output(request.env("HOME", &self.home), timeout)
+                .await
+        }
+    }
+
+    fn bead_binary() -> PathBuf {
+        std::env::var_os("BEAD_RS_BIN")
+            .map(PathBuf::from)
+            .or_else(|| which::which("bead").ok())
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo/bin/bead"))
+            })
+            .filter(|path| path.is_file())
+            .expect("a native bead-rs CLI is required for the store patch test")
+    }
+
+    async fn run_bead(binary: &Path, workspace: &Path, home: &Path, args: &[&str]) -> String {
+        let output = TokioProcessRunner
+            .output(
+                ProcessRequest::new(binary)
+                    .current_dir(workspace)
+                    .env("HOME", home)
+                    .args(args.iter().copied()),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(
+            output.success,
+            "bead {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn patch_preserves_unmentioned_issue_fields() {
+        let test_root =
+            PathBuf::from(std::env::var_os("HOME").expect("HOME is required")).join(".needle");
+        std::fs::create_dir_all(&test_root).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix(".needle-issue-patch-test-")
+            .tempdir_in(test_root)
+            .unwrap();
+        let workspace = directory.path();
+        let home = workspace.join("home");
+        std::fs::create_dir(&home).unwrap();
+        let binary = bead_binary();
+        macro_rules! run {
+            ($args:expr) => {
+                run_bead(&binary, workspace, &home, $args).await
+            };
+        }
+
+        run!(&["init", "--prefix", "patch", "--skip-foreign-workspace"]);
+        let issue_id = run!(&[
+            "create",
+            "--title",
+            "Outcome issue",
+            "--description",
+            "Agent-owned body",
+        ]);
+        let blocker_id = run!(&["create", "--title", "Agent-created blocker"]);
+        run!(&["label", "add", &issue_id, "--label", "quarantine-round:1"]);
+        let patch = IssuePatch {
+            status: Some(IssuePatchStatus::ManualBlock),
+            remove_labels: vec!["quarantine-round:1".to_string()],
+            add_labels: vec!["quarantined".to_string(), "quarantine-round:2".to_string()],
+        };
+
+        // These edits land after the outcome decided which fields to patch.
+        run!(&["dep", "add", &issue_id, &blocker_id, "--kind", "blocks"]);
+        run!(&["update", &issue_id, "--notes", "Agent note"]);
+        run!(&["label", "add", &issue_id, "--label", "agent-added"]);
+
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let runner = Arc::new(IsolatedHomeRunner {
+            home: home.clone(),
+            requests: Mutex::new(Vec::new()),
+        });
+        let store = CliBeadStore::new(
+            backend,
+            binary.clone(),
+            workspace.to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner.clone());
+        let id = BeadId::from(issue_id.as_str());
+        store.patch_issue(&id, &patch).await.unwrap();
+
+        let shown: serde_json::Value =
+            serde_json::from_str(&run!(&["show", &issue_id, "--json"])).unwrap();
+        assert_eq!(shown["title"], "Outcome issue");
+        assert_eq!(shown["description"], "Agent-owned body");
+        assert_eq!(shown["notes"], "Agent note");
+        assert_eq!(shown["manual_blocked"], true);
+        assert!(shown["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["blocker"] == blocker_id));
+        let labels = shown["labels"].as_array().unwrap();
+        for label in ["agent-added", "quarantined", "quarantine-round:2"] {
+            assert!(labels.iter().any(|item| item == label), "missing {label}");
+        }
+        assert!(!labels.iter().any(|item| item == "quarantine-round:1"));
+
+        // A failing status operation rolls back a label added earlier in the
+        // same manifest transaction.
+        run!(&["close", &blocker_id, "--reason", "fixture complete"]);
+        let invalid = IssuePatch {
+            status: Some(IssuePatchStatus::ManualBlock),
+            add_labels: vec!["rolled-back".to_string()],
+            ..IssuePatch::default()
+        };
+        assert!(store
+            .patch_issue(&BeadId::from(blocker_id.as_str()), &invalid)
+            .await
+            .is_err());
+        let closed: serde_json::Value =
+            serde_json::from_str(&run!(&["show", &blocker_id, "--json"])).unwrap();
+        assert!(!closed["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|label| label == "rolled-back"));
+
+        store
+            .patch_issue(
+                &id,
+                &IssuePatch {
+                    status: Some(IssuePatchStatus::Open),
+                    ..IssuePatch::default()
+                },
+            )
+            .await
+            .unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&run!(&["show", &issue_id, "--json"])).unwrap();
+        assert_eq!(after["manual_blocked"], false);
+        assert_eq!(after["status"], "open");
+        assert!(after["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["blocker"] == blocker_id));
+        assert_eq!(after["notes"], shown["notes"]);
+        assert_eq!(after["labels"], shown["labels"]);
+
+        let requests = runner.requests.lock().unwrap();
+        let commits = requests
+            .iter()
+            .filter(|args| args.first().is_some_and(|arg| arg == "manifest"))
+            .count();
+        assert_eq!(commits, 3, "each patch must use one manifest transaction");
     }
 }

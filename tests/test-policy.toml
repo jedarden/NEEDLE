@@ -453,7 +453,9 @@ version = 1
 # validation, the fallback-verifier ExecutionError/Fail pair, and the
 # doctor gate-health-error check, whose state records are private to
 # gate_health and cli.
-max_tests = 4270
+# +1 atomic outcome issue patch (needle-ffa316b6): this store-level contract
+# exercises the private CLI store against an isolated live bead-rs workspace.
+max_tests = 4271
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
