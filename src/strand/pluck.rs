@@ -2392,6 +2392,7 @@ impl super::Strand for PluckStrand {
                             workspace: workspace.display().to_string(),
                             max_workers: snapshot.max_workers,
                             active_workers: snapshot.active_workers,
+                            excluded_elsewhere: snapshot.excluded_elsewhere,
                         },
                         Utc::now(),
                     );
@@ -2399,9 +2400,22 @@ impl super::Strand for PluckStrand {
                         workspace = %workspace.display(),
                         active_workers = snapshot.active_workers,
                         max_workers = snapshot.max_workers,
+                        excluded_elsewhere = snapshot.excluded_elsewhere,
                         "workspace is at its worker capacity; skipping Pluck"
                     );
                     return StrandResult::NoWork;
+                }
+                Ok(Some(snapshot)) if snapshot.excluded_elsewhere > 0 => {
+                    // Abandoned claims no longer hold slots, but they stay
+                    // visible: a workspace that would have been ghost-locked
+                    // shows up here rather than silently starving.
+                    tracing::debug!(
+                        workspace = %workspace.display(),
+                        active_workers = snapshot.active_workers,
+                        max_workers = snapshot.max_workers,
+                        excluded_elsewhere = snapshot.excluded_elsewhere,
+                        "workspace capacity excludes holders live elsewhere"
+                    );
                 }
                 Ok(_) => {}
                 Err(error) => {

@@ -437,7 +437,13 @@ version = 1
 # GateResult::PassRewritten contract case and one telemetry-event case. The
 # classifier and the event builder are private; the fixtures reuse the
 # module's existing git helpers, so the unit tier is the cheapest home.
-max_tests = 4254
+# +4 workspace-capacity holder placement (needle-a6c92ddd, tests required by
+# the bead's acceptance): a holder live elsewhere (another workspace's bead,
+# or idle beside a relaunched incarnation's claim) is not counted; a holder
+# on its held bead is; a holder whose heartbeat predates its claim (the
+# heartbeat-file lag) is; a stale heartbeat is not. The classifier is private
+# to strand::workspace_capacity, so the unit tier is the cheapest home.
+max_tests = 4258
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

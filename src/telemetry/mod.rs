@@ -670,6 +670,9 @@ pub enum EventKind {
         workspace: String,
         max_workers: u32,
         active_workers: usize,
+        /// In-progress holders not counted because their fresh heartbeat
+        /// shows them on another bead or workspace (abandoned claims).
+        excluded_elsewhere: usize,
     },
     ResolveEvaluated {
         bead_id: BeadId,
@@ -2697,10 +2700,12 @@ impl EventKind {
                 workspace,
                 max_workers,
                 active_workers,
+                excluded_elsewhere,
             } => serde_json::json!({
                 "workspace": workspace,
                 "max_workers": max_workers,
                 "active_workers": active_workers,
+                "excluded_elsewhere": excluded_elsewhere,
             }),
             EventKind::GenerationGateEvaluated {
                 strand_name,

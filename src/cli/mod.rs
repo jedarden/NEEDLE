@@ -4410,10 +4410,20 @@ fn cmd_status(
             if !workspace_capacity.is_empty() {
                 println!("Workspace Worker Capacity:");
                 for capacity in &workspace_capacity {
-                    println!(
-                        "  {} {}/{}",
-                        capacity.name, capacity.active_workers, capacity.max_workers
-                    );
+                    if capacity.excluded_elsewhere > 0 {
+                        println!(
+                            "  {} {}/{} ({} holder(s) live elsewhere, not counted)",
+                            capacity.name,
+                            capacity.active_workers,
+                            capacity.max_workers,
+                            capacity.excluded_elsewhere
+                        );
+                    } else {
+                        println!(
+                            "  {} {}/{}",
+                            capacity.name, capacity.active_workers, capacity.max_workers
+                        );
+                    }
                 }
                 println!();
             }
@@ -4616,6 +4626,7 @@ fn cmd_status(
                         "name": capacity.name,
                         "active_workers": capacity.active_workers,
                         "max_workers": capacity.max_workers,
+                        "excluded_elsewhere": capacity.excluded_elsewhere,
                     })
                 }).collect::<Vec<_>>(),
                 "circuits": circuit_statuses.iter().map(|circuit| {
@@ -8137,6 +8148,8 @@ struct WorkspaceCapacityStatus {
     name: String,
     active_workers: usize,
     max_workers: u32,
+    /// Holders live elsewhere whose claims here are not counted.
+    excluded_elsewhere: usize,
 }
 
 /// Collect capacity rows for the home workspace and workspaces currently
@@ -8191,25 +8204,25 @@ fn collect_workspace_capacity_statuses(
 
     caps.into_iter()
         .map(|(workspace, max_workers)| {
-            let active_workers = runtime
-                .as_ref()
-                .and_then(|runtime| {
-                    let store = crate::bead_store::discover_default(
-                        workspace.clone(),
-                        None,
-                        Some("needle".to_string()),
-                        Some(env!("CARGO_PKG_VERSION").to_string()),
-                    )
-                    .ok()?;
-                    let in_progress = runtime.block_on(store.list_in_progress()).ok()?;
-                    crate::strand::workspace_capacity::count_live_assignees(
-                        &in_progress,
-                        heartbeat_dir,
-                        heartbeat_ttl,
-                    )
-                    .ok()
-                })
-                .unwrap_or_else(|| {
+            let holders = runtime.as_ref().and_then(|runtime| {
+                let store = crate::bead_store::discover_default(
+                    workspace.clone(),
+                    None,
+                    Some("needle".to_string()),
+                    Some(env!("CARGO_PKG_VERSION").to_string()),
+                )
+                .ok()?;
+                let in_progress = runtime.block_on(store.list_in_progress()).ok()?;
+                crate::strand::workspace_capacity::count_holders(
+                    &in_progress,
+                    heartbeat_dir,
+                    heartbeat_ttl,
+                )
+                .ok()
+            });
+            let (active_workers, excluded_elsewhere) = match holders {
+                Some(holders) => (holders.active, holders.elsewhere),
+                None => (
                     HealthMonitor::read_all_heartbeats(heartbeat_dir)
                         .unwrap_or_default()
                         .into_iter()
@@ -8220,8 +8233,10 @@ fn collect_workspace_capacity_statuses(
                         })
                         .map(|heartbeat| heartbeat.qualified_id)
                         .collect::<HashSet<_>>()
-                        .len()
-                });
+                        .len(),
+                    0,
+                ),
+            };
             let workspace_display = workspace.display().to_string();
             let name = workspace
                 .file_name()
@@ -8233,6 +8248,7 @@ fn collect_workspace_capacity_statuses(
                 name,
                 active_workers,
                 max_workers,
+                excluded_elsewhere,
             }
         })
         .collect()

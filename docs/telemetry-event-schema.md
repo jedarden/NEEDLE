@@ -48,7 +48,12 @@ Additional fields are event-specific and documented per type below.
 - `strand.skipped` — A strand was skipped (e.g., due to config)
 - `strand.workspace_at_capacity` — A workspace was skipped because its
   workspace-owned live-worker cap was reached; payload includes `workspace`,
-  `max_workers`, and `active_workers`
+  `max_workers`, `active_workers`, and `excluded_elsewhere`. An in-progress
+  holder counts toward `active_workers` only while its fresh heartbeat shows
+  it on a bead it holds in that workspace, or predates that bead's claim (the
+  heartbeat-file lag after a claim). `excluded_elsewhere` counts holders whose
+  fresh heartbeat shows another bead or workspace — abandoned claims that no
+  longer hold a slot (needle-a6c92ddd)
 - `strand.resolve.evaluated` — Resolve strand evaluation
 - `strand.pluck.no_candidate` — Pluck found no local candidate; diagnostic only, waterfall continues
 - `strand.pluck.starvation_detected` — Pluck found open work excluded from its local candidate frontier; diagnostic only, and the waterfall continues

@@ -1577,6 +1577,7 @@ impl ExploreStrand {
                     workspace = %workspace.display(),
                     active_workers = snapshot.active_workers,
                     max_workers = snapshot.max_workers,
+                    excluded_elsewhere = snapshot.excluded_elsewhere,
                     "excluding busy workspace from Explore frontier ranking"
                 );
                 return Ok(None);
