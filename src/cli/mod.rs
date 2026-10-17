@@ -3015,6 +3015,58 @@ fn stop_survivor_pid_line(pid: u32, grace_period: Duration) -> String {
     )
 }
 
+/// A scoped stop must also find workers that escaped the tmux pane tree.
+/// The registry PID identifies workers started with configured defaults, while
+/// explicit run arguments identify a replacement worker after a PID changes.
+fn scoped_stop_discovered_pids(
+    session_name: &str,
+    registered_pid: Option<u32>,
+    discovered: &[DiscoveredProcess],
+) -> Vec<u32> {
+    discovered
+        .iter()
+        .filter(|process| {
+            Some(process.pid) == registered_pid
+                || process
+                    .agent
+                    .as_deref()
+                    .zip(process.identifier.as_deref())
+                    .is_some_and(|(agent, identifier)| {
+                        sanitize_session_name(&format!("needle-{agent}-{identifier}"))
+                            == session_name
+                    })
+        })
+        .map(|process| process.pid)
+        .collect()
+}
+
+fn registered_worker_for_session<'a>(
+    session_name: &str,
+    workers: &'a [WorkerEntry],
+) -> Option<&'a WorkerEntry> {
+    workers
+        .iter()
+        .find(|worker| sanitize_session_name(&format!("needle-{}", worker.id)) == session_name)
+}
+
+/// Prefer the registered worker over the pane shell when it is still a
+/// NEEDLE process. A worker can outlive or reparent away from its pane.
+fn stop_root_pid(
+    registered_pid: Option<u32>,
+    pane_pid: Option<u32>,
+    is_needle: &dyn Fn(u32) -> bool,
+    find_in_tree: &dyn Fn(u32) -> Option<u32>,
+) -> Option<u32> {
+    registered_pid
+        .filter(|pid| is_needle(*pid))
+        .or_else(|| pane_pid.map(|pid| find_in_tree(pid).unwrap_or(pid)))
+}
+
+/// Retain a failed scoped stop in tmux so `needle list` can still show it.
+fn should_retain_stopped_session(all: bool, any_remaining: bool) -> bool {
+    !all && any_remaining
+}
+
 /// `needle stop` — kill the full process tree for worker processes.
 ///
 /// This command kills the parent needle run process, its bash -c prompt wrapper,
@@ -3049,48 +3101,45 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    let stop_config = ConfigLoader::load_global()?.stop;
-    let grace_period = Duration::from_secs(stop_config.grace_period_secs);
+    let config = ConfigLoader::load_global()?;
+    let grace_period = Duration::from_secs(config.stop.grace_period_secs);
+    let registry = Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
+    let registered_workers = if all {
+        Vec::new()
+    } else {
+        registry.list_all()?
+    };
     let mut had_survivors = false;
 
     for session in &targets {
         tracing::info!(session = %session.name, "stopping worker");
 
-        // Get the PID from the tmux session
-        let tmux_pid = match session.pid {
-            Some(p) => p,
-            None => {
+        let registered_pid = registered_worker_for_session(&session.name, &registered_workers)
+            .map(|worker| worker.pid);
+        // The registered worker may have reparented outside the pane tree.
+        // Validate its NEEDLE identity before signalling: a stale PID may
+        // now belong to an unrelated process.
+        let needle_pid = if let Some(pid) = stop_root_pid(
+            registered_pid,
+            session.pid,
+            &is_needle_process,
+            &find_needle_process_in_tree,
+        ) {
+            pid
+        } else {
+            if all {
                 println!(
                     "Warning: no PID found for session '{}', skipping process tree kill",
                     session.name
                 );
-                // Still kill the session for cleanup
                 let _ = crate::tmux_socket::command()
                     .args(["kill-session", "-t", &session.name])
                     .status();
-                continue;
+            } else {
+                println!("Error: no process PID found for session '{}'", session.name);
+                had_survivors = true;
             }
-        };
-
-        // Find the actual needle run process (tmux pane_pid is the shell, not needle)
-        let needle_pid = match find_needle_process_in_tree(tmux_pid) {
-            Some(p) => {
-                tracing::info!(
-                    session = %session.name,
-                    tmux_pid,
-                    needle_pid = p,
-                    "found needle run process in process tree"
-                );
-                p
-            }
-            None => {
-                tracing::warn!(
-                    session = %session.name,
-                    tmux_pid,
-                    "no needle run process found in tree, using tmux PID"
-                );
-                tmux_pid
-            }
+            continue;
         };
 
         // Kill the entire process tree rooted at the needle run process
@@ -3101,13 +3150,29 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
                     "Warning: failed to kill process tree for session '{}': {}",
                     session.name, e
                 );
-                (false, Vec::new())
+                // A scoped stop must still poll the root after a signalling
+                // error before it can report that the worker is gone.
+                (false, if all { Vec::new() } else { vec![needle_pid] })
             }
         };
 
         // Verify only this session's signalled tree. A different live worker is
         // not an orphan of the session being stopped.
-        let remaining_processes = find_surviving_processes(&signalled_pids, grace_period);
+        let mut remaining_processes = find_surviving_processes(&signalled_pids, grace_period);
+        if !all {
+            // The tree snapshot can miss a reparented or restarted worker.
+            // A failed scan must preserve the session instead of licensing a
+            // misleading successful stop.
+            let discovered = scan_needle_processes()?;
+            for pid in scoped_stop_discovered_pids(&session.name, registered_pid, &discovered) {
+                if !remaining_processes
+                    .iter()
+                    .any(|(remaining, _)| *remaining == pid)
+                {
+                    remaining_processes.push((pid, process_cmdline(pid)));
+                }
+            }
+        }
         let any_remaining = !remaining_processes.is_empty();
 
         if any_remaining {
@@ -3125,37 +3190,40 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             }
         }
 
+        if should_retain_stopped_session(all, any_remaining) {
+            // Preserve the tmux session and registry entry so `needle list`
+            // still exposes the worker after a failed scoped stop.
+            println!(
+                "Error: failed to stop {} (worker process survived)",
+                session.name
+            );
+            continue;
+        }
+
         // Kill the tmux session for cleanup
         let kill_status = crate::tmux_socket::command()
             .args(["kill-session", "-t", &session.name])
             .status();
 
         // Clean up registry entry only if NO needle processes remain
-        if killed && !any_remaining {
-            // Extract worker identifier from session name (format: needle-<agent>-<worker_id>)
-            // Session names are sanitized: dots become underscores, so we need to handle that
-            let parts: Vec<&str> = session.name.split('-').collect();
-            let worker_id = if parts.len() >= 3 {
-                // needle-<agent>-<worker_id> -> worker_id is the third part
-                parts[2]
+        if (killed || !all) && !any_remaining {
+            // Registry keys are the full agent-worker identity. Splitting a
+            // hyphenated session name loses the agent and can remove the wrong
+            // entry or leave a stale one behind.
+            let worker_id = if all {
+                session.name.split('-').nth(2)
             } else {
-                // Fallback: use the full session name as worker_id
-                tracing::warn!(
-                    session = %session.name,
-                    "could not extract worker_id from session name, using full name"
-                );
-                &session.name
+                registered_worker_for_session(&session.name, &registered_workers)
+                    .map(|worker| worker.id.as_str())
             };
-
-            let config = ConfigLoader::load_global()?;
-            let registry =
-                Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
-            if let Err(e) = registry.deregister(worker_id) {
-                tracing::warn!(
-                    worker_id,
-                    error = %e,
-                    "failed to deregister worker from registry"
-                );
+            if let Some(worker_id) = worker_id {
+                if let Err(e) = registry.deregister(worker_id) {
+                    tracing::warn!(
+                        worker_id,
+                        error = %e,
+                        "failed to deregister worker from registry"
+                    );
+                }
             }
         }
 
@@ -12385,6 +12453,71 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
             forced.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
             vec![1002]
         );
+    }
+
+    #[test]
+    fn scoped_stop_keeps_session_visible_when_registered_worker_survives() {
+        let session = TmuxSession {
+            name: "needle-claude-code-glm-4_7-bravo".to_string(),
+            created: "test".to_string(),
+            status: "detached".to_string(),
+            pid: Some(1001),
+        };
+        let registered = WorkerEntry {
+            id: "claude-code-glm-4.7-bravo".to_string(),
+            pid: 4242,
+            workspace: PathBuf::from("/test"),
+            agent: "claude-code-glm-4.7".to_string(),
+            model: None,
+            provider: None,
+            started_at: chrono::Utc::now(),
+            beads_processed: 0,
+            beads_completed: 0,
+            config_reload_generation: 0,
+            state: None,
+            otlp_degraded: None,
+        };
+        let workers = [registered];
+        let registered_pid =
+            registered_worker_for_session(&session.name, &workers).map(|worker| worker.pid);
+        assert_eq!(registered_pid, Some(4242));
+        assert_eq!(
+            stop_root_pid(registered_pid, session.pid, &|pid| pid == 4242, &|_| None),
+            Some(4242),
+            "the escaped registered worker, not the pane shell, is the kill root"
+        );
+
+        // The pane tree drained, but the registered worker escaped it. Its
+        // argv omits --agent, as in ADR-002, so PID reconciliation is needed.
+        let discovered = [
+            DiscoveredProcess {
+                pid: 4242,
+                workspace: Some(PathBuf::from("/test")),
+                agent: None,
+                identifier: Some("bravo".to_string()),
+                cmdline: "needle run --identifier bravo".to_string(),
+            },
+            DiscoveredProcess {
+                pid: 5252,
+                workspace: Some(PathBuf::from("/test")),
+                agent: Some("other".to_string()),
+                identifier: Some("alpha".to_string()),
+                cmdline: "needle run --agent other --identifier alpha".to_string(),
+            },
+        ];
+        let remaining = scoped_stop_discovered_pids(&session.name, registered_pid, &discovered);
+        assert_eq!(remaining, vec![4242]);
+        assert!(stop_result(!remaining.is_empty()).is_err());
+        assert!(should_retain_stopped_session(false, !remaining.is_empty()));
+
+        // Retaining tmux leaves the session in needle list even if its pane
+        // has died; list prints stale sessions as well as live ones.
+        let (live, stale) = reconcile_tmux_sessions(
+            std::slice::from_ref(&session),
+            &MockProcessInspector::dead_root_with(1001, &[], &[]),
+        );
+        assert!(live.is_empty());
+        assert_eq!(stale[0].name, session.name);
     }
 
     #[test]
