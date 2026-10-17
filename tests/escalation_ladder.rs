@@ -800,6 +800,128 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
     Ok(())
 }
 
+// needle-3771863e: `sh` resolves on the worker's PATH, so the missing gate
+// program is reported by the shell as exit 127 rather than by a failed
+// spawn — the 2026-09-09 agent-archivist shape that walked correct work up
+// the whole escalation ladder. Repeated dispatches must release the bead
+// with the failure count untouched, and the third consecutive error must
+// degrade the workspace and file the operator-visible alert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unrunnable_gate_command_releases_without_failure_count() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fixture.write_workspace_config(true)?;
+    fs::write(fixture.workspace.join(".gate-mode"), "enabled")?;
+    let bead = fixture.create_bead(
+        "Unrunnable gate must not penalize work",
+        "The configured gate command does not exist on this host.",
+    )?;
+
+    for attempt in 1..=3 {
+        fixture
+            .run_worker(
+                &format!("ladder-missing-gate-{attempt}"),
+                &fixture.normal_path,
+            )
+            .await?;
+    }
+    assert_eq!(
+        Fixture::log_lines(&fixture.gate_log),
+        3,
+        "every dispatch ran the unrunnable gate"
+    );
+    assert_failure_count(&fixture, &bead, 0)?;
+    assert_manual_blocked_is_false(&fixture.why(&bead)?, &bead);
+    fixture.assert_ready(&bead)?;
+
+    // The unrunnable-gate condition is workspace health, not a bead
+    // verdict: three consecutive errors degrade the workspace and file
+    // exactly one alert bead for the operator.
+    let gate_health_dir = fixture.home.join(".needle/state/gate-health");
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&gate_health_dir).with_context(|| {
+        format!(
+            "missing gate health directory {}",
+            gate_health_dir.display()
+        )
+    })? {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let state: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        if state.get("workspace").and_then(Value::as_str) == fixture.workspace.to_str() {
+            records.push(state);
+        }
+    }
+    assert_eq!(records.len(), 1, "expected one gate-health state record");
+    assert_eq!(records[0].get("degraded"), Some(&Value::Bool(true)));
+    assert!(records[0]
+        .get("consecutive_errors")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count >= 3));
+    assert_eq!(
+        records[0].get("last_reason").and_then(Value::as_str),
+        Some("ENOENT"),
+        "the record names the never-ran class, not a gate verdict"
+    );
+
+    let ready = fixture.ready()?;
+    let alerts: Vec<&Value> = ready
+        .iter()
+        .filter(|bead| {
+            bead.get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|title| title.starts_with("Gate broken:"))
+        })
+        .collect();
+    assert_eq!(alerts.len(), 1, "degradation must file one alert bead");
+
+    Ok(())
+}
+
+// needle-3771863e no-regression arm: a gate command that exists and fails
+// is a real verdict. `cat` runs, exits 1 over a missing input, and its
+// ENOENT-shaped stderr must not buy an execution-error release — the
+// failure count climbs to the ceiling and quarantines, exactly like an
+// agent failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn executed_gate_rejection_still_climbs_the_ladder() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fs::write(
+        fixture.workspace.join(".needle.yaml"),
+        format!(
+            "bead_cli:\n  backend: bead-rs\n  path: {}\ngates:\n  - type: command\n    commands:\n      - cat /definitely/missing-gate-input\n    run_in: workspace\n",
+            fixture.bead.display()
+        ),
+    )?;
+    fs::write(fixture.workspace.join(".gate-mode"), "enabled")?;
+    let bead = fixture.create_bead(
+        "Executed gate rejection still counts",
+        "The gate runs and rejects the work; the ladder must engage.",
+    )?;
+
+    // Below the ceiling the retry cooldown is soft, so the lone bead is
+    // retried within this run until the fifth failure reaches hard
+    // quarantine — the same rung-1 shape the agent-failure ladder has.
+    fixture
+        .run_worker("ladder-gate-failure", &fixture.normal_path)
+        .await?;
+    assert_failure_count(&fixture, &bead, 5)?;
+    assert_quarantine_window(&fixture, &bead, 1, 2 * 60 * 60)?;
+    assert_manual_blocked_is_false(&fixture.why(&bead)?, &bead);
+    assert!(
+        !fixture.ready()?.iter().any(|ready| {
+            ready
+                .get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|title| title.starts_with("Gate broken:"))
+        }),
+        "an executed rejection is a bead verdict, never a gate-health alert"
+    );
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_worker_kills_timed_out_child() -> Result<()> {
     let mut fixture = Fixture::new()?;

@@ -6559,6 +6559,78 @@ fn doctor_check_gate_health_records(needle_home: &Path, repair: bool) -> CheckRe
     .with_fix("needle doctor --repair")
 }
 
+/// Surface persisted gate-execution-error records to the operator.
+///
+/// A record is written the first time a gate command cannot run in a
+/// workspace (needle-3771863e): the dispatch releases without penalising
+/// the bead, so without this check the only traces are telemetry lines
+/// nobody is tailing. A degraded workspace (three or more consecutive
+/// errors) already files its "Gate broken" alert bead; younger records
+/// would otherwise be invisible outside `$HOME/.needle/state`.
+fn doctor_check_gate_health_errors(needle_home: &Path) -> CheckResult {
+    let gate_health_dir = needle_home.join("state").join("gate-health");
+    let entries = match std::fs::read_dir(&gate_health_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CheckResult::pass("Gate-health errors", "no gate-health state recorded");
+        }
+        Err(error) => {
+            return CheckResult::warn(
+                "Gate-health errors",
+                format!("cannot read {}: {error}", gate_health_dir.display()),
+            )
+        }
+    };
+
+    let mut errored: Vec<crate::gate_health::GateHealthState> = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .filter_map(|entry| std::fs::read(entry.path()).ok())
+        .filter_map(|bytes| {
+            serde_json::from_slice::<crate::gate_health::GateHealthState>(&bytes).ok()
+        })
+        .filter(|state| state.consecutive_errors > 0)
+        .collect();
+    // Most-workspace-affected first, then most recent.
+    errored.sort_by(|a, b| {
+        b.degraded
+            .cmp(&a.degraded)
+            .then_with(|| b.consecutive_errors.cmp(&a.consecutive_errors))
+            .then_with(|| b.last_error_at.cmp(&a.last_error_at))
+    });
+
+    if errored.is_empty() {
+        return CheckResult::pass("Gate-health errors", "no unrunnable-gate records");
+    }
+
+    let degraded = errored.iter().filter(|state| state.degraded).count();
+    let mut detail = errored
+        .iter()
+        .take(10)
+        .map(|state| {
+            format!(
+                "{} — {} consecutive error(s){}, last: {}: {}",
+                state.workspace.display(),
+                state.consecutive_errors,
+                if state.degraded { ", DEGRADED" } else { "" },
+                state.last_command,
+                state.last_reason
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut summary = format!(
+        "{} workspace(s) with unrunnable-gate records, {degraded} degraded",
+        errored.len()
+    );
+    if errored.len() > 10 {
+        summary.push_str(&format!(" (showing 10, {} more)", errored.len() - 10));
+        detail.push(format!("… and {} more", errored.len() - 10));
+    }
+
+    CheckResult::warn("Gate-health errors", summary).with_detail(detail)
+}
+
 fn doctor_check_heartbeats(heartbeat_dir: &Path, ttl_secs: u64, repair: bool) -> CheckResult {
     if !heartbeat_dir.is_dir() {
         return CheckResult::pass("Heartbeat files", "no heartbeat directory");
@@ -7281,6 +7353,10 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
     // Gate-health records whose workspaces have disappeared. Repair is
     // deliberately limited to validated missing-workspace records.
     results.push(doctor_check_gate_health_records(&needle_home, repair));
+
+    // Live unrunnable-gate records — the operator-visible surface for a
+    // gate that could not run (needle-3771863e).
+    results.push(doctor_check_gate_health_errors(&needle_home));
 
     // Peer status
     results.push(doctor_check_peers(
@@ -11823,6 +11899,54 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
         assert!(repaired.message.contains("removed 1 stale record"));
         assert!(!stale_path.exists());
         assert_eq!(std::fs::read(&existing_path).unwrap(), existing_bytes);
+    }
+
+    #[test]
+    fn doctor_gate_health_errors_pass_without_records() {
+        let home = tempfile::tempdir().unwrap();
+        let needle_home = home.path().join(".needle");
+        let check = doctor_check_gate_health_errors(&needle_home);
+        assert_eq!(check.status, CheckStatus::Pass);
+
+        // A state directory with no error content is also clean.
+        std::fs::create_dir_all(needle_home.join("state/gate-health")).unwrap();
+        let check = doctor_check_gate_health_errors(&needle_home);
+        assert_eq!(check.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn doctor_gate_health_errors_warn_naming_workspace_and_command() {
+        let home = tempfile::tempdir().unwrap();
+        let needle_home = home.path().join(".needle");
+        let state_dir = needle_home.join("state/gate-health");
+        let workspace = home.path().join("broken-gate-workspace");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let id = crate::gate_health::workspace_id(&workspace).unwrap();
+        let state = serde_json::json!({
+            "workspace": workspace,
+            "consecutive_errors": 2,
+            "last_error_at": "2026-09-09T12:00:00Z",
+            "last_command": "scripts/definition-of-done.sh --fast",
+            "last_reason": "ENOENT",
+            "degraded": false
+        });
+        std::fs::write(
+            state_dir.join(format!("{id}.json")),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+
+        let check = doctor_check_gate_health_errors(&needle_home);
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("1 workspace(s)"));
+        assert!(check.message.contains("0 degraded"));
+        let detail = check.detail.join("\n");
+        assert!(detail.contains("broken-gate-workspace"));
+        assert!(detail.contains("scripts/definition-of-done.sh --fast"));
+        assert!(detail.contains("ENOENT"));
+        assert!(detail.contains("2 consecutive error(s)"));
     }
 
     #[test]

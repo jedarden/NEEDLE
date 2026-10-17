@@ -241,10 +241,39 @@ impl FallbackVerificationRuntime {
                 FallbackVerdict::Pass(pass_report(&gate_name))
             }
             Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // The same classification the command gates use: a verifier
+                // whose program never ran (missing binary — 127 with the
+                // shell's not-found diagnostic — or a failed spawn) produced
+                // no verdict about the work, so it is an execution error, not
+                // a failure (needle-3771863e, the 2026-09-09 incident shape).
+                if let Some(reason) =
+                    crate::validation::unrunnable_gate_reason(output.exit_code, &stderr)
+                {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        gate = %gate_name,
+                        command = %command,
+                        exit_code = ?output.exit_code,
+                        "fallback verifier could not run — execution error, not a verdict"
+                    );
+                    return FallbackVerdict::ExecutionError(execution_error_report(
+                        &gate_name,
+                        &command,
+                        format!(
+                            "verifier '{}' could not run ({}): exited {:?} in {}; stderr \
+                             (capped at {stderr_cap_bytes} bytes):\n{}",
+                            command,
+                            reason,
+                            output.exit_code,
+                            bead.workspace.display(),
+                            cap_bytes(&stderr, stderr_cap_bytes),
+                        ),
+                    ));
+                }
                 // A failed gate leaves the extraction in place for diagnosis,
                 // with the path in the reason — the same contract the command
                 // gates and the dispatch extraction itself document.
-                let stderr = String::from_utf8_lossy(&output.stderr);
                 let reason = format!(
                     "fallback verifier '{}' exited {:?} in {}; stderr (capped at \
                      {stderr_cap_bytes} bytes):\n{}\n(extraction preserved at {})",
@@ -540,6 +569,86 @@ mod tests {
             ["-c", "cargo build --all-targets && cargo test"] as [&str; 2]
         );
         assert_eq!(requests[0].working_directory(), Some(extraction.path()));
+    }
+
+    #[tokio::test]
+    async fn missing_verifier_program_is_execution_error_not_failure() {
+        // needle-3771863e: `sh` reports the configured program missing with
+        // exit 127 — the verifier never ran, so there is no verdict and the
+        // release must not touch the failure count.
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput {
+            success: false,
+            exit_code: Some(127),
+            stdout: Vec::new(),
+            stderr: b"sh: line 1: cargo: not found\n".to_vec(),
+        });
+        let extraction = tempfile::tempdir().unwrap();
+        let runtime = FallbackVerificationRuntime::for_tests(
+            runner.clone(),
+            Some(extraction.path().to_path_buf()),
+        );
+        let workspace = git_workspace(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
+
+        match runtime
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
+            .await
+        {
+            FallbackVerdict::ExecutionError(report) => {
+                let (name, result) = report.results.iter().next().unwrap();
+                assert_eq!(name, "fallback_rust", "the marker names the gate");
+                let GateResult::ExecutionError { command, reason } = result else {
+                    panic!("expected ExecutionError, got {result:?}")
+                };
+                assert!(command.contains("cargo"));
+                assert!(reason.contains("ENOENT"), "the reason names the class");
+                assert!(reason.contains("not found"), "the diagnostic is carried");
+            }
+            other => panic!("expected ExecutionError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn verifier_exit_one_over_a_missing_file_is_still_a_failure() {
+        // The conservative counterpart: a verifier that genuinely ran keeps
+        // its verdict even when its output names a missing file — `cat
+        // no-such-input` exits 1 with "No such file or directory" and that
+        // is a judgment of the work, not an execution error.
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: Vec::new(),
+            stderr: b"cat: /definitely/missing-input: No such file or directory\n".to_vec(),
+        });
+        let extraction = tempfile::tempdir().unwrap();
+        let runtime = FallbackVerificationRuntime::for_tests(
+            runner.clone(),
+            Some(extraction.path().to_path_buf()),
+        );
+        let workspace = git_workspace(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
+
+        match runtime
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
+            .await
+        {
+            FallbackVerdict::Fail(report) => {
+                let GateResult::Fail(_) = report.results.iter().next().unwrap().1 else {
+                    panic!("expected Fail, got {report:?}")
+                };
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
     }
 
     #[tokio::test]

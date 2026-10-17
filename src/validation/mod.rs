@@ -968,50 +968,46 @@ impl CommandGate {
                     results.insert(cmd.clone(), GateResult::Pass);
                 }
                 Err(failure) => {
-                    // Detect execution errors: command could not run at all.
-                    // These produce failure.exit_code=None and error messages like
-                    // "failed to execute command: No such file or directory" (ENOENT)
-                    // or "Permission denied" (EACCES).
-                    let is_execution_error = failure.exit_code.is_none()
-                        && (failure.output.contains("No such file or directory")
-                            || failure.output.contains("Permission denied")
-                            || failure.output.contains("failed to execute command"));
-
-                    if is_execution_error {
-                        tracing::warn!(
-                            command = %cmd,
-                            error = %failure.output,
-                            "gate execution error — command could not run"
-                        );
-                        // Extract the error reason (e.g., "ENOENT", "EACCES")
-                        let reason = if failure.output.contains("No such file") {
-                            "ENOENT".to_string()
-                        } else if failure.output.contains("Permission denied") {
-                            "EACCES".to_string()
-                        } else {
-                            "execution_failed".to_string()
-                        };
-                        results.insert(
-                            cmd.clone(),
-                            GateResult::ExecutionError {
-                                command: cmd.clone(),
-                                reason,
-                            },
-                        );
-                    } else {
-                        tracing::warn!(
-                            command = %cmd,
-                            exit_code = ?failure.exit_code,
-                            "command gate failed"
-                        );
-                        results.insert(
-                            cmd.clone(),
-                            GateResult::Fail(format!(
-                                "command '{}' failed: {}",
-                                cmd,
-                                failure.output.trim()
-                            )),
-                        );
+                    // Detect execution errors: the gate produced no verdict
+                    // because its program never ran. Besides the spawn-level
+                    // failure (exit_code=None, e.g. ENOENT on `sh` itself),
+                    // this covers the shell-mediated shape — `sh` ran but
+                    // could not start the configured program (exit 127, or
+                    // 126 for a non-executable one). That is the 2026-09-09
+                    // agent-archivist shape: the gate's exit code said
+                    // nothing about the work, yet scoring it as a failure
+                    // walked the bead up the whole escalation ladder.
+                    match unrunnable_gate_reason(failure.exit_code, &failure.output) {
+                        Some(reason) => {
+                            tracing::warn!(
+                                command = %cmd,
+                                exit_code = ?failure.exit_code,
+                                error = %failure.output,
+                                "gate execution error — command could not run"
+                            );
+                            results.insert(
+                                cmd.clone(),
+                                GateResult::ExecutionError {
+                                    command: cmd.clone(),
+                                    reason: reason.to_string(),
+                                },
+                            );
+                        }
+                        None => {
+                            tracing::warn!(
+                                command = %cmd,
+                                exit_code = ?failure.exit_code,
+                                "command gate failed"
+                            );
+                            results.insert(
+                                cmd.clone(),
+                                GateResult::Fail(format!(
+                                    "command '{}' failed: {}",
+                                    cmd,
+                                    failure.output.trim()
+                                )),
+                            );
+                        }
                     }
                     // Stop on first failure/error
                     break;
@@ -1093,6 +1089,54 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
     } else {
         let truncated = &s[..max_bytes];
         format!("{}... [truncated]", truncated)
+    }
+}
+
+/// Classify a failed gate command by whether its program ever ran.
+///
+/// Returns `Some(reason)` when the gate produced no verdict because the
+/// program was never executed: the spawn itself failed (no exit code —
+/// ENOENT on `sh`, EACCES, …), or the shell reported that the program it
+/// was asked to run does not exist (POSIX 127) or is not executable
+/// (POSIX 126). Both are workspace-health problems, not judgments of the
+/// bead's work, and route through `handle_gate_error`: the bead is
+/// released without touching the failure count (needle-4aaa010c; the
+/// 2026-09-09 agent-archivist quarantine storm ran an unrunnable gate up
+/// the full escalation ladder because only the spawn-level shape was
+/// detected here).
+///
+/// The shell-mediated codes require the matching shell diagnostic in the
+/// output so a program that genuinely ran and happened to exit 127/126
+/// keeps its own verdict. The same conservatism applies to the messages:
+/// `cat no-such-file` runs, exits 1, and prints "No such file or
+/// directory" — a genuine gate failure, never classified here.
+pub(crate) fn unrunnable_gate_reason(exit_code: Option<i32>, output: &str) -> Option<&'static str> {
+    match exit_code {
+        // The spawn itself failed; `output` carries the io::Error message
+        // behind the "failed to execute command" prefix `run_command` adds.
+        None => {
+            if output.contains("No such file or directory") {
+                Some("ENOENT")
+            } else if output.contains("Permission denied") {
+                Some("EACCES")
+            } else if output.contains("failed to execute command") {
+                Some("execution_failed")
+            } else {
+                None
+            }
+        }
+        // dash: "sh: 1: gate: not found" / "sh: 1: gate: No such file or
+        // directory"; bash: "sh: line 1: gate: command not found" / "...
+        // No such file or directory".
+        Some(127)
+            if output.contains("No such file or directory")
+                || output.contains("command not found")
+                || output.contains("not found") =>
+        {
+            Some("ENOENT")
+        }
+        Some(126) if output.contains("Permission denied") => Some("EACCES"),
+        _ => None,
     }
 }
 
@@ -1473,6 +1517,120 @@ mod tests {
         let result = truncate_output(&s, 50);
         assert!(result.len() < 200);
         assert!(result.ends_with("... [truncated]"));
+    }
+
+    // ── unrunnable_gate_reason tests ──
+
+    #[test]
+    fn unrunnable_gate_reason_classifies_only_never_ran_programs() {
+        let cases: &[(Option<i32>, &str, Option<&str>)] = &[
+            // Spawn-level failures: no process, no exit code.
+            (
+                None,
+                "failed to execute command: No such file or directory (os error 2)",
+                Some("ENOENT"),
+            ),
+            (
+                None,
+                "failed to execute command: Permission denied (os error 13)",
+                Some("EACCES"),
+            ),
+            (
+                None,
+                "failed to execute command: Failed to change directory to /gone",
+                Some("execution_failed"),
+            ),
+            (None, "child killed by signal 9", None),
+            // Shell-mediated: sh ran, the configured program did not.
+            (
+                Some(127),
+                "sh: line 1: scripts/definition-of-done.sh: No such file or directory",
+                Some("ENOENT"),
+            ),
+            (Some(127), "sh: 1: mock-gate: not found", Some("ENOENT")),
+            (
+                Some(127),
+                "sh: line 1: mock-gate: command not found",
+                Some("ENOENT"),
+            ),
+            // 126: found but not executable — the same never-ran shape.
+            (
+                Some(126),
+                "sh: line 1: ./gate.sh: Permission denied",
+                Some("EACCES"),
+            ),
+            (Some(126), "sh: line 1: ./gate.sh: bad interpreter", None),
+            // A program that ran keeps its own verdict, whatever it printed:
+            // `cat no-such-file` exits 1 saying "No such file or directory",
+            // and a gate may exit 127/126 for reasons of its own.
+            (
+                Some(1),
+                "cat: /definitely/missing-input: No such file or directory",
+                None,
+            ),
+            (Some(127), "gate ran and exited 127 of its own accord", None),
+            (Some(7), "", None),
+            (Some(128), "fatal: not a git repository", None),
+        ];
+
+        for (exit_code, output, expected) in cases {
+            assert_eq!(
+                unrunnable_gate_reason(*exit_code, output),
+                *expected,
+                "exit_code={exit_code:?} output={output:?}"
+            );
+        }
+    }
+
+    /// The incident end to end through the gate itself: a configured command
+    /// that `sh` cannot start is an ExecutionError, while a command that
+    /// runs and fails — even with an ENOENT-shaped message — stays a Fail.
+    #[tokio::test]
+    async fn command_gate_classifies_missing_program_as_execution_error() {
+        let workspace = tempfile::tempdir().unwrap();
+        let bead = crate::types::Bead {
+            id: crate::types::BeadId::from("needle-test"),
+            title: "Test bead".to_string(),
+            body: None,
+            priority: 1,
+            status: crate::types::BeadStatus::InProgress,
+            assignee: None,
+            labels: vec![],
+            workspace: workspace.path().to_path_buf(),
+            dependencies: vec![],
+            dependents: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let gate = CommandGate::with_options(
+            vec!["/definitely/missing-gate-command".to_string()],
+            DEFAULT_STDERR_CAP_BYTES,
+            RunIn::Workspace,
+        );
+
+        let result = gate.validate(&bead, workspace.path()).await.unwrap();
+        assert_eq!(
+            result,
+            GateResult::ExecutionError {
+                command: "/definitely/missing-gate-command".to_string(),
+                reason: "ENOENT".to_string(),
+            }
+        );
+
+        // `cat` exists, runs, and exits 1 over a missing input file: a
+        // genuine failure, even though its stderr names a missing file.
+        let gate = CommandGate::with_options(
+            vec!["cat /definitely/missing-input".to_string()],
+            DEFAULT_STDERR_CAP_BYTES,
+            RunIn::Workspace,
+        );
+        let result = gate.validate(&bead, workspace.path()).await.unwrap();
+        let GateResult::Fail(reason) = result else {
+            panic!("an executed rejection must stay a Fail, got {result:?}")
+        };
+        assert!(reason.contains("cat /definitely/missing-input"));
+        assert!(reason.contains("No such file or directory"));
     }
 
     // ── GateConfig deserialization tests ──

@@ -448,7 +448,12 @@ version = 1
 # The boot layer builder and warning helper are private to cli.
 # The committed base already contained four more unit tests than its 4258
 # ceiling. Reconcile that existing count so the clean fast lane can run.
-max_tests = 4264
+# +6 unrunnable-gate classification (needle-3771863e): the shared
+# exit-127/126-vs-executed-verdict table and the CommandGate pairing in
+# validation, the fallback-verifier ExecutionError/Fail pair, and the
+# doctor gate-health-error check, whose state records are private to
+# gate_health and cli.
+max_tests = 4270
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -574,8 +579,11 @@ contract = 246
 # nt_contracts contract harness with their ceilings (needle-1f31332d).
 # +1 native bead-rs proposal-backlog cap scenario in the P3 harness below
 # (needle-b117f398).
+# +2 unrunnable-gate classification in escalation_ladder (needle-3771863e):
+# the shell-mediated exit-127 release with an unchanged failure count, and
+# the executed-rejection no-regression arm climbing to quarantine.
 
-e2e = 857
+e2e = 859
 soak = 0
 fuzz = 0
 
@@ -719,7 +727,10 @@ path = "tests/escalation_ladder.rs"
 tier = "e2e"
 # +1 immediate-exit agent quarantine loop (needle-adbde195).
 # +1 timed-out worker cleanup regression (needle-afc1ccf6).
-max_tests = 3
+# +2 unrunnable-gate classification (needle-3771863e): a shell-mediated
+# exit-127 gate releases with an unchanged failure count and degrades the
+# workspace, while an executed rejection still climbs to quarantine.
+max_tests = 5
 owner = "component:escalation-ladder"
 
 [[harness]]
