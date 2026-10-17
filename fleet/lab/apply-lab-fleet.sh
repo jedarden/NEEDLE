@@ -6,6 +6,7 @@
 #   needle.slice            -> ~/.config/systemd/user/needle.slice
 #   needle-worker@.service  -> ~/.config/systemd/user/needle-worker@.service
 #   trace-retention.{service,timer} -> ~/.config/systemd/user/
+#   ../ex44/needle-release-upgrade{,.service,.timer} -> ~/.local/bin/, ~/.config/systemd/user/
 #   workers.tsv instances   -> ~/.config/needle/workers/<identifier>.env
 # and enables exactly the manifest instances. Any other needle-worker@<id>
 # instance that is still enabled gets MASKED (not merely disabled): the
@@ -140,11 +141,25 @@ for unit in trace-retention.service trace-retention.timer; do
     fi
 done
 
+# Canary-gated release poller, shared with codinghome (fleet/ex44). Both hosts
+# are NixOS with /home/coding, so the helper and units apply unchanged. Lab sat
+# on a hand-installed 0.6.36 for a week without it (needle-803b9ff4). A promoted
+# :stable reaches running workers by re-exec at a bead boundary, never a restart.
+for unit in needle-release-upgrade.service needle-release-upgrade.timer; do
+    if ! cmp -s "$SRC_DIR/../ex44/$unit" "$SYSTEMD_DIR/$unit" 2>/dev/null; then
+        echo "- installing $unit"
+        run install -m 644 "$SRC_DIR/../ex44/$unit" "$SYSTEMD_DIR/$unit"
+    else
+        echo "- $unit already current"
+    fi
+done
+
 # --- per-instance env files --------------------------------------------------
 mkdir -p "$WORKERS_DIR"
 run install -m 644 "$SRC_DIR/fleet-policy.env" "$HOME/.config/needle/fleet-policy.env"
 run install -d "$HOME/.local/bin" "$HOME/.local/lib/needle-checkpoint"
 run install -m 755 "$SRC_DIR/bin/needle-checkpoint-unwedge" "$HOME/.local/bin/needle-checkpoint-unwedge"
+run install -m 755 "$SRC_DIR/../ex44/needle-release-upgrade" "$HOME/.local/bin/needle-release-upgrade"
 for helper in commit-checkpoint.sh checkpoint-publish.sh; do
     run install -m 755 "$SRC_DIR/../../scripts/$helper" "$HOME/.local/lib/needle-checkpoint/$helper"
 done
@@ -209,6 +224,7 @@ fi
 # --- reload (never restarts anything) ----------------------------------------
 run systemctl --user daemon-reload
 run systemctl --user enable --now trace-retention.timer
+run systemctl --user enable --now needle-release-upgrade.timer
 
 echo
 echo "== fleet policy applied. Current state:"

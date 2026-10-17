@@ -222,6 +222,14 @@ oneshot so the timer's journal state is visible to fleet monitoring.
   `needle-stable` under a `needle-worker@` unit is expected.
 - Converge without interrupting attempts: `apply-lab-fleet.sh` only
   daemon-reloads. Restart an instance explicitly to pick up unit changes.
+- Releases install themselves: `needle-release-upgrade.timer` (shared with
+  codinghome, from `fleet/ex44/`) checks GitHub every 6 hours. It verifies the
+  checksums and installs through `needle upgrade --from-file`: :testing, then
+  the canary suite in `~/.needle/canary`, then :stable. Running workers re-exec
+  the promoted binary at a bead boundary, and a failed canary leaves :stable
+  untouched. Check it with
+  `journalctl --user -u needle-release-upgrade.service`; run it now with
+  `systemctl --user start needle-release-upgrade.service`.
 - Rollback: every replaced file is backed up on the host with a timestamp
   suffix, and this directory is git history.
 - References to `bench` and `ex44` in inherited comments are historical;

@@ -70,6 +70,12 @@ grep -q 'wrapper-drift.timer' "$SRC_DIR/apply-lab-fleet.sh" \
     || { echo "apply-lab-fleet.sh does not enable the drift timer" >&2; exit 1; }
 grep -q -- '--wrappers-only' "$SRC_DIR/apply-lab-fleet.sh" \
     || { echo "apply-lab-fleet.sh lost --wrappers-only" >&2; exit 1; }
+grep -q 'enable --now needle-release-upgrade.timer' "$SRC_DIR/apply-lab-fleet.sh" \
+    || { echo "apply-lab-fleet.sh does not enable the release-upgrade timer" >&2; exit 1; }
+for f in needle-release-upgrade needle-release-upgrade.service needle-release-upgrade.timer; do
+    [[ -f "$SRC_DIR/../ex44/$f" ]] || { echo "missing shared upgrade file fleet/ex44/$f" >&2; exit 1; }
+done
+bash "$SRC_DIR/../ex44/needle-release-upgrade" --self-test >/dev/null
 # The wrappers-only exit must precede the manifest sanity loop, so codinghome
 # never converges the lab manifest.
 awk '/^if \[\[ "\$WRAPPERS_ONLY" == 1 \]\]; then/{w=NR} /^while IFS=\$.\t. read -r id ws agent delay explore; do/{if (w && NR < w) {print "wrappers-only exit is after the manifest sanity loop"; exit 1}}' "$SRC_DIR/apply-lab-fleet.sh"
