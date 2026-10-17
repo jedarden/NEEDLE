@@ -21,7 +21,13 @@ struct CleanupFixture {
 
 impl CleanupFixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().expect("create cleanup fixture root");
+        // Keep the fixture outside the parent HOME. The subprocess receives a
+        // harness marker containing that HOME, and NEEDLE must reject any
+        // state root beneath it even when HOME is overridden for the child.
+        let root = tempfile::Builder::new()
+            .prefix("needle-cleanup-")
+            .tempdir_in("/var/tmp")
+            .expect("create cleanup fixture root");
         let workspace = root.path().join("workspace");
         let state = root.path().join("state");
         fs::create_dir_all(&workspace).expect("create fixture workspace");

@@ -39,7 +39,15 @@ pub struct IsolatedChildEnv {
 impl IsolatedChildEnv {
     /// Create the directory layout used by child commands.
     pub fn new() -> Self {
-        let root = tempfile::tempdir().expect("create isolated child environment");
+        // The harness marker below carries the parent process's HOME so the
+        // child can reject state roots that accidentally remain beneath it.
+        // On this host TMPDIR may itself be inside HOME, so the default
+        // tempfile location would fail that check even though HOME is
+        // overridden for the child.
+        let root = tempfile::Builder::new()
+            .prefix("needle-isolated-")
+            .tempdir_in("/var/tmp")
+            .expect("create isolated child environment");
         for relative in [".cache", ".config", ".local/state", ".needle/state", "tmp"] {
             fs::create_dir_all(root.path().join(relative))
                 .unwrap_or_else(|error| panic!("create isolated {relative}: {error}"));
