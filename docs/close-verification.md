@@ -42,9 +42,10 @@ sentence does not open evidence. The fenced form stays the prompt's
 requested shape; the bare form is tolerance for how closes are actually
 written, not an invitation to write them that way.
 
-A close reason with neither shape is rejected: the bead is reopened and
-released with reason `close reason carries no verification evidence`, and the
-attempt counts toward the failure ceiling like any other gate failure.
+A close reason with neither shape, or with no command NEEDLE can re-run, is
+rejected: the bead is reopened and released with reason
+`close reason carries no verification evidence`, and the attempt counts toward
+the failure ceiling like any other gate failure.
 
 ## Re-run policy
 
@@ -55,7 +56,7 @@ attempt counts toward the failure ceiling like any other gate failure.
 ```
 go test   go vet   go build
 cargo test   cargo build
-npm test   pytest   make test
+pytest   make test
 scripts/definition-of-done.sh
 ```
 
@@ -88,6 +89,12 @@ the re-run exists to catch that.
 Quote acceptance commands in backticks when authoring beads
 (see [bead-authoring.md](bead-authoring.md)).
 
+Resolve can close a bead itself, without an agent close reason. Its `Complete`
+path re-runs the quoted Go and Cargo acceptance commands from the bead
+description in the same clean committed-state extraction before closing. A
+failing command rejects completion; an extraction or execution error releases
+the bead without a failure penalty.
+
 **Clean extraction.** Re-runs execute inside a fresh extraction of the
 workspace's committed HEAD (`git archive`, the same mechanism as
 `run_in: clean` command gates — see [definition-of-done.md]
@@ -100,9 +107,9 @@ left in place for diagnosis.
 
 | Outcome | Handling |
 |---|---|
-| All re-runs exit 0 (or nothing was re-runnable) | Close honoured, normal success flow resumes |
+| At least one command re-runs and all exit 0 | Close honoured, normal success flow resumes |
 | A re-run exits non-zero | Gate failure: reopen + release; the reason names the command and its first 20 lines of output |
-| No `verified:` block | Gate failure: reopen + release, reason `close reason carries no verification evidence` |
+| No `verified:` block or no re-runnable command | Gate failure: reopen + release, reason `close reason carries no verification evidence` |
 | Extraction cannot be built, or a command could not spawn | Execution error: release **without** a failure-count penalty (ADR-023) — no verdict exists |
 
 ## Backend scope
@@ -112,8 +119,9 @@ bead-rs projects `close_reason` through its safe query language and is fully
 supported. The legacy bf `show --json` projection carries no close reason, so
 on those workspaces the gate skips (fail-open) rather than judging every close
 as evidence-free. Backends advertise this through
-`BeadStore::exposes_close_reason`; a *fetch error* on a capable backend also
-fails open — a store hiccup is not missing evidence.
+`BeadStore::exposes_close_reason`; a *fetch error* on a capable backend
+withholds completion as an execution error, without charging the bead a gate
+failure.
 
 ## Telemetry
 

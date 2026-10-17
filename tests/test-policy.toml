@@ -455,7 +455,10 @@ version = 1
 # gate_health and cli.
 # +1 atomic outcome issue patch (needle-ffa316b6): this store-level contract
 # exercises the private CLI store against an isolated live bead-rs workspace.
-max_tests = 4271
+# +5 false-close contracts (needle-165ab6f6): empty close evidence is rejected
+# and Resolve Complete checks passing, failing, unrunnable, and absent
+# acceptance verification through its private executor seam.
+max_tests = 4276
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -474,7 +477,9 @@ max_tests = 4271
 # adapter-specific prompt deadlines and terminal resolved-row accounting.
 # +1 fake-Forgejo CI watcher deduplication scenario (needle-7434c5cb).
 # +6 p2 file-contention integration fixture (needle-4386d7bd).
-push = 684
+# +1 clean-state definition-of-done priority over the Go default
+# (needle-165ab6f6), exercised through the public outcome boundary.
+push = 685
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -693,7 +698,9 @@ tier = "push"
 # preservation, dispatch coverage plus terminal cleanup, independent
 # checkouts, and markers untracked under normal and forced add. Real binary
 # with env_clear and an isolated HOME.
-max_tests = 136
+# +1 gate-less Go workspace selects its committed definition-of-done script
+# ahead of the language default (needle-165ab6f6).
+max_tests = 137
 owner = "component:pluck-mend-explore"
 
 [[harness]]

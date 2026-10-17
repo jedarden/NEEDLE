@@ -15,7 +15,7 @@
 //!   (reopen + release, reason "close reason carries no verification
 //!   evidence").
 //! - Commands outside the allow-list are ignored with a WARN and never
-//!   executed; the block still counts as evidence.
+//!   executed. A block with no re-runnable command is rejected.
 //! - Any re-run command that exits non-zero fails the close: the failure
 //!   reason names the command and its first 20 lines of output.
 //! - Acceptance commands mined from the bead's description re-run only where
@@ -63,8 +63,8 @@ const FAILURE_OUTPUT_LINES: usize = 20;
 /// runner-less binary and fails regardless of the work — the same false
 /// verdict that removed the Node builtin from the default gates on
 /// 2026-09-12 and released nine shipped sun-sim dispatches as `gate_failed`
-/// on 2026-09-23. A claimed `npm test` still counts as evidence; it is
-/// recorded and WARN-ed, never executed.
+/// on 2026-09-23. A claimed `npm test` is WARN-ed and never executed;
+/// another re-runnable command is required to substantiate the close.
 const ALLOWED_PREFIXES: &[&[&str]] = &[
     &["go", "test"],
     &["go", "vet"],
@@ -81,7 +81,7 @@ const ALLOWED_PREFIXES: &[&[&str]] = &[
 pub(crate) enum CloseEvidenceVerdict {
     /// The backend cannot expose close reasons — the gate does not apply.
     Skipped,
-    /// Evidence carried and every re-run passed (or nothing was re-runnable).
+    /// Evidence carried and every re-run passed.
     Pass,
     /// Evidence missing or a re-run failed — reopen and release.
     Fail(GateReport),

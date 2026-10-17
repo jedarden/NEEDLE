@@ -19,11 +19,13 @@
 //!   outcome. A decision that was refused before any mutation (invalid
 //!   proposal, wrong parent) gets the same best-effort release, per the
 //!   documented `resolution_failed` fallback.
-//! - **Gates and shipped-work verification gate `complete`.** The closure is
+//! - **Gates, shipped-work, and bead acceptance gate `complete`.** The closure is
 //!   judged by the bead workspace's configured gates (the same per-workspace
 //!   resolution the dispatch path uses, via
 //!   [`OutcomeHandler::run_verification_gates`]) and by
-//!   [`verify_shipped_work`]; NEEDLE closes only when both pass. A verdict
+//!   [`verify_shipped_work`]. Quoted Go/Cargo acceptance commands in the bead
+//!   description are re-run in clean committed state. NEEDLE closes only when
+//!   every applicable check passes. A verdict
 //!   that rejected the work releases with failure accounting; a check that
 //!   could not run releases *without* penalty (ADR-023: a gate that cannot
 //!   run is not a gate that failed).
@@ -54,6 +56,7 @@ use crate::bead_store::{
 use crate::claim::ClaimHandle;
 use crate::config::Config;
 use crate::mitosis::MitosisEvaluator;
+use crate::outcome::close_verification::{self, CloseEvidenceVerdict, CloseVerificationRuntime};
 use crate::outcome::OutcomeHandler;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadStatus, Outcome};
@@ -181,10 +184,14 @@ impl ReleaseCause {
 pub struct DecisionExecutor {
     telemetry: Telemetry,
     outcome: OutcomeHandler,
+    acceptance_verification: CloseVerificationRuntime,
     mitosis: Option<MitosisEvaluator>,
     /// Whether `complete` must pass shipped-work verification before the
     /// executor closes. Same switch as the dispatch path's gate.
     enforce_shipped_work: bool,
+    /// Host fallback policy, used to distinguish an explicit no-gate opt-out
+    /// from a workspace where no verifier was found.
+    fallback_gate_enabled: bool,
     quarantine_after_failures: u32,
 }
 
@@ -192,12 +199,15 @@ impl DecisionExecutor {
     /// Create an executor from the worker's resolved configuration.
     pub fn new(config: Config, telemetry: Telemetry) -> Self {
         let enforce_shipped_work = config.worker.enforce_shipped_work;
+        let fallback_gate_enabled = config.validation.fallback_gate;
         let quarantine_after_failures = config.outcome.quarantine_after_failures;
         DecisionExecutor {
             outcome: OutcomeHandler::new(config, telemetry.clone()),
+            acceptance_verification: CloseVerificationRuntime::production(),
             telemetry,
             mitosis: None,
             enforce_shipped_work,
+            fallback_gate_enabled,
             quarantine_after_failures,
         }
     }
@@ -906,8 +916,8 @@ impl GuardedApplier<'_> {
     // complete
     // ──────────────────────────────────────────────────────────────────────
 
-    /// Close only after the configured gates and shipped-work verification
-    /// pass; otherwise release as retryable.
+    /// Close only after configured gates, shipped-work verification, and any
+    /// quoted Go/Cargo acceptance commands pass; otherwise release safely.
     async fn apply_complete(
         &self,
         store: &dyn BeadStore,
@@ -977,19 +987,6 @@ impl GuardedApplier<'_> {
                 .reject_release(store, bead, actor, &format!("gate:{}", failed.join(",")))
                 .await;
         }
-        if verified {
-            let gates_run = gate_report.map(|r| r.results.len()).unwrap_or(0) as u32;
-            let _ = self.telemetry.emit(
-                EventKind::VerificationPassed {
-                    bead_id: bead.id.clone(),
-                    gates_run,
-                    gates_source: gate_telemetry.gates_source.to_string(),
-                    command_gates_resolved: gate_telemetry.command_gates_resolved,
-                },
-                Utc::now(),
-            );
-        }
-
         // Shipped-work verification: did this dispatch actually land durable
         // output (or record why none was needed)?
         let mut shipped_verified = false;
@@ -1062,6 +1059,104 @@ impl GuardedApplier<'_> {
             tracing::debug!(
                 bead_id = %bead.id,
                 "shipped-work enforcement disabled — closing on gates alone"
+            );
+        }
+
+        // Resolve closes the bead itself, so there is no agent close reason to
+        // inspect. Re-run executable acceptance commands from the bead's own
+        // description against committed state before applying Complete.
+        let acceptance_commands = close_verification::collect_rerun_commands(
+            bead.id.as_ref(),
+            &[],
+            current.body.as_deref(),
+            &bead.workspace,
+        );
+        if acceptance_commands.is_empty() && gate_report.is_none() {
+            // A clean tree says what was committed, but gives no verdict on
+            // whether this bead's acceptance criteria hold. Preserve only an
+            // explicit workspace or host opt-out from verification.
+            let opted_out = if bead.workspace.is_absolute() {
+                match crate::config::gates_for_workspace(&bead.workspace) {
+                    Ok(gates) => {
+                        gates.declared || !gates.fallback_gate.unwrap_or(self.fallback_gate_enabled)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %error,
+                            "resolve complete: could not confirm an explicit gate opt-out"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if !opted_out {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "resolve complete: no verifier or executable acceptance command was available"
+                );
+                return self
+                    .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                    .await
+                    .map(|released| release_result(released, ReleaseCause::Unverifiable));
+            }
+        }
+        if !acceptance_commands.is_empty() {
+            match self
+                .acceptance_verification
+                .verify(bead, &acceptance_commands)
+                .await
+            {
+                CloseEvidenceVerdict::Pass => {}
+                CloseEvidenceVerdict::Fail(report) => {
+                    let reason = report
+                        .results
+                        .values()
+                        .find_map(|result| result.failure_reason())
+                        .unwrap_or("acceptance verification failed");
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        reason,
+                        "resolve complete: bead acceptance command rejected the closure"
+                    );
+                    return self.reject_release(store, bead, actor, reason).await;
+                }
+                CloseEvidenceVerdict::ExecutionError { command, reason } => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        command,
+                        reason,
+                        "resolve complete: bead acceptance command could not run"
+                    );
+                    return self
+                        .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                        .await
+                        .map(|released| release_result(released, ReleaseCause::Unverifiable));
+                }
+                CloseEvidenceVerdict::Skipped => {
+                    // The command runner never returns Skipped; if that
+                    // contract changes, withhold completion.
+                    return self
+                        .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                        .await
+                        .map(|released| release_result(released, ReleaseCause::Unverifiable));
+                }
+            }
+        }
+
+        // All checks capable of judging this Complete decision have passed.
+        if verified {
+            let gates_run = gate_report.as_ref().map(|r| r.results.len()).unwrap_or(0) as u32;
+            let _ = self.telemetry.emit(
+                EventKind::VerificationPassed {
+                    bead_id: bead.id.clone(),
+                    gates_run,
+                    gates_source: gate_telemetry.gates_source.to_string(),
+                    command_gates_resolved: gate_telemetry.command_gates_resolved,
+                },
+                Utc::now(),
             );
         }
 
@@ -2234,6 +2329,7 @@ mod tests {
         armed_failure: StateMutex<Option<&'static str>>,
         /// What `notes()` reports — the shipped-work gate reads it.
         stored_notes: String,
+        body: String,
         /// Beads beyond the parent that `list_all` reports — existing mitosis
         /// children for the dedup tests.
         extra_beads: Vec<Bead>,
@@ -2309,6 +2405,7 @@ mod tests {
                 fail_parent_label_after: None,
                 armed_failure: StateMutex::new(None),
                 stored_notes: String::new(),
+                body: "Body".to_string(),
                 extra_beads: Vec::new(),
                 workspace,
             }
@@ -2353,6 +2450,11 @@ mod tests {
 
         fn with_stored_notes(mut self, notes: &str) -> Self {
             self.stored_notes = notes.to_string();
+            self
+        }
+
+        fn with_body(mut self, body: &str) -> Self {
+            self.body = body.to_string();
             self
         }
 
@@ -2529,7 +2631,7 @@ mod tests {
             Bead {
                 id: BeadId::from("needle-exec"),
                 title: "Executor test bead".to_string(),
-                body: Some("Body".to_string()),
+                body: Some(self.body.clone()),
                 priority: 1,
                 status: BeadStatus::InProgress,
                 assignee: Some("worker-a".to_string()),
@@ -2865,31 +2967,65 @@ mod tests {
         DecisionExecutor::new(config, Telemetry::new("test".to_string()))
     }
 
+    fn run_fixture_git(path: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["-c", "user.email=needle@example.test"])
+            .args(["-c", "user.name=needle-test"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .expect("run fixture Git command");
+        assert!(
+            output.status.success(),
+            "fixture Git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn temp_workspace() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
-        // Completion fixtures must provide a clean Git state for the fallback
-        // verifier. Work evidence and mutation outcomes remain store-driven.
+        // Most executor tests exercise lifecycle behavior independently of
+        // verifier discovery, so explicitly opt these fixtures out of gates.
+        // Work evidence and mutation outcomes remain store-driven.
+        std::fs::write(path.join(".needle.yaml"), "gates: []\n")
+            .expect("write fixture gate opt-out");
         for args in [
-            vec!["init", "-q"],
-            vec!["commit", "--allow-empty", "-q", "-m", "fixture"],
+            &["init", "-q"][..],
+            &["add", "--", ".needle.yaml"],
+            &["commit", "-q", "-m", "fixture"],
         ] {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&path)
-                .args(["-c", "user.email=needle@example.test"])
-                .args(["-c", "user.name=needle-test"])
-                .args(["-c", "commit.gpgsign=false"])
-                .args(args)
-                .output()
-                .expect("run fixture Git command");
-            assert!(
-                output.status.success(),
-                "fixture Git command failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            run_fixture_git(&path, args);
         }
         (dir, path)
+    }
+
+    fn acceptance_workspace() -> (tempfile::TempDir, PathBuf) {
+        let (dir, workspace) = temp_workspace();
+        std::fs::write(workspace.join("go.mod"), "module example.test/resolve\n")
+            .expect("write Go marker");
+        // Isolate the bead-specific check from default language gates.
+        std::fs::write(workspace.join(".needle.yaml"), "gates: []\n")
+            .expect("write explicit gate configuration");
+        for args in [
+            &["add", "--", "go.mod", ".needle.yaml"][..],
+            &["commit", "-q", "-m", "acceptance fixture"],
+        ] {
+            run_fixture_git(&workspace, args);
+        }
+        (dir, workspace)
+    }
+
+    fn executor_with_acceptance_runner(
+        runner: std::sync::Arc<dyn crate::process_runner::ProcessRunner>,
+        extraction: &std::path::Path,
+    ) -> DecisionExecutor {
+        let mut executor = executor();
+        executor.acceptance_verification =
+            CloseVerificationRuntime::for_tests(runner, Some(extraction.to_path_buf()));
+        executor
     }
 
     fn complete_decision() -> ResolveDecision {
@@ -2998,6 +3134,120 @@ mod tests {
             gate_resolution::verdict(false, None),
             GateVerdict::Unavailable
         );
+    }
+
+    #[tokio::test]
+    async fn complete_reruns_quoted_acceptance_command_before_close() {
+        use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+
+        let (_dir, workspace) = acceptance_workspace();
+        let extraction = tempfile::tempdir().expect("clean extraction fixture");
+        let runner = std::sync::Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(b"ok\n".to_vec()));
+        let executor = executor_with_acceptance_runner(runner.clone(), extraction.path());
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("shipped work")
+            .with_body("## Acceptance\n- `go test ./...` passes\n");
+
+        let applied = apply(&executor, &store, &complete_decision())
+            .await
+            .expect("passing acceptance command should allow completion");
+
+        assert_eq!(applied, AppliedDecision::Completed);
+        assert_eq!(store.closes_snapshot().len(), 1);
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].arguments(), ["-c", "go test ./..."]);
+        assert_eq!(requests[0].working_directory(), Some(extraction.path()));
+    }
+
+    #[tokio::test]
+    async fn complete_without_verifier_or_acceptance_command_is_unverifiable() {
+        let (_dir, workspace) = temp_workspace();
+        for args in [
+            &["rm", "-q", "--", ".needle.yaml"][..],
+            &["commit", "-q", "-m", "remove gate opt-out"],
+        ] {
+            run_fixture_git(&workspace, args);
+        }
+        let store = RecordingStore::new(workspace).with_stored_notes("shipped work");
+
+        let applied = apply(&executor(), &store, &complete_decision())
+            .await
+            .expect("missing verifier should release without penalty");
+
+        assert_eq!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::Unverifiable)
+        );
+        assert!(store.closes_snapshot().is_empty());
+        assert_eq!(store.released(), 1);
+        assert!(store
+            .labels_snapshot()
+            .iter()
+            .all(|label| !label.starts_with("failure-count:")));
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_failing_quoted_acceptance_command() {
+        use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+
+        let (_dir, workspace) = acceptance_workspace();
+        let extraction = tempfile::tempdir().expect("clean extraction fixture");
+        let runner = std::sync::Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: Vec::new(),
+            stderr: b"acceptance failed\n".to_vec(),
+        });
+        let executor = executor_with_acceptance_runner(runner.clone(), extraction.path());
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("shipped work")
+            .with_body("## Acceptance\n- `go test ./...` passes\n");
+
+        let applied = apply(&executor, &store, &complete_decision())
+            .await
+            .expect("failed acceptance command should release");
+
+        assert_eq!(applied, AppliedDecision::Released(ReleaseCause::Rejected));
+        assert!(store.closes_snapshot().is_empty());
+        assert_eq!(store.released(), 1);
+        assert!(store
+            .labels_snapshot()
+            .iter()
+            .any(|label| label == "failure-count:1"));
+        assert_eq!(runner.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_releases_without_penalty_when_acceptance_cannot_run() {
+        use crate::process_runner::FakeProcessRunner;
+
+        let (_dir, workspace) = acceptance_workspace();
+        let extraction = tempfile::tempdir().expect("clean extraction fixture");
+        let runner = std::sync::Arc::new(FakeProcessRunner::new());
+        runner.push_error("could not start acceptance check");
+        let executor = executor_with_acceptance_runner(runner.clone(), extraction.path());
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("shipped work")
+            .with_body("## Acceptance\n- `go test ./...` passes\n");
+
+        let applied = apply(&executor, &store, &complete_decision())
+            .await
+            .expect("unrunnable acceptance command should release");
+
+        assert_eq!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::Unverifiable)
+        );
+        assert!(store.closes_snapshot().is_empty());
+        assert_eq!(store.released(), 1);
+        assert!(store
+            .labels_snapshot()
+            .iter()
+            .all(|label| !label.starts_with("failure-count:")));
+        assert_eq!(runner.requests().len(), 1);
     }
 
     async fn missing_observation_fails_safely() {

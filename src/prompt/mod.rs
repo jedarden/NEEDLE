@@ -127,9 +127,11 @@ Complete these steps in order and include evidence for each one in the close rea
   cargo test acceptance commands quoted in the bead description even if you
   omit them. A close reason without the block is rejected — the bead is
   reopened and released with reason \"close reason carries no verification evidence\".
-  Only these command prefixes are re-run; anything else in the block is
-  ignored, never executed: go test, go vet, go build, cargo test, cargo build,
-  npm test, pytest, make test, scripts/definition-of-done.sh
+  At least one command must be re-runnable; an empty block or a block with only
+  ignored commands is rejected. Only these command prefixes are re-run;
+  anything else in the block is ignored, never executed: go test, go vet,
+  go build, cargo test, cargo build, pytest, make test,
+  scripts/definition-of-done.sh
 
 A close without steps 2–4 will be reopened by NEEDLE and counts as a failure toward
 quarantine. If you cannot complete any checklist step, do NOT close the bead.

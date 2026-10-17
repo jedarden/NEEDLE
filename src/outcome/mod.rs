@@ -1535,10 +1535,11 @@ impl OutcomeHandler {
     /// touched and failed them all with exit 127 on a script that workspace
     /// never had (needle-da77b68a, live incident 2026-09-09). This is the
     /// same per-workspace resolution `bead_cli.backend` already gets, and a
-    /// workspace that declares no gates runs none — not another workspace's.
-    /// A workspace directory with no `.needle.yaml` at all resolves the same
-    /// way: `gates_for_workspace` returns an empty `GatesConfig` and no gate
-    /// runs.
+    /// workspace that declares no gates uses its own definition of done or
+    /// built-in language/fallback verification — never another workspace's.
+    /// A workspace directory with no `.needle.yaml` resolves the same way:
+    /// `gates_for_workspace` returns an empty `GatesConfig`, then this method
+    /// chooses the workspace's automatic verifier.
     ///
     /// An unset or relative bead workspace resolves no gates at all.
     /// `gates_for_workspace` joins `.needle.yaml` onto the given path, so an
@@ -1576,11 +1577,20 @@ impl OutcomeHandler {
             )
         })?;
 
-        // Plan section 4.4 step 6: a workspace that says nothing about gates
-        // is judged by the language default its build files imply. An
-        // explicit `gates: []` is the opt-out and still runs none.
+        // A repository-owned definition of done is its acceptance contract.
+        // Let the fallback select it before considering a language default:
+        // `cargo check` or `go build` alone cannot establish that its tests
+        // and other required checks passed. An explicit gate declaration
+        // remains the workspace's opt-out from this automatic selection.
         let mut default_gate_name: Option<String> = None;
-        if workspace_gates.is_empty() && workspace_verification.is_empty() && !declared {
+        if workspace_gates.is_empty()
+            && workspace_verification.is_empty()
+            && !declared
+            && !bead
+                .workspace
+                .join(crate::validation::fallback::DEFINITION_OF_DONE_SCRIPT)
+                .is_file()
+        {
             if let Some(detected) = crate::validation::default_gates::detect(
                 &bead.workspace,
                 &self.config.validation.default_gates,
@@ -4261,11 +4271,16 @@ impl OutcomeHandler {
             &bead.workspace,
         );
         if commands.is_empty() {
-            tracing::info!(
+            tracing::warn!(
                 bead_id = %bead.id,
-                "close reason carries a verified block but no re-runnable command — honouring the close"
+                "close reason carries no re-runnable verification command — rejecting the close"
             );
-            return Ok(close_verification::CloseEvidenceVerdict::Pass);
+            return Ok(close_verification::CloseEvidenceVerdict::Fail(
+                GateReport::single_failure(
+                    close_verification::GATE_NAME,
+                    close_verification::MISSING_EVIDENCE_REASON,
+                ),
+            ));
         }
 
         tracing::info!(
@@ -7224,6 +7239,33 @@ mod tests {
             "the closed bead must be reopened, got: {:?}",
             store.actions()
         );
+    }
+
+    #[tokio::test]
+    async fn close_without_rerunnable_evidence_is_reopened_and_released() {
+        let (_guard, _home) = isolated_home();
+        for reason in [
+            "done\n```verified:\n```",
+            "done\n```verified:\nrm -rf / exit=0\n```",
+        ] {
+            let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-empty");
+            let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+            let (handler, _extraction) = close_evidence_handler(&helper, runner.clone());
+            let store = test_store(BeadStatus::Done).with_close_reason(reason);
+            let bead = test_bead(BeadStatus::InProgress);
+
+            let result = handler
+                .handle(&store, &bead, &test_output(0), false)
+                .await
+                .unwrap();
+
+            assert!(matches!(result.bead_action, BeadAction::Released(_)));
+            assert!(store
+                .actions()
+                .iter()
+                .any(|action| matches!(action, StoreAction::Reopen(_))));
+            assert!(runner.requests().is_empty(), "unsafe claims must never run");
+        }
     }
 
     #[tokio::test]

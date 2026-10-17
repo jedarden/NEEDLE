@@ -778,6 +778,28 @@ async fn fallback_marker_commands_are_selected_and_executed_in_clean_extractions
         .expect("per-workspace gate resolution regression");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn definition_of_done_precedes_language_default_in_gate_less_workspace() {
+    let environment = IsolatedEnvironment::new(true);
+    let log = environment.home().join("definition-default.log");
+    let (result, actions, log_text) = run_fixture_with_config(
+        &environment,
+        &config_with_default_gates(),
+        "definition-of-done",
+        &log,
+    )
+    .await;
+
+    assert_eq!(result.outcome, needle::types::Outcome::Success);
+    assert_eq!(result.bead_action, BeadAction::Closed);
+    assert!(actions.contains(&StoreAction::Flush));
+    assert!(log_text.contains("definition-of-done|"), "{log_text}");
+    assert!(
+        !log_text.lines().any(|line| line.starts_with("go ")),
+        "language default skipped the workspace's definition of done: {log_text}"
+    );
+}
+
 async fn assert_fallback_failed_verifier_captures_and_caps_stderr(
     environment: &IsolatedEnvironment,
 ) {

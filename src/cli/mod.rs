@@ -9322,6 +9322,21 @@ fn cmd_gates(workspace: Option<PathBuf>) -> Result<()> {
         println!("Declared: none (explicit `gates: []` — the language default is opted out).");
         return Ok(());
     }
+    if root
+        .join(crate::validation::fallback::DEFINITION_OF_DONE_SCRIPT)
+        .is_file()
+    {
+        if resolved
+            .fallback_gate
+            .unwrap_or(config.validation.fallback_gate)
+        {
+            println!("Declared: none. Repository definition of done [Clean]:");
+            println!("    $ scripts/definition-of-done.sh");
+        } else {
+            println!("Declared: none; validation.fallback_gate is false.");
+        }
+        return Ok(());
+    }
     match crate::validation::default_gates::detect(&root, &config.validation.default_gates) {
         Some(detected) => {
             println!(
@@ -9333,10 +9348,49 @@ fn cmd_gates(workspace: Option<PathBuf>) -> Result<()> {
                 println!("    $ {command}");
             }
         }
-        None if config.validation.default_gates.enabled => {
-            println!("Declared: none, and no language default applies — beads are judged on exit code alone.");
+        None => {
+            if !resolved
+                .fallback_gate
+                .unwrap_or(config.validation.fallback_gate)
+            {
+                println!("Declared: none; validation.fallback_gate is false.");
+                return Ok(());
+            }
+            let verifier = crate::validation::fallback::select_verifier(&root);
+            match &verifier {
+                crate::validation::fallback::Verifier::Marker(marker)
+                    if marker.language == "node" =>
+                {
+                    if let Some(command) = crate::validation::fallback::node_verifier_command(
+                        &config.validation.default_gates,
+                    ) {
+                        println!(
+                            "Declared: none. Built-in fallback ({}) [Clean]:",
+                            marker.language
+                        );
+                        println!("    $ {command}");
+                    } else {
+                        println!(
+                            "Declared: none. No runnable Node verifier; clean-tree check only."
+                        );
+                    }
+                }
+                crate::validation::fallback::Verifier::Marker(marker) => {
+                    println!(
+                        "Declared: none. Built-in fallback ({}) [Clean]:",
+                        marker.language
+                    );
+                    println!("    $ {}", marker.command);
+                }
+                crate::validation::fallback::Verifier::NoVerifier => {
+                    println!("Declared: none. No runnable verifier; clean-tree check only.");
+                }
+                crate::validation::fallback::Verifier::DefinitionOfDone => {
+                    println!("Declared: none. Repository definition of done [Clean]:");
+                    println!("    $ scripts/definition-of-done.sh");
+                }
+            }
         }
-        None => println!("Declared: none; validation.default_gates.enabled is false."),
     }
     Ok(())
 }

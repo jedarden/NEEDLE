@@ -1400,6 +1400,11 @@ out, and a declared list always wins. `needle gates --workspace PATH` prints
 the resolution. The gate is named `default_<language>` in gate reports and
 the attempt ledger.
 
+When `scripts/definition-of-done.sh` exists and the fallback is enabled, its
+command runs before a language default is considered. The repository's own
+acceptance script may include checks that `cargo check` or `go build` cannot
+cover.
+
 | Build file | Builtin command | Note |
 |---|---|---|
 | `Cargo.toml` | `cargo check --all-targets --quiet` | cheap, uses the shared cargo cache |
