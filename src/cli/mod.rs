@@ -1707,74 +1707,15 @@ pub fn init_tracing_subscriber(
     session_id: String,
     config: &crate::config::Config,
 ) -> Result<OtlpReloadHandle> {
-    use opentelemetry::trace::TracerProvider;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let (writer, use_ansi) = worker_log_writer(config, &worker_id);
+    let (otlp_layer, missing_header_variables) =
+        build_boot_otlp_layer(&worker_id, &session_id, config)?;
 
-    let otlp_layer: ReloadableOtlpLayer = if !config.telemetry.otlp_sink.enabled {
-        // The reload seam must exist even when OTLP starts disabled. `try_init`
-        // installs a one-shot global subscriber, so adding the seam only in
-        // the enabled branch would make a later false -> true reload require
-        // a process restart.
-        Box::new(tracing_subscriber::layer::Identity::new())
-    } else {
-        let otlp_config = &config.telemetry.otlp_sink;
-        let identity = worker_telemetry_identity(config);
-
-        // Build resource attributes
-        let resource = crate::telemetry::otlp::OtlpSink::build_resource(
-            &worker_id,
-            &session_id,
-            otlp_config,
-            identity.agent.as_deref(),
-            identity.model.as_deref(),
-            identity.provider.as_deref(),
-            identity.workspace.as_deref().and_then(Path::to_str),
-        )
-        .context("failed to build OTel resource")?;
-
-        // Create drop channel for tracing layer
-        let (drop_tx, mut drop_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::telemetry::otlp::DropEvent>();
-        tokio::spawn(async move {
-            while let Some(drop) = drop_rx.recv().await {
-                tracing::warn!(
-                    signal = drop.signal.as_str(),
-                    dropped_count = drop.dropped_count,
-                    "OTLP tracing layer export failure"
-                );
-            }
-        });
-
-        // Build exporters and tracer provider based on protocol
-        let (tracer_provider, ..) = match otlp_config.protocol.as_str() {
-            "grpc" => crate::telemetry::otlp::OtlpSink::build_grpc_providers(
-                otlp_config,
-                &resource,
-                drop_tx,
-            )?,
-            "http" | "http/protobuf" => crate::telemetry::otlp::OtlpSink::build_http_providers(
-                otlp_config,
-                &resource,
-                drop_tx,
-            )?,
-            other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
-        };
-
-        Box::new(
-            tracing_opentelemetry::layer::<OtlpLayerSubscriber>()
-                .with_tracer(tracer_provider.tracer("needle")),
-        )
-    };
-
-    // Install the reloadable layer regardless of the initial OTLP setting.
-    // The handle is intentionally created at boot so the later cycle-boundary
-    // config reload can replace the no-op layer with a live exporter (or turn
-    // an exporter off) without reinstalling the global subscriber.
+    // Keep the reload seam even when the sink starts disabled or degraded.
     let (otlp_layer, otlp_reload_handle) = tracing_subscriber::reload::Layer::new(otlp_layer);
 
-    // Create a fmt layer that works with any subscriber implementing LookupSpan.
     let subscriber = tracing_subscriber::registry()
         .with(worker_log_filter())
         .with(otlp_layer)
@@ -1788,7 +1729,95 @@ pub fn init_tracing_subscriber(
         .try_init()
         .context("failed to initialize tracing subscriber")?;
 
+    // The tracing subscriber must be installed before this event is emitted.
+    if !missing_header_variables.is_empty() {
+        warn_missing_otlp_header_env(&missing_header_variables);
+    }
+
     Ok(otlp_reload_handle)
+}
+
+#[cfg(feature = "otlp")]
+fn warn_missing_otlp_header_env(variables: &[String]) {
+    let names = variables.join(", ");
+    // Inner workers route tracing to a rolling file, while their boot
+    // diagnostics go to stderr. Put the warning in both places.
+    eprintln!("NEEDLE worker boot: WARN OTLP export disabled; unset header environment variables: {names}");
+    tracing::warn!(missing_variables = %names, "OTLP export disabled at boot: header environment variables are unset");
+}
+
+#[cfg(feature = "otlp")]
+fn build_boot_otlp_layer(
+    worker_id: &str,
+    session_id: &str,
+    config: &crate::config::Config,
+) -> Result<(ReloadableOtlpLayer, Vec<String>)> {
+    use opentelemetry::trace::TracerProvider;
+
+    let otlp_config = &config.telemetry.otlp_sink;
+    let missing_header_variables = if otlp_config.enabled && !otlp_config.required {
+        crate::telemetry::otlp::missing_header_env(otlp_config)
+    } else {
+        Vec::new()
+    };
+
+    let otlp_layer: ReloadableOtlpLayer =
+        if !otlp_config.enabled || !missing_header_variables.is_empty() {
+            // The reload seam must exist even when OTLP starts disabled. `try_init`
+            // installs a one-shot global subscriber, so adding the seam only in
+            // the enabled branch would make a later false -> true reload require
+            // a process restart.
+            Box::new(tracing_subscriber::layer::Identity::new())
+        } else {
+            let identity = worker_telemetry_identity(config);
+
+            // Build resource attributes
+            let resource = crate::telemetry::otlp::OtlpSink::build_resource(
+                worker_id,
+                session_id,
+                otlp_config,
+                identity.agent.as_deref(),
+                identity.model.as_deref(),
+                identity.provider.as_deref(),
+                identity.workspace.as_deref().and_then(Path::to_str),
+            )
+            .context("failed to build OTel resource")?;
+
+            // Create drop channel for tracing layer
+            let (drop_tx, mut drop_rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::telemetry::otlp::DropEvent>();
+            tokio::spawn(async move {
+                while let Some(drop) = drop_rx.recv().await {
+                    tracing::warn!(
+                        signal = drop.signal.as_str(),
+                        dropped_count = drop.dropped_count,
+                        "OTLP tracing layer export failure"
+                    );
+                }
+            });
+
+            // Build exporters and tracer provider based on protocol
+            let (tracer_provider, ..) = match otlp_config.protocol.as_str() {
+                "grpc" => crate::telemetry::otlp::OtlpSink::build_grpc_providers(
+                    otlp_config,
+                    &resource,
+                    drop_tx,
+                )?,
+                "http" | "http/protobuf" => crate::telemetry::otlp::OtlpSink::build_http_providers(
+                    otlp_config,
+                    &resource,
+                    drop_tx,
+                )?,
+                other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
+            };
+
+            Box::new(
+                tracing_opentelemetry::layer::<OtlpLayerSubscriber>()
+                    .with_tracer(tracer_provider.tracer("needle")),
+            )
+        };
+
+    Ok((otlp_layer, missing_header_variables))
 }
 
 /// No-op tracing initialization when OTLP feature is disabled.
@@ -9410,6 +9439,99 @@ fn cmd_update_rules(output: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn missing_otlp_header_variables_degrade_boot_and_leave_reload_seam() {
+        let missing_a = "NEEDLE_TEST_BOOT_MISSING_OTLP_AUTH_E9BDF0B1";
+        let missing_b = "NEEDLE_TEST_BOOT_MISSING_OTLP_TENANT_E9BDF0B1";
+        let present = "PATH";
+        assert!(std::env::var_os(present).is_some());
+
+        let mut config = Config::default();
+        config.telemetry.otlp_sink.enabled = true;
+        config.telemetry.otlp_sink.headers = vec![
+            format!("Authorization: env:{missing_a}"),
+            format!("X-Tenant: env:{missing_b}"),
+            format!("X-Other: env:{present}"),
+        ];
+        // If exporter construction runs, this protocol will be rejected.
+        config.telemetry.otlp_sink.protocol = "invalid".to_string();
+
+        let (layer, missing) = build_boot_otlp_layer("test-worker", "test-session", &config)
+            .expect("optional OTLP must degrade to a no-op layer");
+        assert_eq!(missing, vec![missing_a, missing_b]);
+        let (_reloadable_layer, reload): (_, OtlpReloadHandle) =
+            tracing_subscriber::reload::Layer::new(layer);
+        let no_op: ReloadableOtlpLayer = Box::new(tracing_subscriber::layer::Identity::new());
+        reload
+            .reload(no_op)
+            .expect("degraded boot retains the reload seam");
+
+        config.telemetry.otlp_sink.required = true;
+        config.telemetry.otlp_sink.protocol = "http".to_string();
+        let rt = tokio::runtime::Runtime::new().expect("test runtime");
+        let _guard = rt.enter();
+        let error = build_boot_otlp_layer("test-worker", "test-session", &config)
+            .err()
+            .expect("required OTLP must fail with missing header environment");
+        let message = format!("{error:#}");
+        assert!(message.contains(missing_a));
+        assert!(!message.contains(&std::env::var(present).expect("PATH value")));
+
+        config.telemetry.otlp_sink.required = false;
+        config.telemetry.otlp_sink.headers = vec![format!("Authorization: env:{present}")];
+        let (live_layer, missing) = build_boot_otlp_layer("test-worker", "test-session", &config)
+            .expect("a later build can attach OTLP when variables appear");
+        assert!(missing.is_empty());
+        reload
+            .reload(live_layer)
+            .expect("the boot no-op layer can be replaced with a live layer");
+    }
+
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn boot_degradation_warning_names_only_missing_variables() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for CapturedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("capture lock")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturedWriter(Arc::clone(&captured));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            warn_missing_otlp_header_env(&[
+                "NEEDLE_TEST_MISSING_A".to_string(),
+                "NEEDLE_TEST_MISSING_B".to_string(),
+            ]);
+        });
+
+        let log = String::from_utf8(captured.lock().expect("capture lock").clone())
+            .expect("UTF-8 warning");
+        assert!(log.contains("WARN"));
+        assert!(log.contains("NEEDLE_TEST_MISSING_A"));
+        assert!(log.contains("NEEDLE_TEST_MISSING_B"));
+        assert!(!log.contains(&std::env::var("PATH").expect("PATH value")));
+    }
 
     // ── needle contention (Phase 20, needle-f0552fec) ──
 

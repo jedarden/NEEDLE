@@ -2124,7 +2124,9 @@ mod tests {
         let mut config = make_test_config();
         config.headers = vec![format!("Authorization: env:{variable}")];
 
+        assert_eq!(missing_header_env(&config), vec![variable]);
         std::env::set_var(variable, "Bearer first-value");
+        assert!(missing_header_env(&config).is_empty());
         let first =
             OtlpSink::build_http_headers(&config).expect("first environment value should resolve");
 
@@ -2132,6 +2134,7 @@ mod tests {
         let second = OtlpSink::build_http_headers(&config).expect("rebuilt value should resolve");
 
         std::env::remove_var(variable);
+        assert_eq!(missing_header_env(&config), vec![variable]);
 
         assert_eq!(
             first.get("Authorization").map(String::as_str),

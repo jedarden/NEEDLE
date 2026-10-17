@@ -443,7 +443,10 @@ version = 1
 # on its held bead is; a holder whose heartbeat predates its claim (the
 # heartbeat-file lag) is; a stale heartbeat is not. The classifier is private
 # to strand::workspace_capacity, so the unit tier is the cheapest home.
-max_tests = 4258
+# +2 OTLP boot degradation contracts (needle-e9bdf0b1): no-op boot and
+# reload seam when headers are missing, plus WARN content without header values.
+# The boot layer builder and warning helper are private to cli.
+max_tests = 4260
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
