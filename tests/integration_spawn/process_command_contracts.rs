@@ -3676,8 +3676,15 @@ async fn resolution_process_contracts_atomic_capability_selects_one_resolution_p
 }
 
 #[tokio::test]
-async fn resolution_process_contracts_complete_rejects_failed_and_missing_gates() {
-    for command in ["false", "/nonexistent/needle-missing-gate-cmd"] {
+async fn resolution_process_contracts_complete_distinguishes_failed_and_unrunnable_gates() {
+    for (command, expected_release, penalized) in [
+        ("false", ReleaseCause::Rejected, true),
+        (
+            "/nonexistent/needle-missing-gate-cmd",
+            ReleaseCause::Unverifiable,
+            false,
+        ),
+    ] {
         let (_workspace, bead) = resolution_process_contracts_workspace(&[command.to_string()]);
         let store = TestStore::new(bead.clone()).with_notes("did the work");
         let executor = DecisionExecutor::new(
@@ -3704,14 +3711,18 @@ async fn resolution_process_contracts_complete_rejects_failed_and_missing_gates(
                 Some(&observation),
             )
             .await
-            .expect("judged gate rejection should release");
+            .expect("failed or unrunnable gate should release");
 
-        assert_eq!(applied, AppliedDecision::Released(ReleaseCause::Rejected));
+        assert_eq!(applied, AppliedDecision::Released(expected_release));
         let actions = store.actions();
         assert!(actions.iter().any(|action| action.starts_with("release:")));
-        assert!(actions
-            .iter()
-            .any(|action| action.contains("failure-count:1")));
+        assert_eq!(
+            actions
+                .iter()
+                .any(|action| action.contains("failure-count:1")),
+            penalized,
+            "{command}: {actions:?}"
+        );
         assert!(!actions.iter().any(|action| action.starts_with("close:")));
     }
 }
@@ -4049,7 +4060,7 @@ async fn resolution_process_contracts_outcome_short_circuits_workspace_gates() {
 
 #[serial_test::serial]
 #[tokio::test]
-async fn resolution_process_contracts_outcome_runs_missing_path_for_its_verdict() {
+async fn resolution_process_contracts_outcome_releases_missing_path_without_penalty() {
     let home = TempDir::new().expect("create isolated HOME");
     let _home = HomeGuard::set(home.path());
     let workspace = TempDir::new().expect("create gate workspace");
@@ -4075,10 +4086,13 @@ async fn resolution_process_contracts_outcome_runs_missing_path_for_its_verdict(
 
     assert_eq!(result.outcome, Outcome::Failure);
     assert!(matches!(result.bead_action, BeadAction::Released(_)));
-    assert!(store
-        .actions()
+    let actions = store.actions();
+    assert!(!actions
         .iter()
         .any(|action| action.contains("verification-failed")));
+    assert!(!actions
+        .iter()
+        .any(|action| action.contains("failure-count:")));
 }
 
 /// N-T46 (ADR-030): a split attempt whose workspace gate really ran and passed
