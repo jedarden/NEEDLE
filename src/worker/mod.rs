@@ -11397,6 +11397,26 @@ mod tests {
         assert!(unchanged.failures.is_empty());
 
         let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("README.md"), "test workspace\n").unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(workspace.path())
+                .args(["-c", "user.email=needle@example.test"])
+                .args(["-c", "user.name=needle-test"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "fixture"]);
         let mut bead = make_test_bead("learning-reload");
         bead.status = BeadStatus::Done;
         bead.workspace = workspace.path().to_path_buf();

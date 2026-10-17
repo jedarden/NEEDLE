@@ -7613,22 +7613,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unusable_extraction_releases_without_a_failure_count() {
+    async fn unrunnable_close_verifier_releases_without_a_failure_count() {
         let (_guard, _home) = isolated_home();
-        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-noextraction");
-        // A runnable workspace gate reaches close-evidence extraction, which
-        // must fail for this deliberately non-Git workspace.
-        let mut config = Config::default();
-        config.worker.enforce_shipped_work = false;
-        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-unrunnable");
+        // Gate selection requires committed Git state. Inject the execution
+        // error at the close verifier so this test reaches its release route.
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        runner.push_error("close verifier could not run");
+        let (handler, _extraction) = close_evidence_handler(&helper, runner);
         let store = test_store(BeadStatus::Done)
             .with_close_reason("done\n```verified:\ncargo test --lib exit=0\n```");
-        let workspace = tempfile::tempdir().unwrap();
-        std::fs::write(
-            workspace.path().join(".needle.yaml"),
-            "gates:\n  - type: command\n    commands: ['true']\n    run_in: workspace\n",
-        )
-        .unwrap();
+        let workspace = committed_git_workspace(&[("README.md", "committed fixture\n")]);
         let bead = bead_in_workspace(BeadStatus::InProgress, workspace.path());
 
         let result = handler
@@ -9270,8 +9265,7 @@ mod tests {
         config.worker.enforce_shipped_work = false;
         let handler = OutcomeHandler::new(config, helper.telemetry().clone());
 
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(workspace.path().join(".needle.yaml"), "gates: []\n").unwrap();
+        let workspace = committed_git_workspace(&[(".needle.yaml", "gates: []\n")]);
         let result = no_verifier_outcome_for(&handler, &workspace).await;
 
         assert_eq!(result.outcome, Outcome::Success);
@@ -9362,8 +9356,7 @@ mod tests {
         // A Python-marker workspace: `default_gates::detect` declines (no
         // builtin for Python without host config), so the fallback picks
         // `pytest -q` — which the fake runner fails.
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let workspace = committed_git_workspace(&[("pyproject.toml", "[project]\n")]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
@@ -9508,8 +9501,7 @@ mod tests {
         let extraction = tempfile::tempdir().unwrap();
         let handler = fallback_handler_with(&helper, runner, Some(extraction.path().to_path_buf()));
 
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(workspace.path().join("pytest.ini"), "[pytest]\n").unwrap();
+        let workspace = committed_git_workspace(&[("pytest.ini", "[pytest]\n")]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
@@ -9658,8 +9650,7 @@ mod tests {
         let extraction = tempfile::tempdir().unwrap();
         let handler = fallback_handler_with(&helper, runner, Some(extraction.path().to_path_buf()));
 
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let workspace = committed_git_workspace(&[("pyproject.toml", "[project]\n")]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
@@ -9771,13 +9762,10 @@ mod tests {
         let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
         let handler = fallback_handler_with(&helper, runner.clone(), None);
 
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(
-            workspace.path().join(".needle.yaml"),
-            "validation:\n  fallback_gate: false\n",
-        )
-        .unwrap();
-        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let workspace = committed_git_workspace(&[
+            (".needle.yaml", "validation:\n  fallback_gate: false\n"),
+            ("pyproject.toml", "[project]\n"),
+        ]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
@@ -9814,8 +9802,7 @@ mod tests {
         handler.fallback_verification =
             fallback_verification::FallbackVerificationRuntime::for_tests(runner.clone(), None);
 
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let workspace = committed_git_workspace(&[("pyproject.toml", "[project]\n")]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
@@ -9850,8 +9837,7 @@ mod tests {
             Some(extraction.path().to_path_buf()),
         );
 
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let workspace = committed_git_workspace(&[("pyproject.toml", "[project]\n")]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
@@ -9899,13 +9885,10 @@ mod tests {
                 Some(extraction.path().to_path_buf()),
             );
 
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::write(
-            workspace.path().join(".needle.yaml"),
-            "validation:\n  fallback_gate: true\n",
-        )
-        .unwrap();
-        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let workspace = committed_git_workspace(&[
+            (".needle.yaml", "validation:\n  fallback_gate: true\n"),
+            ("pyproject.toml", "[project]\n"),
+        ]);
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
@@ -10530,13 +10513,11 @@ mod tests {
         let handler = OutcomeHandler::new(config, helper.telemetry().clone());
         let store = MockBeadStore::new(BeadStatus::InProgress)
             .with_labels(vec!["failure-count:1".to_string()]);
-        let workspace = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir_all(workspace.path().join(".beads")).unwrap();
-        std::fs::write(
-            workspace.path().join(".needle.yaml"),
+        let workspace = committed_git_workspace(&[(
+            ".needle.yaml",
             "gates:\n  - type: command\n    commands: [\"exit 7\"]\n    run_in: workspace\n",
-        )
-        .unwrap();
+        )]);
+        std::fs::create_dir_all(workspace.path().join(".beads")).unwrap();
         let mut bead = test_bead(BeadStatus::InProgress);
         bead.bead.workspace = workspace.path().to_path_buf();
         let attempt_id = crate::attempt::new_id();
@@ -11206,18 +11187,17 @@ mod tests {
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
         // This fixture exercises the wrapper-path ledger guard, not the
-        // default verification gates. Keep the success paths synchronous so
-        // only the deliberately slow `show()` in cycle 4 can hit the 1s
-        // handler timeout.
+        // default verification gates. Give the first three cycles enough time
+        // to capture their committed gate subject on a loaded test host.
         config.validation.default_gates.enabled = false;
         config.validation.fallback_gate = false;
-        // Long enough that the first three cycles never race it, short enough
-        // that the fourth cycle's 2s `show()` triggers the handler timeout.
-        config.validation.outcome_timeout_seconds = 1;
         let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
-        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let mut handler = OutcomeHandler::new(config, helper.telemetry().clone());
         let bead = test_bead(BeadStatus::InProgress);
         let not_cancelled = Arc::new(AtomicBool::new(false));
+        // Git subject capture awaits child processes. Tokio's paused clock
+        // can jump to the handler timeout while those processes are running.
+        tokio::time::resume();
 
         // Cycle 1 resolves normally: a work failure releases the bead and
         // emits the row — and sets the guard this test exists to exonerate.
@@ -11281,8 +11261,10 @@ mod tests {
         assert_eq!(rows[2].data["terminal_reason"], "outcome_handler_error");
         assert_row_satisfies_v1_contract("errored after resolved", &rows[2]);
 
-        // Cycle 4 is torn down by the handler timeout. The aborted `handle`
-        // never emitted, so the timeout fallback must fire for it.
+        // Cycle 4 is torn down by the handler timeout. Pause the clock for
+        // the deliberate 2s `show()` and narrow the handler budget to 1s.
+        tokio::time::pause();
+        handler.config.validation.outcome_timeout_seconds = 1;
         handler.set_attempt_context(AttemptContext::default());
         let slow = SlowShowStore {
             inner: MockBeadStore::new(BeadStatus::Done),

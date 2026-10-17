@@ -1860,6 +1860,9 @@ mod tests {
         assert!(
             result
                 .content
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
                 .contains("go test, go vet, go build, cargo test"),
             "prompt must list the re-run allow-list"
         );

@@ -1043,6 +1043,13 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
 [[unit_exception]]
 path = "src/worker/mod.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-90d80094"
+reason = "The reload outcome test creates an isolated committed Git fixture so gate subject capture reaches the behavior it verifies."
+
+[[unit_exception]]
+path = "src/worker/mod.rs"
 kind = "global-env"
 max_occurrences = 15
 owner = "component:worker"
