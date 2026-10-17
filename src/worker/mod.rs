@@ -6611,8 +6611,8 @@ impl Worker {
 
             let is_verification_shaped = verification_pattern.is_match(&bead.title);
 
-            // Check if the bead actually references the parent (ID or title
-            // in the body, or a dependency edge).
+            // Check if the bead actually references the parent (ID in the
+            // body, or a dependency edge).
             let references_parent = self.bead_references_parent(bead, parent_bead).await;
 
             if is_verification_shaped && references_parent {
@@ -6688,8 +6688,8 @@ impl Worker {
     /// Check if a bead actually references the parent bead.
     ///
     /// Only two things count as a reference (needle-7158f1bc): the parent's
-    /// ID or title appearing in the bead's body, or an explicit dependency
-    /// edge between the bead and the parent. The generic substring fallback
+    /// ID appearing in the bead's body, or an explicit dependency edge
+    /// between the bead and the parent. The generic substring fallback
     /// this once had — any body mentioning "file", "test", or "verify" —
     /// matched nearly every engineering bead and folded unrelated
     /// verification-shaped beads toward whatever parent was being audited
@@ -6698,11 +6698,6 @@ impl Worker {
         if let Some(body) = &bead.body {
             // Direct ID reference in body.
             if body.contains(&parent.id.to_string()) {
-                return true;
-            }
-
-            // Parent title quoted in body.
-            if body.contains(&parent.title) {
                 return true;
             }
         }
@@ -12320,13 +12315,14 @@ mod tests {
         by_id.body = Some(format!("Verify {} shipped without regressions", parent.id));
         assert!(worker.bead_references_parent(&by_id, &parent).await);
 
-        // By quoted title in the body, with the ID appearing nowhere.
+        // A title alone is not a stable identifier: another bead could use
+        // the same phrase while referring to a different outcome.
         let mut by_title = verification_bead("ref-name-by-title");
         by_title.body = Some(format!(
             "Check that \"{}\" landed as described",
             parent.title
         ));
-        assert!(worker.bead_references_parent(&by_title, &parent).await);
+        assert!(!worker.bead_references_parent(&by_title, &parent).await);
     }
 
     #[tokio::test]
