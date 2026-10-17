@@ -6606,7 +6606,8 @@ impl Worker {
 
             let is_verification_shaped = verification_pattern.is_match(&bead.title);
 
-            // Check if bead references the parent (by ID, title, or files).
+            // Check if the bead actually references the parent (ID or title
+            // in the body, or a dependency edge).
             let references_parent = self.bead_references_parent(bead, parent_bead).await;
 
             if is_verification_shaped && references_parent {
@@ -6679,31 +6680,32 @@ impl Worker {
         Ok(())
     }
 
-    /// Check if a bead references the parent bead (by ID, title, or files).
+    /// Check if a bead actually references the parent bead.
+    ///
+    /// Only two things count as a reference (needle-7158f1bc): the parent's
+    /// ID or title appearing in the bead's body, or an explicit dependency
+    /// edge between the bead and the parent. The generic substring fallback
+    /// this once had — any body mentioning "file", "test", or "verify" —
+    /// matched nearly every engineering bead and folded unrelated
+    /// verification-shaped beads toward whatever parent was being audited
+    /// (needle-881ce3da).
     async fn bead_references_parent(&self, bead: &Bead, parent: &Bead) -> bool {
-        // Check direct ID reference in body.
         if let Some(body) = &bead.body {
+            // Direct ID reference in body.
             if body.contains(&parent.id.to_string()) {
                 return true;
             }
 
-            // Check title reference.
+            // Parent title quoted in body.
             if body.contains(&parent.title) {
-                return true;
-            }
-
-            // Check for common file reference patterns.
-            // Agents often mention "the file I just edited" or similar when their
-            // work relates to the parent. We check for file path mentions that would
-            // appear in the parent's workspace context.
-            if body.contains("file") || body.contains("test") || body.contains("verify") {
-                // If the bead mentions files/testing/verifying in the context of the
-                // parent's workspace, consider it a reference.
                 return true;
             }
         }
 
-        false
+        // An explicit dependency edge in either direction is a real
+        // reference even when the body never names the parent.
+        bead.dependencies.iter().any(|dep| dep.id == parent.id)
+            || bead.dependents.iter().any(|dep| dep.id == parent.id)
     }
 
     /// Fold a verification-shaped bead's content into its parent, then close it.
@@ -12253,6 +12255,144 @@ mod tests {
             store.close_calls(),
             vec![verify.id.clone()],
             "the close still happens"
+        );
+    }
+
+    // ── Post-dispatch audit: parent-reference requirement (needle-7158f1bc) ──
+    //
+    // The reference check once ended with a substring fallback — any body
+    // containing "file", "test", or "verify" counted as referencing the
+    // parent — which is true of nearly every engineering bead and folded
+    // unrelated verification-shaped beads toward whatever parent the audit
+    // was running for (the second half of the needle-881ce3da false close).
+
+    fn dep(id: &str) -> crate::types::BrDependency {
+        crate::types::BrDependency {
+            id: BeadId::from(id),
+            title: String::new(),
+            status: String::new(),
+            priority: 1,
+            dependency_type: "blocks".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn bead_mentioning_test_or_verify_without_a_parent_link_is_not_a_reference() {
+        let parent = make_test_bead("ref-none-parent");
+        let worker = make_worker(Arc::new(MockStore::empty()));
+
+        // Every trigger word from the deleted fallback, plus a dependency on
+        // some other bead — and neither the parent's ID nor its title anywhere.
+        let mut bead = verification_bead("ref-none-verify");
+        bead.body = Some("Test the module, verify the profile output file parses".to_string());
+        bead.dependencies = vec![dep("ref-none-unrelated")];
+
+        assert!(
+            !worker.bead_references_parent(&bead, &parent).await,
+            "a body full of test/verify/file words is not a parent reference"
+        );
+
+        // No body at all and no edge is equally not a reference.
+        bead.body = None;
+        bead.dependencies.clear();
+        assert!(!worker.bead_references_parent(&bead, &parent).await);
+    }
+
+    #[tokio::test]
+    async fn bead_naming_the_parent_still_counts_as_a_reference() {
+        let mut parent = make_test_bead("ref-name-parent");
+        parent.title = "Outcome taxonomy rework".to_string();
+        let worker = make_worker(Arc::new(MockStore::empty()));
+
+        // By ID in the body — the shape of a genuine agent-created
+        // verification bead for this parent.
+        let mut by_id = verification_bead("ref-name-by-id");
+        by_id.body = Some(format!("Verify {} shipped without regressions", parent.id));
+        assert!(worker.bead_references_parent(&by_id, &parent).await);
+
+        // By quoted title in the body, with the ID appearing nowhere.
+        let mut by_title = verification_bead("ref-name-by-title");
+        by_title.body = Some(format!(
+            "Check that \"{}\" landed as described",
+            parent.title
+        ));
+        assert!(worker.bead_references_parent(&by_title, &parent).await);
+    }
+
+    #[tokio::test]
+    async fn dependency_edge_to_the_parent_counts_as_a_reference() {
+        let parent = make_test_bead("ref-dep-parent");
+        let worker = make_worker(Arc::new(MockStore::empty()));
+
+        // Blocked by the parent — the edge `create --depends-on <parent>`
+        // leaves behind.
+        let mut blocked_by_parent = verification_bead("ref-dep-child");
+        blocked_by_parent.body = None;
+        blocked_by_parent.dependencies = vec![dep(parent.id.as_ref())];
+        assert!(
+            worker
+                .bead_references_parent(&blocked_by_parent, &parent)
+                .await
+        );
+
+        // The parent depends on this bead — the reverse edge is just as
+        // explicit a relationship.
+        let mut blocks_parent = verification_bead("ref-dep-blocker");
+        blocks_parent.body = None;
+        blocks_parent.dependents = vec![dep(parent.id.as_ref())];
+        assert!(worker.bead_references_parent(&blocks_parent, &parent).await);
+
+        // An edge to some other bead is not an edge to the parent.
+        let mut unrelated_edge = verification_bead("ref-dep-other");
+        unrelated_edge.body = None;
+        unrelated_edge.dependencies = vec![dep("ref-dep-stranger")];
+        assert!(
+            !worker
+                .bead_references_parent(&unrelated_edge, &parent)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_folds_only_beads_that_reference_the_parent() {
+        let parent = make_test_bead("audit-ref-parent");
+        let store = Arc::new(MockStore::new(vec![parent.clone()]));
+        let mut worker = make_worker(store.clone());
+        let actor = worker.qualified_id();
+        let dispatch_start = chrono::Utc::now();
+        worker.dispatch_started_at = Some(dispatch_start);
+
+        // Two own-window verification-shaped beads. One names the parent and
+        // folds; the other merely talks about testing and must survive even
+        // though its body carries every trigger word the deleted fallback
+        // matched on.
+        let mut related = verification_bead("audit-ref-related");
+        related.body = Some(format!("Verify {} shipped clean", parent.id));
+        let mut unrelated = verification_bead("audit-ref-unrelated");
+        unrelated.title = "Test the new module".to_string();
+        unrelated.body = Some(
+            "Test coverage for the new module: verify the profile output file renders".to_string(),
+        );
+        push_window_bead(&store, &related, Some(&actor), dispatch_start);
+        push_window_bead(&store, &unrelated, Some(&actor), dispatch_start);
+
+        worker
+            .run_post_dispatch_audit(&parent)
+            .await
+            .expect("the audit should not fail");
+
+        assert_eq!(store.close_calls(), vec![related.id.clone()]);
+        let parent_body = store.show(&parent.id).await.unwrap().body.unwrap();
+        assert!(
+            parent_body.contains("## folded: Verify the endpoint works (audit-ref-related)"),
+            "the related bead folds into the parent: {parent_body}"
+        );
+
+        let survivor = store.show(&unrelated.id).await.unwrap();
+        assert_eq!(survivor.status, BeadStatus::Open);
+        assert!(
+            !parent_body.contains("audit-ref-unrelated"),
+            "the unrelated bead must not be folded into the parent"
         );
     }
 
