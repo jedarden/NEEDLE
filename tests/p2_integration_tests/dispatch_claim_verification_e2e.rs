@@ -23,6 +23,8 @@ const ADAPTER_NAME: &str = "claim-verification-probe";
 const WORKER_NAME: &str = "claim-verification-worker";
 const MARKER: &str = "needle-agent-spawned.log";
 const QUERY_LOG: &str = ".needle-claim-query.log";
+#[cfg(feature = "otlp")]
+const OTLP_HEADER_ENV: &str = "NEEDLE_TEST_OTLP_HEADER_PROBE_0FFB7802";
 const FIXTURE_CLOSE_REASON: &str = r#"$'fixture agent completed\n\n```verified:\n```'"#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +148,57 @@ impl Fixture {
         self.command(mode)
             .output()
             .expect("spawn isolated needle subprocess")
+    }
+
+    #[cfg(feature = "otlp")]
+    fn configure_otlp(&self, required: bool) {
+        let path = self.root.path().join(".config/needle/config.yaml");
+        let config = fs::read_to_string(&path).expect("read isolated worker config");
+        let disabled = "  otlp_sink:\n    enabled: false\n";
+        assert!(
+            config.contains(disabled),
+            "fixture must start with OTLP disabled"
+        );
+        let required_field = if required { "    required: true\n" } else { "" };
+        let enabled = format!(
+            "  otlp_sink:\n    enabled: true\n{required_field}    protocol: http\n    endpoint: http://127.0.0.1:9\n    headers:\n      - 'Authorization: env:{OTLP_HEADER_ENV}'\n"
+        );
+        fs::write(path, config.replace(disabled, &enabled))
+            .expect("enable OTLP in isolated worker config");
+    }
+
+    #[cfg(feature = "otlp")]
+    fn worker_log(&self) -> String {
+        let mut log = String::new();
+        for entry in fs::read_dir(self.root.path().join("logs")).expect("read worker logs") {
+            let path = entry.expect("read worker log entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) == Some("log") {
+                log.push_str(&fs::read_to_string(path).expect("read worker log"));
+            }
+        }
+        log
+    }
+
+    #[cfg(feature = "otlp")]
+    fn assert_booted_and_claimed(&self) {
+        let events = self.telemetry();
+        assert_eq!(
+            events.first().map(|event| &event["event_type"]),
+            Some(&Value::String("worker.booting".to_string())),
+            "worker.booting must be the first on-disk JSONL event: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| {
+                event["event_type"] == "bead.claim.succeeded"
+                    && event["data"]["bead_id"].as_str() == Some(self.home_bead_id.as_str())
+            }),
+            "worker must claim the sandboxed bead: {events:?}"
+        );
+        assert_eq!(
+            self.bead_record(&self.home_workspace, &self.home_bead_id)["status"],
+            "closed",
+            "fixture agent must complete the bead in the sandboxed store"
+        );
     }
 
     /// Build (and prepare the fixture for) one worker invocation. The
@@ -1302,4 +1355,126 @@ fn subprocess_concurrent_workers_dispatch_once_with_distinct_claim_identities() 
     // The winner's external deliverable closed the bead under its identity.
     let record = fixture.bead_record(&fixture.home_workspace, &fixture.home_bead_id);
     assert_eq!(record["status"], "closed");
+}
+
+#[cfg(feature = "otlp")]
+struct OtlpProbeChild(Option<std::process::Child>);
+
+#[cfg(feature = "otlp")]
+impl Drop for OtlpProbeChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(feature = "otlp")]
+fn run_otlp_probe(fixture: &Fixture, command: &mut Command) -> Output {
+    use std::time::{Duration, Instant};
+
+    let stdout_path = fixture.root.path().join("otlp-probe.stdout");
+    let stderr_path = fixture.root.path().join("otlp-probe.stderr");
+    command
+        .stdout(fs::File::create(&stdout_path).expect("create isolated stdout capture"))
+        .stderr(fs::File::create(&stderr_path).expect("create isolated stderr capture"));
+    let mut child = OtlpProbeChild(Some(command.spawn().expect("spawn isolated OTLP worker")));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child
+            .0
+            .as_mut()
+            .expect("child guard owns worker")
+            .try_wait()
+            .expect("poll isolated OTLP worker")
+        {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "isolated OTLP worker timed out");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    child
+        .0
+        .take()
+        .expect("reap exited OTLP worker")
+        .wait()
+        .expect("reap isolated OTLP worker");
+    Output {
+        status,
+        stdout: fs::read(stdout_path).expect("read isolated stdout capture"),
+        stderr: fs::read(stderr_path).expect("read isolated stderr capture"),
+    }
+}
+
+#[cfg(feature = "otlp")]
+#[test]
+fn otlp_header_degrade_contract_survives_worker_boot_and_claim() {
+    let optional = Fixture::new(FixtureLayout::Local);
+    optional.configure_otlp(false);
+    let output = run_otlp_probe(
+        &optional,
+        optional
+            .command(FixtureMode::Success)
+            .env_remove(OTLP_HEADER_ENV),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "optional OTLP worker failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("WARN OTLP export disabled") && stderr.contains(OTLP_HEADER_ENV),
+        "stderr must warn and name the missing header variable: {stderr}"
+    );
+    optional.assert_booted_and_claimed();
+
+    let required = Fixture::new(FixtureLayout::Local);
+    required.configure_otlp(true);
+    let output = run_otlp_probe(
+        &required,
+        required
+            .command(FixtureMode::Success)
+            .env_remove(OTLP_HEADER_ENV),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "required OTLP unexpectedly booted: {stderr}"
+    );
+    assert!(
+        stderr.contains("references unset environment variable")
+            && stderr.contains(OTLP_HEADER_ENV),
+        "stderr must report the fatal missing-header error: {stderr}"
+    );
+    assert!(
+        !required.has_event("worker.booting"),
+        "required OTLP must fail before the boot event"
+    );
+    required.assert_open_and_unassigned(&required.home_workspace, &required.home_bead_id);
+
+    let present = Fixture::new(FixtureLayout::Local);
+    present.configure_otlp(false);
+    let output = run_otlp_probe(
+        &present,
+        present
+            .command(FixtureMode::Success)
+            .env(OTLP_HEADER_ENV, "fixture-probe"),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "OTLP worker failed: {stderr}");
+    assert!(
+        !stderr.contains("OTLP export disabled"),
+        "present header must not degrade OTLP: {stderr}"
+    );
+    present.assert_booted_and_claimed();
+    let worker_log = present.worker_log();
+    assert!(
+        worker_log.contains("OTLP sink initialized"),
+        "normal exporter must initialize: {worker_log}"
+    );
+    assert!(
+        !worker_log.contains("failed to create OTLP sink"),
+        "normal exporter must not fail construction: {worker_log}"
+    );
 }

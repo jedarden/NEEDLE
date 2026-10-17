@@ -489,7 +489,9 @@ max_tests = 4285
 # (needle-165ab6f6), exercised through the public outcome boundary.
 # +1 committed gate-selection snapshot despite uncommitted shared-tree edits
 # (needle-165ab6f6).
-push = 686
+# +1 OTLP header degrade subprocess contract (needle-0ffb7802): optional
+# boot and claim, required fatal startup, and present-header exporter path.
+push = 687
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -714,7 +716,8 @@ tier = "push"
 # ahead of the language default (needle-165ab6f6).
 # +1 shared-checkout edits cannot alter the committed verifier choice
 # (needle-165ab6f6).
-max_tests = 138
+# +1 OTLP header degrade subprocess contract (needle-0ffb7802).
+max_tests = 139
 owner = "component:pluck-mend-explore"
 
 [[harness]]
