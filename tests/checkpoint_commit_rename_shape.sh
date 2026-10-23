@@ -298,6 +298,37 @@ test_debounce_is_per_repo() {
     echo "PASS: the debounce marker is scoped per repository, not shared"
 }
 
+test_index_only_superseded_object_is_pruned() {
+    local repo
+    repo=$(new_repo index-only)
+    local ghost="$repo/.beads/checkpoint/objects/\
+deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef.jsonl"
+
+    write_checkpoint "$repo" current-g.jsonl previous-g.jsonl one
+    run_checkpoint_commit "$repo" "checkpoint one" >/dev/null
+
+    # bead-rs auto-stages its published fileset (ADR-018), so an object can
+    # sit in the index without ever having been committed. Auto-stage such an
+    # object, then flush again so it is superseded while still index-only —
+    # the shape real fleet workspaces accumulated before publication ran.
+    printf '{"generation":"ghost"}\n' > "$ghost"
+    git -C "$repo" add "$ghost"
+    rm "$ghost"
+    [ -z "$(git -C "$repo" diff --cached --diff-filter=D --name-only -- "$ghost")" ] \
+        || fail "fixture precondition: a never-committed object cannot show a staged deletion"
+
+    write_checkpoint "$repo" current-h.jsonl previous-h.jsonl two
+    run_checkpoint_commit "$repo" "checkpoint two" >/dev/null
+
+    ! git -C "$repo" ls-files --error-unmatch "$ghost" >/dev/null 2>&1 \
+        || fail "index-only superseded object is still in the index"
+    if git -C "$repo" show --format= --name-only HEAD -- "$ghost" | grep -Fq "$ghost"; then
+        fail "index-only superseded object appeared in the publication commit"
+    fi
+
+    echo "PASS: an index-only superseded object is pruned without a staged deletion"
+}
+
 test_first_checkpoint_and_successive_flushes
 test_low_similarity_valid_roots_publish
 test_standalone_commit_is_debounced
@@ -306,4 +337,5 @@ test_missing_root_fails_before_pruning_or_staging
 test_force_overrides_debounce
 test_foreign_staged_work_is_preserved
 test_debounce_is_per_repo
+test_index_only_superseded_object_is_pruned
 echo "All checkpoint rename-shape tests passed"

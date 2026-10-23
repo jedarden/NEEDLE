@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Publish and push every bead-rs workspace's durable checkpoint, fleet-wide.
+
+Enumerates bead-rs workspaces under a root (default $HOME, three levels deep,
+scratch excluded), publishes each aligned checkpoint through the
+publication-only wrapper, and pushes a branch only when every unpushed commit
+is checkpoint-only. A workspace whose checkpoint is not aligned, whose branch
+is detached or diverged, or whose unpushed commits carry non-checkpoint work
+is skipped and recorded as an alert — never forced.
+
+needle-4c858e12: extends the needle-32175577 publisher from a hardcoded repo
+list to every bead-rs workspace, and closes the push gap that left the
+git-committed handoff channel weeks stale.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+# Directories never enumerated: scratch holds disposable checkouts whose
+# creator owns their state; the rest cannot contain a live bead workspace.
+PRUNE_DIRS = {".git", "node_modules", "target", ".cache"}
+MAX_DEPTH = 3
+HISTORY_LINES = 500
+
+WRAPPER = Path.home() / ".local/bin/needle-checkpoint-unwedge"
+
+# Outcomes that describe a healthy or merely informational state. Everything
+# else in the results map is an alert.
+BENIGN_OUTCOMES = {
+    "in-sync", "pushed", "no-upstream", "detached", "push-dry-run",
+    "upstream-not-origin",
+}
+
+
+def run(args, cwd, timeout):
+    return subprocess.run(
+        args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def enumerate_workspaces(root):
+    """Return bead-rs workspace roots at most MAX_DEPTH below root."""
+    root = Path(root).resolve()
+    found = []
+    stack = [(root, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir() or entry.is_symlink():
+                continue
+            if depth == 0 and entry.name == "scratch":
+                continue
+            if entry.name in PRUNE_DIRS:
+                continue
+            if (entry / ".beads/config.json").is_file():
+                found.append(entry)
+            elif depth + 1 < MAX_DEPTH:
+                stack.append((entry, depth + 1))
+    return sorted(found)
+
+
+def git(repo, *args, timeout=60):
+    return run(["git", *args], cwd=repo, timeout=timeout)
+
+
+def classify_branch(repo):
+    """Decide whether the branch may be pushed, and why not when it may not.
+
+    Returns (outcome, branch_name, detail). outcome is one of: detached,
+    no-upstream, upstream-not-origin, in-sync, diverged,
+    unpushed-non-checkpoint, push.
+    """
+    branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    name = branch.stdout.strip() if branch.returncode == 0 else ""
+    if branch.returncode:
+        return "detached", name, "not a git worktree: %s" % branch.stderr.strip()[:150]
+    if name == "HEAD":
+        return "detached", name, "detached HEAD"
+    upstream = git(
+        repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}",
+    )
+    if upstream.returncode:
+        return "no-upstream", name, upstream.stderr.strip()[:150]
+    configured = git(repo, "config", "branch.%s.remote" % name)
+    if configured.returncode or configured.stdout.strip() != "origin":
+        return "upstream-not-origin", name, "branch remote: %s" % configured.stdout.strip()[:100]
+    unpushed = git(repo, "rev-list", "@{u}..HEAD")
+    if unpushed.returncode:
+        return "diverged", name, unpushed.stderr.strip()[:150]
+    shas = unpushed.stdout.split()
+    if not shas:
+        return "in-sync", name, ""
+    behind = git(repo, "rev-list", "HEAD..@{u}")
+    if behind.stdout.strip():
+        return "diverged", name, "origin ahead: %d commits" % len(behind.stdout.split())
+    # Only checkpoint-publication content is ours to push. A commit that
+    # touches anything outside .beads/checkpoint/ belongs to another stream.
+    named = git(repo, "log", "--name-only", "--format=@%H", "@{u}..HEAD")
+    foreign = []
+    current = None
+    for line in named.stdout.splitlines():
+        if line.startswith("@"):
+            current = line[1:]
+        elif line.strip() and not line.strip().startswith(".beads/checkpoint/"):
+            foreign.append("%s %s" % (current[:12] if current else "?", line.strip()))
+    if foreign:
+        return "unpushed-non-checkpoint", name, "; ".join(foreign[:5])
+    return "push", name, " ".join(shas)
+
+
+def sweep_workspace(workspace, dry_run):
+    """Publish and maybe push one workspace. Returns (outcome, detail, branch)."""
+    outcome, branch, detail = classify_branch(workspace)
+    if outcome in ("detached", "diverged", "unpushed-non-checkpoint"):
+        # Never publish onto a detached HEAD, and never publish while the
+        # branch state itself is unresolved: publication would only deepen
+        # the divergence.
+        return outcome, detail, branch
+
+    checks = run(
+        ["bead", "sync", "status", "--format", "json"],
+        cwd=workspace, timeout=30,
+    )
+    if checks.returncode:
+        return "status-failed", checks.stderr.strip()[:200], branch
+    try:
+        status = json.loads(checks.stdout)
+    except ValueError:
+        return "status-invalid", "non-JSON sync status", branch
+    relationship = status.get("relationship")
+    if relationship != "aligned":
+        return "skip-%s" % relationship, "sync status relationship=%s" % relationship, branch
+    if status.get("checkpoint_consistent") is False:
+        return "skip-inconsistent", "checkpoint_consistent=false", branch
+
+    if not dry_run:
+        published = run(
+            [str(WRAPPER), "--workspace", str(workspace)],
+            cwd=workspace, timeout=300,
+        )
+        if published.returncode:
+            return (
+                "publish-failed",
+                "rc=%d %s" % (published.returncode, published.stderr.strip()[:160]),
+                branch,
+            )
+
+    outcome, branch, detail = classify_branch(workspace)
+    if outcome != "push":
+        return outcome, detail, branch
+    if dry_run:
+        return "push-dry-run", detail, branch
+    pushed = git(workspace, "push", "--quiet", timeout=120)
+    if pushed.returncode:
+        return "push-failed", pushed.stderr.strip()[:200], branch
+    return "pushed", detail, branch
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", default=os.environ.get("HOME"),
+                        help="directory swept for bead-rs workspaces (default $HOME)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="classify without publishing or pushing")
+    parser.add_argument("--workspace", action="append", default=[],
+                        help="sweep only this workspace (repeatable)")
+    args = parser.parse_args()
+
+    if args.workspace:
+        workspaces = [Path(w).resolve() for w in args.workspace]
+    elif Path(args.root).exists():
+        workspaces = enumerate_workspaces(args.root)
+    else:
+        print("sweep root does not exist: %s" % args.root, file=sys.stderr)
+        return 2
+
+    results = {}
+    alerts = []
+    pushed = []
+    for workspace in workspaces:
+        try:
+            outcome, detail, branch = sweep_workspace(workspace, args.dry_run)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            outcome, detail, branch = "error", type(error).__name__, ""
+        results[outcome] = results.get(outcome, 0) + 1
+        if outcome == "pushed":
+            pushed.append({
+                "workspace": str(workspace),
+                "branch": branch,
+                "shas": detail.split(),
+            })
+        elif outcome not in BENIGN_OUTCOMES:
+            alerts.append({
+                "workspace": str(workspace),
+                "outcome": outcome,
+                "detail": detail,
+            })
+        if args.workspace:
+            print("%s: %s %s" % (workspace, outcome, detail))
+
+    summary = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "host": os.uname().nodename,
+        "root": str(Path(args.root).resolve()),
+        "dry_run": args.dry_run,
+        "workspaces": len(workspaces),
+        "counts": results,
+        "alerts": alerts,
+        "pushed": pushed,
+    }
+    if not args.workspace:
+        print(json.dumps(summary, sort_keys=True))
+        state = Path(os.environ.get("NEEDLE_HOME", Path.home() / ".needle"))
+        history = state / "checkpoint-sweep"
+        history.mkdir(parents=True, exist_ok=True)
+        history_file = history / "history.jsonl"
+        try:
+            lines = history_file.read_text().splitlines()[-HISTORY_LINES + 1:]
+        except OSError:
+            lines = []
+        lines.append(json.dumps(summary, sort_keys=True))
+        history_file.write_text("\n".join(lines) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

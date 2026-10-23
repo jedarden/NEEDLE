@@ -1,0 +1,12 @@
+[Unit]
+Description=Publish and push durable bead-rs checkpoints for every workspace under $HOME
+# Publication-only: the wrapper refuses anything not aligned, and the sweep
+# pushes only checkpoint-only commits (needle-4c858e12). It never releases
+# claims, restarts workers, or repairs checkpoints.
+
+[Service]
+Environment=PATH=/run/current-system/sw/bin:%h/.local/bin:%h/.cargo/bin:%h/.needle/bin
+Type=oneshot
+ExecStart=%h/.local/bin/needle-checkpoint-sweep
+Nice=10
+TimeoutStartSec=1800

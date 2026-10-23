@@ -160,8 +160,13 @@ for object in "${TRACKED_OBJECTS_BEFORE[@]}"; do
     if [[ "$object" == "$CURRENT_ROOT_REPO" || "$object" == "$PREVIOUS_ROOT_REPO" ]]; then
         continue
     fi
-    if ! git -C "$REPO_ROOT" diff --cached --no-renames --diff-filter=D --name-only -- "$object" | grep -Fqx "$object"; then
-        echo "Error: Superseded checkpoint object removal was not staged: $object" >&2
+    # Success is the object leaving the index. A committed object surfaces as
+    # a staged deletion in diff --cached, but an index-only object (bead-rs
+    # auto-stages its published fileset, ADR-018) that is superseded before
+    # its first commit simply disappears — diff --cached has no D record for
+    # a path HEAD never held. (needle-4c858e12)
+    if git -C "$REPO_ROOT" ls-files --error-unmatch -- "$object" >/dev/null 2>&1; then
+        echo "Error: Superseded checkpoint object still in the index: $object" >&2
         exit 1
     fi
 done
@@ -180,8 +185,21 @@ for path in "${COMMIT_PATHS[@]}"; do
     esac
 done
 
+# A superseded object can vanish from both HEAD and the index entirely:
+# auto-staged (ADR-018), superseded before its first commit, and pruned by
+# the stage above. commit --only rejects a pathspec that resolves to
+# nothing, so keep only paths Git can still name. A path in neither place
+# needs no commit entry — the pruned index already excludes it.
+COMMITABLE_PATHS=()
+for path in "${COMMIT_PATHS[@]}"; do
+    if git -C "$REPO_ROOT" cat-file -e "HEAD:$path" 2>/dev/null \
+        || git -C "$REPO_ROOT" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+        COMMITABLE_PATHS+=("$path")
+    fi
+done
+
 git -C "$REPO_ROOT" -c user.email=github@jedarden.com -c user.name=jedarden \
-    commit --only -m "$COMMIT_MSG" -- "${COMMIT_PATHS[@]}"
+    commit --only -m "$COMMIT_MSG" -- "${COMMITABLE_PATHS[@]}"
 
 mkdir -p "$DEBOUNCE_STATE_DIR" 2>/dev/null || true
 date +%s > "$DEBOUNCE_MARKER" 2>/dev/null || true
