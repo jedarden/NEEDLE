@@ -83,4 +83,8 @@ for unit in wrapper-drift.service wrapper-drift.timer; do
     [[ -f "$SRC_DIR/$unit" ]] || { echo "missing drift unit: $unit" >&2; exit 1; }
 done
 
+# The fleet checkpoint sweep (needle-4c858e12) self-tests its census oracle
+# against git fixtures.
+"$SRC_DIR/bin/needle-checkpoint-sweep" --self-test
+
 echo "lab fleet policy tests passed"

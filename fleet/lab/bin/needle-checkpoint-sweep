@@ -11,6 +11,11 @@ is skipped and recorded as an alert — never forced.
 needle-4c858e12: extends the needle-32175577 publisher from a hardcoded repo
 list to every bead-rs workspace, and closes the push gap that left the
 git-committed handoff channel weeks stale.
+
+The read-only --census mode reports the bead's committed-lag oracle (mtime of
+.beads/checkpoint/current.json minus the last commit touching it, against the
+unpushed checkpoint commits) for the 48-hour acceptance sweep, publishing and
+pushing nothing.
 """
 import argparse
 import json
@@ -34,6 +39,11 @@ BENIGN_OUTCOMES = {
     "in-sync", "pushed", "no-upstream", "detached", "push-dry-run",
     "upstream-not-origin",
 }
+
+# The one census outcome a healthy publisher produces: classify_workspace
+# normalizes every publishable state to "aligned", so any other census
+# outcome is a structural skip the sweep correctly refuses to force.
+CENSUS_HEALTHY = {"aligned"}
 
 
 def run(args, cwd, timeout):
@@ -127,30 +137,46 @@ def classify_branch(repo):
     return "push", name, " ".join(shas)
 
 
-def sweep_workspace(workspace, dry_run):
-    """Publish and maybe push one workspace. Returns (outcome, detail, branch)."""
+def classify_workspace(workspace, probe=True):
+    """Classify a workspace without publishing or pushing it.
+
+    With probe (the default) the workspace's bead sync status decides the
+    skip classes; with probe=False the git-level classification alone
+    decides, which is what the census self-test exercises without a live
+    bead workspace.
+    """
     outcome, branch, detail = classify_branch(workspace)
     if outcome in ("detached", "diverged", "unpushed-non-checkpoint"):
         # Never publish onto a detached HEAD, and never publish while the
         # branch state itself is unresolved: publication would only deepen
         # the divergence.
-        return outcome, detail, branch
+        return outcome, branch, detail
+    if not probe:
+        return "aligned", branch, detail
 
     checks = run(
         ["bead", "sync", "status", "--format", "json"],
         cwd=workspace, timeout=30,
     )
     if checks.returncode:
-        return "status-failed", checks.stderr.strip()[:200], branch
+        return "status-failed", branch, checks.stderr.strip()[:200]
     try:
         status = json.loads(checks.stdout)
     except ValueError:
-        return "status-invalid", "non-JSON sync status", branch
+        return "status-invalid", branch, "non-JSON sync status"
     relationship = status.get("relationship")
     if relationship != "aligned":
-        return "skip-%s" % relationship, "sync status relationship=%s" % relationship, branch
+        return "skip-%s" % relationship, branch, "sync status relationship=%s" % relationship
     if status.get("checkpoint_consistent") is False:
-        return "skip-inconsistent", "checkpoint_consistent=false", branch
+        return "skip-inconsistent", branch, "checkpoint_consistent=false"
+    return "aligned", branch, detail
+
+
+def sweep_workspace(workspace, dry_run):
+    """Publish and maybe push one workspace. Returns (outcome, detail, branch)."""
+    outcome, branch, detail = classify_workspace(workspace)
+    if outcome != "aligned":
+        return outcome, detail, branch
 
     if not dry_run:
         published = run(
@@ -175,6 +201,140 @@ def sweep_workspace(workspace, dry_run):
     return "pushed", detail, branch
 
 
+def census_workspace(workspace, threshold, probe=True):
+    """Read-only acceptance census for one workspace (needle-4c858e12).
+
+    lag is the bead's committed-lag oracle: mtime of the live
+    .beads/checkpoint/current.json minus the commit time of the last commit
+    touching it. unpushed_checkpoint counts checkpoint commits origin has
+    not received. A workspace violates acceptance when lag exceeds the
+    threshold with unpushed checkpoint commits and its state is one a
+    healthy publisher would have converged; structural skips the sweep
+    correctly refuses to force are recorded, never flagged.
+    """
+    outcome, branch, detail = classify_workspace(workspace, probe=probe)
+    structural = outcome not in CENSUS_HEALTHY
+    current = workspace / ".beads" / "checkpoint" / "current.json"
+    try:
+        live_mtime = current.stat().st_mtime
+    except OSError:
+        live_mtime = None
+    committed = git(
+        workspace, "log", "-1", "--format=%ct", "--",
+        ".beads/checkpoint/current.json",
+    )
+    commit_ts = committed.stdout.strip() if committed.returncode == 0 else ""
+    if live_mtime is None or not commit_ts:
+        lag = None
+    else:
+        lag = int(live_mtime - float(commit_ts))
+    unpushed = git(
+        workspace, "rev-list", "@{u}..HEAD", "--", ".beads/checkpoint/",
+    )
+    if unpushed.returncode:
+        unpushed_count = None
+    else:
+        unpushed_count = len(unpushed.stdout.split())
+    violation = (
+        not structural
+        and lag is not None and lag > threshold
+        and (unpushed_count or 0) > 0
+    )
+    return {
+        "workspace": str(workspace),
+        "branch": branch,
+        "outcome": outcome,
+        "detail": detail,
+        "lag": lag,
+        "unpushed_checkpoint": unpushed_count,
+        "structural": structural,
+        "violation": violation,
+    }
+
+
+def record_history(summary):
+    """Append one summary line to the per-host history file."""
+    state = Path(os.environ.get("NEEDLE_HOME", Path.home() / ".needle"))
+    history = state / "checkpoint-sweep"
+    history.mkdir(parents=True, exist_ok=True)
+    history_file = history / "history.jsonl"
+    try:
+        lines = history_file.read_text().splitlines()[-HISTORY_LINES + 1:]
+    except OSError:
+        lines = []
+    lines.append(json.dumps(summary, sort_keys=True))
+    history_file.write_text("\n".join(lines) + "\n")
+
+
+def self_test():
+    """Fixture round-trips for the census oracle and the enumerator."""
+    import shutil
+    import tempfile
+    base = Path(tempfile.mkdtemp(prefix="needle-sweep-selftest-"))
+    env = dict(
+        os.environ,
+        GIT_AUTHOR_NAME="sweep-selftest", GIT_AUTHOR_EMAIL="sweep-selftest@example.com",
+        GIT_COMMITTER_NAME="sweep-selftest", GIT_COMMITTER_EMAIL="sweep-selftest@example.com",
+    )
+
+    def gitc(repo, *args):
+        result = subprocess.run(
+            ["git", *args], cwd=repo, env=env, capture_output=True, text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, "git %s failed: %s" % (args, result.stderr)
+        return result
+
+    try:
+        origin = base / "origin.git"
+        gitc(base, "init", "--bare", "--initial-branch=main", str(origin))
+        work = base / "work"
+        work.mkdir()
+        gitc(work, "init", "--initial-branch=main")
+        (work / ".beads" / "checkpoint").mkdir(parents=True)
+        (work / ".beads" / "config.json").write_text("{}\n")
+        checkpoint = work / ".beads" / "checkpoint" / "current.json"
+        checkpoint.write_text("{}\n")
+        gitc(work, "add", ".beads")
+        gitc(work, "commit", "-m", "checkpoint")
+        # A named remote, not a bare path: @{u} only resolves against a
+        # remote-tracking ref, which a path push never creates.
+        gitc(work, "remote", "add", "origin", str(origin))
+        gitc(work, "push", "--quiet", "--set-upstream", "origin", "main")
+
+        # The enumerator finds the fixture, and a fresh fixture is healthy:
+        # everything committed and pushed, no lag, no violation.
+        assert enumerate_workspaces(base) == [work], enumerate_workspaces(base)
+        row = census_workspace(work, 1800, probe=False)
+        assert row["outcome"] == "aligned" and row["lag"] is not None, row
+        assert row["unpushed_checkpoint"] == 0 and not row["violation"], row
+
+        # A stale, unpushed checkpoint violates acceptance: live mtime ahead
+        # of the committed checkpoint, a checkpoint commit origin lacks, and
+        # no structural skip in the way.
+        checkpoint.write_text('{"v": 2}\n')
+        gitc(work, "add", ".beads")
+        gitc(work, "commit", "-m", "checkpoint v2")
+        future = time.time() + 4000
+        os.utime(checkpoint, (future, future))
+        row = census_workspace(work, 1800, probe=False)
+        assert row["outcome"] == "aligned", row
+        assert row["lag"] > 1800 and row["unpushed_checkpoint"] == 1, row
+        assert row["violation"], row
+
+        # The same staleness under a foreign unpushed commit is structural:
+        # the sweep correctly refuses to force another stream's branch.
+        (work / "foreign.txt").write_text("not ours\n")
+        gitc(work, "add", "foreign.txt")
+        gitc(work, "commit", "-m", "foreign work")
+        row = census_workspace(work, 1800, probe=False)
+        assert row["outcome"] == "unpushed-non-checkpoint", row
+        assert row["structural"] and not row["violation"], row
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    print("needle-checkpoint-sweep self-test passed")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=os.environ.get("HOME"),
@@ -183,7 +343,22 @@ def main():
                         help="classify without publishing or pushing")
     parser.add_argument("--workspace", action="append", default=[],
                         help="sweep only this workspace (repeatable)")
+    parser.add_argument("--census", action="store_true",
+                        help="read-only acceptance census: report committed lag "
+                             "and unpushed checkpoint commits per workspace; "
+                             "never publishes or pushes; exits 1 on violations")
+    parser.add_argument("--lag-threshold", type=int, default=1800,
+                        help="census: seconds of committed lag beyond which a "
+                             "workspace with unpushed checkpoint commits "
+                             "violates acceptance (default 1800 = 2x cadence)")
+    parser.add_argument("--self-test", action="store_true",
+                        help="run fixture round-trips for the census oracle "
+                             "and the enumerator, then exit")
     args = parser.parse_args()
+
+    if args.self_test:
+        self_test()
+        return 0
 
     if args.workspace:
         workspaces = [Path(w).resolve() for w in args.workspace]
@@ -192,6 +367,49 @@ def main():
     else:
         print("sweep root does not exist: %s" % args.root, file=sys.stderr)
         return 2
+
+    if args.census:
+        rows = []
+        for workspace in workspaces:
+            try:
+                rows.append(census_workspace(workspace, args.lag_threshold))
+            except (OSError, subprocess.TimeoutExpired) as error:
+                rows.append({
+                    "workspace": str(workspace), "branch": "",
+                    "outcome": "error", "detail": type(error).__name__,
+                    "lag": None, "unpushed_checkpoint": None,
+                    "structural": True, "violation": False,
+                })
+        violations = [row for row in rows if row["violation"]]
+        lagging = [
+            row for row in rows
+            if row["lag"] is not None and row["lag"] > args.lag_threshold
+        ]
+        counts = {}
+        for row in rows:
+            counts[row["outcome"]] = counts.get(row["outcome"], 0) + 1
+        summary = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "host": os.uname().nodename,
+            "root": str(Path(args.root).resolve()),
+            "census": True,
+            "lag_threshold": args.lag_threshold,
+            "workspaces": len(rows),
+            "outcome_counts": counts,
+            "lagging": len(lagging),
+            "lagging_structural": len([r for r in lagging if r["structural"]]),
+            "no_committed_checkpoint": len([r for r in rows if r["lag"] is None]),
+            "violations": violations,
+        }
+        if args.workspace:
+            for row in rows:
+                print("%s: %s lag=%s unpushed=%s %s" % (
+                    row["workspace"], row["outcome"], row["lag"],
+                    row["unpushed_checkpoint"], row["detail"]))
+        else:
+            print(json.dumps(summary, sort_keys=True))
+            record_history(summary)
+        return 1 if violations else 0
 
     results = {}
     alerts = []
@@ -229,16 +447,7 @@ def main():
     }
     if not args.workspace:
         print(json.dumps(summary, sort_keys=True))
-        state = Path(os.environ.get("NEEDLE_HOME", Path.home() / ".needle"))
-        history = state / "checkpoint-sweep"
-        history.mkdir(parents=True, exist_ok=True)
-        history_file = history / "history.jsonl"
-        try:
-            lines = history_file.read_text().splitlines()[-HISTORY_LINES + 1:]
-        except OSError:
-            lines = []
-        lines.append(json.dumps(summary, sort_keys=True))
-        history_file.write_text("\n".join(lines) + "\n")
+        record_history(summary)
     return 0
 
 

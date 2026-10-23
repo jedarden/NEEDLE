@@ -136,6 +136,9 @@ grep -q 'checkpoint-publication-$kind.conf' "$SRC_DIR/apply-ex44-fleet.sh"
 # on this host, unlike the legacy per-repo publication units above.
 grep -q 'needle-checkpoint-sweep" "$NEEDLE_HOST_HOME/.local/bin/needle-checkpoint-sweep"' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q 'enable --now needle-checkpoint-sweep.timer' "$SRC_DIR/apply-ex44-fleet.sh"
+# The sweep's census oracle self-tests against git fixtures (needle-4c858e12
+# acceptance sweep), with no live bead workspace or deployment required.
+"$SRC_DIR/../lab/bin/needle-checkpoint-sweep" --self-test
 
 # The activation fragment keeps the lane, the workspace-only codex candidate
 # and the OpenAI cap together: enabling the candidate without the cap is what
