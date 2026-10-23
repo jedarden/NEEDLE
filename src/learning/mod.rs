@@ -18,6 +18,7 @@
 //! change is kept.
 
 pub mod improvement;
+pub mod triage_policy;
 
 use std::path::{Path, PathBuf};
 

@@ -480,7 +480,12 @@ version = 1
 # work, backoff doubling and cap, due-workspace ordering and stale-schedule
 # cleanup, pass-restores and failure-backs-off contracts, and the two
 # worker-level wiring tests (probe-on-idle, no-probe-while-excluded).
-max_tests = 4302
+# +10 for the triage-policy candidate lifecycle (needle-eea2a19a): receipt
+# parsing, outcome-join bucketing, promote/demote/hold evidence evaluation,
+# bead-row classification, document stability, the lesson promote/demote
+# round-trip, and one ignored host-state join diagnostic. All are pure-record
+# contracts; only the diagnostic leaves the process and it is #[ignore]d.
+max_tests = 4312
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -1241,3 +1246,10 @@ kind = "process"
 max_occurrences = 2
 owner = "component:tmux-socket"
 reason = "run_with_timeout must be proven against real child processes: the bound exists because Command::output() waits forever, so a fake child would not regression-test the deadline kill (needle-984fd631)."
+
+[[unit_exception]]
+path = "src/learning/triage_policy.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-eea2a19a"
+reason = "The ignored real-receipts join diagnostic reads the live subgov receipts file and runs read-only 'bead list --json' per triaged workspace to produce the joined outcome report; no fixture can stand in for host bead-store state, and the test is #[ignore]d so CI never spawns it."

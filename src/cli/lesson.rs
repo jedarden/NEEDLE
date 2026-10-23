@@ -680,4 +680,49 @@ mod tests {
         assert_eq!(markers.len(), 1);
         assert_eq!(markers[0].id, "old");
     }
+
+    #[test]
+    fn triage_policy_candidate_promotes_and_demotes() {
+        use crate::learning::triage_policy::{
+            candidate_id, candidate_policy_document, evaluate_evidence, join_receipts_to_outcomes,
+            parse_receipts, CandidatePolicyInput, EvidenceThresholds,
+        };
+
+        let root = tempfile::tempdir().expect("fixture root");
+        fs::write(
+            root.path().join("triage-receipts.jsonl"),
+            "{\"workspace\": \"/home/coding/NEEDLE\", \"id\": \"needle-aaa\", \
+             \"action\": \"admit-evidence\", \"reason\": \"fixture\", \
+             \"rule\": \"proposal-triage-2026-10-23.1\"}\n",
+        )
+        .expect("write receipts fixture");
+        let parsed = parse_receipts(
+            &fs::read_to_string(root.path().join("triage-receipts.jsonl"))
+                .expect("read receipts fixture"),
+        );
+        let report = join_receipts_to_outcomes(&parsed, &|_| None);
+        let verdict = evaluate_evidence(&report, &EvidenceThresholds::default());
+        let document = candidate_policy_document(&CandidatePolicyInput {
+            report: &report,
+            verdict: &verdict,
+            evidence_ref: "triage-receipts.jsonl".to_owned(),
+            scope: "Candidate policy: subgov proposal-triage admission rule.".to_owned(),
+            reviewed_by: "fixture-reviewer".to_owned(),
+            expires: None,
+        });
+        let lesson = root.path().join("candidate.md");
+        fs::write(&lesson, document).expect("write rendered candidate");
+
+        promote(&lesson, root.path(), None).expect("rendered candidate promotes");
+        let id = candidate_id(&report.rule_version);
+        assert_eq!(id, "triage-policy.proposal-triage-2026-10-23.1");
+        assert!(root
+            .path()
+            .join(PROMOTION_DIRECTORY)
+            .join(format!("{id}.json"))
+            .is_file());
+
+        demote(&id, root.path()).expect("rendered candidate demotes");
+        assert!(!root.path().join("AGENTS.md").exists());
+    }
 }
