@@ -6,6 +6,19 @@ L1–L4; L5 activation remains gated by Gate D, plan section 9)
 **Tracking:** plan revision 34, sections 4.9–4.10; `needle-73c1958b`
 (META ADR contract test); N-T53–N-T56 beads listed in plan section 8
 
+## Authority clarification — 2026-10-23
+
+Plan revision 37 applies the current productivity policy to this decision.
+Generation and measurement may run within existing approved budgets; neither
+constitutes admission. Unapproved discoveries retain `proposal-pending` and
+`human`. Related proposals are reviewed as a batch with stable IDs and exact
+acceptance boundaries. Explicit user instructions authorizing implementation
+remain sufficient within their scope; do not ask again for settled decisions.
+The controller records and enforces that authority rather than granting it.
+Positive impact receipts can recommend budget growth but cannot authorize it.
+These rules supersede the curation-free and automatic-budget-growth language
+below; existing holds and release gates remain effective.
+
 ## Context
 
 Plan revision 33 reserved this number for the decision that would let NEEDLE
@@ -92,11 +105,11 @@ whose only promotion criterion is measured impact against a cohort baseline.
    exists. L5 (deploying code or policy without a human release) requires
    the audited delivery controller (`needle-99e8c972`) and Gate D.
 
-5. **The operator reads receipts; the operator does not curate.** The human
-   role reduces to: accepting Gate D, widening authority, and answering the
-   escalations the guardrails raise (budget exhausted, conflicting evidence,
-   a withdrawal that cannot revert cleanly). Everything else is a receipt
-   the operator may read, and `needle improvements` (N-T56) is the read-only
+5. **Batch admission preserves human authority.** The operator admits related
+   new outcomes as one bounded batch, accepts Gate D, approves authority or
+   budget changes, and answers genuine guardrail escalations. Previously
+   authorized implementation proceeds without repeated confirmation, and
+   `needle improvements` (N-T56) is the read-only
    view of proposals, admitted beads, receipts and the fleet trend.
 
 6. **Honest inputs first.** The loop cannot run on a ledger that counts a
@@ -122,7 +135,8 @@ whose only promotion criterion is measured impact against a cohort baseline.
 
 - Impact takes a horizon to measure; the loop is slower than an agent's
   self-report, by design. Budgets start small (one admitted proposal per day)
-  and rise only on two consecutive net-positive horizons.
+  and may be proposed for increase after two consecutive net-positive
+  horizons; an increase still requires explicit authority.
 - A cohort baseline can be contaminated by concurrent operator work; receipts
   must name the cohort and exposure, and adaptation freezes when the cohort
   is contaminated (Gate C).
@@ -161,8 +175,9 @@ whose only promotion criterion is measured impact against a cohort baseline.
    `needle-d6c5397a`/`needle-7b9718bc`, not a new bead).
 4. N-T55 receipts on the first admitted proposals; the first withdrawal
    proves the revert path end to end.
-5. Budget rises only after two consecutive horizons with net-positive
-   receipts; `needle-73c1958b` encodes the authority contract as a test.
+5. Budget increases require explicit authorization after two consecutive
+   horizons with net-positive receipts; `needle-73c1958b` encodes the authority
+   contract as a test.
 6. The META epic's first leaf may begin once steps 2–4 have live receipts.
 
 ## Related

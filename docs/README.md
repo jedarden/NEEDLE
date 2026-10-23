@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 198 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 201 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
@@ -93,6 +93,9 @@ NEEDLE's major design decisions, recorded as ADRs with status tracking.
 | [ADR-029](adr/029-measured-autonomous-improvement-loop.md) | Improvements Proposed from Ledger Evidence, Kept by Measured Impact | Accepted |
 | [ADR-030](adr/030-complete-attempt-accounting.md) | Complete Attempt Accounting | Accepted |
 | [ADR-031](adr/031-weft-work-performed-without-bead.md) | Weft Work Performed Without a Bead | Accepted |
+| [ADR-032](adr/032-authoritative-operator-explanations.md) | Operator explanations project authoritative state without mutating it | Accepted; implementation pending |
+| [ADR-033](adr/033-verified-first-outcome-onboarding.md) | Onboarding ends with one isolated verified outcome | Accepted; implementation pending |
+| [ADR-034](adr/034-capacity-aware-execution-and-verification.md) | Execution and verification consume separate bounded capacity | Accepted; implementation pending |
 
 ---
 
@@ -306,8 +309,8 @@ See [Investigations & Post-Mortems](#investigations--post-mortems) for:
 
 ## File Count Summary
 
-- **Total markdown files:** 198
-- **ADRs:** 31
+- **Total markdown files:** 201
+- **ADRs:** 34
 - **Research documents:** 18
 - **Operational notes:** 33
 

@@ -7,9 +7,9 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 36
+Plan revision: 37
 
-As of: 2026-09-15
+As of: 2026-10-23
 
 Status owner: NEEDLE maintainers
 
@@ -75,6 +75,15 @@ unchanged. The entire lock tree is local runtime state: it is ignored by Git,
 rejected if staged, never checkpointed or published, and is not durable bead or
 attempt authority.
 
+Revision 37 prioritizes reliable outcome delivery and operator usability
+(section 4.13). It reuses existing completion, checkpoint, recovery, admission
+and learning owners; accepts ADR-032–034 for bounded explanations, verified
+onboarding and separate verification capacity; and creates only the missing
+implementation leaves. Current explicit-admission policy supersedes older
+curation-free or automatic-budget-growth wording (ADR-029 clarification).
+Implementation authorization is not evidence of implementation or permission
+to activate a live fleet change.
+
 ## 0. How to read this plan
 
 Sections 0–10 are the current normative product and transition plan. The
@@ -99,6 +108,10 @@ This re-baseline accepts:
 - [ADR-028: Carry a renewable fenced claim handle through every attempt](../adr/028-renewable-fenced-claim-handle.md)
 - [ADR-029: Improvements are proposed from ledger evidence and kept only by measured impact](../adr/029-measured-autonomous-improvement-loop.md)
 - [ADR-030: Attempt accounting is complete: decomposition, killed attempts and red baselines are classified, never credited](../adr/030-complete-attempt-accounting.md)
+- [ADR-031: Weft work performed without a bead](../adr/031-weft-work-performed-without-bead.md)
+- [ADR-032: Authoritative operator explanations](../adr/032-authoritative-operator-explanations.md)
+- [ADR-033: Verified first-outcome onboarding](../adr/033-verified-first-outcome-onboarding.md)
+- [ADR-034: Separate execution and verification capacity](../adr/034-capacity-aware-execution-and-verification.md)
 
 Revision 21 locates the evaluation, reflection, replay, competence, memory,
 experiment, and promotion logic in a dependency-isolated learning kernel inside
@@ -1150,6 +1163,113 @@ to a bead checkpoint, copied into a commit, pushed, or treated as a project
 artifact. Phase 20 owns the detailed hook, metadata, staleness, and acceptance
 contract.
 
+### 4.13 Outcome reliability and operator usability (revision 37, 2026-10-23)
+
+#### 4.13.1 Authority, evidence and product boundary
+
+The operator requested the eight improvements below, followed by this plan,
+ADRs and implementation beads. This authorizes the bounded implementation
+leaves created here. It does not activate new discovery, change fleet counts,
+raise budgets, deploy infrastructure or clear an unresolved human/cycling hold.
+Existing outcome owners and their acceptance boundaries remain in force.
+Generated discoveries still require explicit batch admission; the admission
+controller enforces recorded authority and cannot grant it. Positive impact
+receipts support recommendations, not permission. This rule and ADR-029's
+2026-10-23 clarification supersede older curation-free admission and automatic
+budget-growth language elsewhere in the plan.
+
+Read-only review of the live NEEDLE store on 2026-10-23 found 796 nonclosed
+records before this planning task: 727 open, 35 deferred, 34 in progress;
+178 titles begin `Worker failure:` and 13 concern the module dependency graph.
+These are triage observations, not counts of approved work, independently
+confirmed defects or implementation gaps. Existing notes sometimes record
+implementation while required CI remains incomplete. Workers must inspect the
+current source, prerequisites and evidence before changing anything.
+
+The product goal is fewer interventions per accepted outcome, reliable resume,
+and bounded time/cost. No new scheduler service, lifecycle database, dashboard,
+per-worker checkout or parallel learning system is introduced.
+
+#### 4.13.2 Acceptance boundaries and retained owners
+
+| Priority / outcome | Required behavior | Existing owner(s), retained without duplicate work |
+| --- | --- | --- |
+| 1. Authoritative completion | Bind bead-specific acceptance, exact artifact/input identity, verification and delivery evidence to the fenced Resolution; generic passing commands or agent claims cannot establish the requested behavior. Distinguish implementation present, verification pending, delivery pending and complete as projections, not new backend states. | `needle-165ab6f6` acceptance enforcement; `needle-33b9ae96` reducer/applier and its existing leaves; `needle-543da495` completion reconciliation; `needle-7fc5f895` exact-input verification receipts |
+| 2. Preserve recovery progress | Record real execution boundaries and recover verified artifacts, attributable edits and the precise next action. Reacquire authority; never replay ambiguous shared-checkout changes or trust a checkpoint as a lease. | C1–C5 and D1–D6 in section 4.8.8; tracking `needle-272c7faa`, `needle-fe42db64` |
+| 3. Change unsuccessful interventions | A repeated task failure requires a validated RecoveryPlan with changed intervention, or observed recovery of a transient dependency. Infrastructure waits do not penalize task/model competence or cause decomposition. | R1 `needle-d6c5397a`, R2 `needle-7b9718bc`, R4 `needle-e820851a`; existing failure-attribution owners |
+| 4. Reduce operational noise | Reuse proposal dedup/admission and audit filing. At Splice's distinct filing boundary, converge recurring failures onto evidence-supported incident identity; preserve unknown causes and human approval. | `needle-f754b4cb`, `needle-e830524d`; shipped audit owner `needle-e42f3f0b`; new N-T64 below |
+| 5. Explain progress and decisions | One bounded read-only explanation joins authoritative readiness, attempts, verification, delivery and available recovery evidence, with freshness, missing sources and next permitted action. | New N-T63; reuse O1/O2 `needle-76bb46fe` / `needle-f965e857` for learning-specific diagnostics, not replacement ownership |
+| 6. Verify first use | Preserve configuration and prove install/readiness/isolated task/verified delivery through one maintained quickstart. Missing prerequisites yield a remedy, not a nominal success. | `needle-f34f5024`, `needle-2d582a08`, `needle-287045b4`, `needle-7175eeaa`, `needle-c88e5692`; reuse shipped quickstart gate `needle-e759f7f3` |
+| 7. Schedule the bottleneck | Bound verification across worker processes separately from execution; use pressure/freshness and hysteresis to limit launches without interfering with renewal or recovery. | N-T33 `needle-f279c281` retained; new N-T65/N-T66 below; receipt reuse remains `needle-7fc5f895` |
+| 8. Measure learning | Use independent evidence, bounded baseline/candidate cohorts, held-out cases, impact receipts and reversible withdrawal. Missing cost/human-time evidence stays unknown. | N-T53–56 in section 8; existing pilot `needle-a1894b5f` / `needle-10fc7f48`; ADR-026/029/030 |
+
+Authoritative acceptance and receipt integration remain with their existing
+owners; this revision does not create an alternative receipt store. Prose
+compatibility is transitional: structured, versioned acceptance evidence must
+identify the intended behavior and trusted execution context, not permit
+arbitrary commands harvested from untrusted text. Legacy and non-code outcomes
+need an explicit applicable verifier or a truthful pending/unsupported result.
+ADR-031 external turns remain distinct from bead completion.
+
+#### 4.13.3 New dispatchable implementation leaves
+
+Each row is one product behavior with implementation, focused tests,
+documentation, required verification and delivery under the same owner.
+Test filters below are acceptance targets to implement in existing harnesses,
+not claims that tests currently exist or pass. A zero-test match is not proof.
+Do not create new Cargo test binaries or verification-only child beads.
+
+| Wire / owner | Single deliverable and scope | Blocking prerequisites | Focused acceptance command |
+| --- | --- | --- | --- |
+| N-T63 / `needle-9bf431f1` | `needle explain` projection and its human/JSON presentation; ADR-032. Reuse BeadStore readiness, bounded attempt history and structured remediation. Missing optional recovery/learning evidence remains unknown. | This planning delivery; `needle-24bc5a35` structured doctor remediation | `cargo test --test integration_spawn operator_explain_` |
+| N-T64 / `needle-02d20019` | Durable, budgeted worker-failure incident aggregation at Splice filing; reuse existing audit/alert patterns and atomic unique references. Distinct cause/scope stays distinct; no historical bulk closure. | This planning delivery; `needle-6e698bf7` serializes Splice controller changes | `cargo test --test integration_spawn worker_failure_incident_` |
+| N-T65 / `needle-59cf1de3` | Host-scoped verification admission permits with bounded cancellable waits, process-tree-aware recovery, fair progress and infrastructure attribution; ADR-034. | This planning delivery; `needle-f279c281` resident admission state | `cargo test --test integration_spawn verification_admission_` |
+| N-T66 / `needle-c2b807ae` | Supervisor launch backpressure from verification/disk pressure, explicit freshness and hysteresis; ADR-034. No live roster or budget edits. | This planning delivery; N-T65 | `cargo test --test integration_spawn supervisor_pressure_` |
+
+Existing onboarding smoke owner `needle-c88e5692` should prove the first
+verified deliverable using `cargo test --test integration_spawn first_verified_outcome_`, after its existing
+human/cycling blocker is resolved. Do not create a substitute bead to evade
+that hold. Retained owners are linked to this planning record for context;
+references do not change status, assignee, admission labels or acceptance.
+Resource declarations and real blocking edges protect new work sharing a
+module. All new leaves depend on planning delivery so workers cannot consume
+an unpublished specification.
+
+#### 4.13.4 Delivery order and proof
+
+1. Finish the existing completion/recovery/retry chain under Gates A/B. Reuse
+   its existing fault-injection and pilot owners; do not create a second pilot.
+   The integrated proof must cover worker death, verification unavailability
+   and interrupted delivery, with at most one authoritative completion and no
+   lost attributable progress. Do not make all independent usability work
+   wait on the broad factory umbrella.
+2. Deliver explanations, incident convergence and the existing onboarding
+   journey through their actual prerequisites. Verify time-bounded partial
+   diagnostics and no mutation from read-only commands.
+3. Deliver permits before supervisor pressure control. Worker death or controller
+   takeover cannot free an occupied permit while its gate subprocess survives;
+   retain recovery ownership until the process tree completes or is terminated.
+   New capacity controls
+   remain disabled/observational until the normal canary/activation boundary.
+4. Evaluate learning only after truthful evidence and Gates C/D. Show effects
+   over a declared cohort and horizon before requesting promotion or budget
+   changes; preserve separate live-provider and real-deployment evidence.
+
+All subprocess fixtures isolate HOME, state directory and discovery root, use
+local disposable stores/remotes and avoid live providers. Pure decisions use
+injected clock/source fixtures; cross-process behavior uses the existing
+integration harness. Run the focused acceptance command and repository fast
+Definition of Done, then satisfy the existing CI/release gates before claiming
+completion. Record exact commands, nonzero test counts, artifact identities
+and failures on the owning bead. Never classify an infrastructure error as a
+passing check or bypass another owner's required gate.
+
+Track accepted outcomes per elapsed hour and per dollar, interventions per
+accepted outcome, time to verified resume, unchanged retry rate, incident
+recurrence, first-use success, verification wait, false-close/reopen and
+post-close regressions. Record unknown denominators. Establish a baseline before
+activation; no numerical improvement is claimed by this planning revision.
+
 ## 5. In-process learning kernel
 
 ### 5.1 Deployment decision and dependency rule
@@ -1590,8 +1710,8 @@ The combined factory reports at least:
   with each receipt's measured delta against its cohort baseline;
 - verified closures per dollar and share of spend on unverified attempts,
   computed only from costed rows and excluding decomposed resolutions;
-- operator curation: proposals a human had to write or select, which ADR-029
-  drives toward zero.
+- operator decision burden: batched admissions and genuine escalations per
+  accepted outcome; lower burden never removes explicit admission authority.
 
 Tool calls, commits, notes, generated beads, reflection documents, and worker
 loops remain diagnostic dimensions. None is a productivity objective by
