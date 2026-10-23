@@ -49,6 +49,25 @@ the failure ceiling like any other gate failure.
 The block must itself name a runnable command; a test quoted in the bead body
 does not substitute for the agent's own verification claim.
 
+**The block must be real lines.** A close reason assembled as one
+double-quoted shell string turns every `\n` into a literal backslash-n, and
+the parser — which reads real newlines — then sees no block at all. That
+shape rejected a perfect `go build`/`go vet`/`go test` block on 2026-10-17
+(the same `ea603be160bd` fingerprint, clustertop): the evidence existed; the
+quoting hid it. The pluck prompt therefore warns against `\n`-escaped
+reasons and shows a single-quoted heredoc close command whose terminator
+sits at column 0, so the recipe can be copied verbatim.
+
+**A repository no allow-listed prefix covers must ship its own verifier.**
+The closes that first tripped this fingerprint (vista, news-trader,
+2026-09-16/17) cited real `node`/`npm test`/`npx jest` runs — genuine
+verification the gate can never re-run, so the block counted as empty. The
+pluck prompt tells workers in uncovered repositories (pure JavaScript
+projects, for example) to land a re-runnable verifier as part of the change
+— a `scripts/definition-of-done.sh` the clean extraction can run, or a
+`make test` target — and cite it in the block; `npm test` is never re-run
+and cannot substantiate a close on its own.
+
 ## Re-run policy
 
 `outcome::close_verification` parses the block and applies three rules.

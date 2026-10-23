@@ -133,6 +133,27 @@ Complete these steps in order and include evidence for each one in the close rea
   go build, cargo test, cargo build, pytest, make test,
   scripts/definition-of-done.sh
 
+  The block must be real lines. A `\\n` typed inside double quotes stays a
+  literal backslash-n, and the parser reads real newlines only — a reason
+  assembled as one escaped string reads as no block at all and is rejected
+  exactly like a missing one. Pass the reason through a single-quoted
+  heredoc so the newlines survive the shell:
+
+  `{bead_cli} close {bead_id} --reason \"$(cat <<'REASON'
+Implemented the outcome; evidence below.
+
+```verified:
+go test -short ./internal/crypto/ exit=0
+```
+REASON
+)\"`
+
+  If no re-runnable prefix covers your repository (a pure JavaScript
+  project, for example), ship the verifier as part of the change — a
+  `scripts/definition-of-done.sh` the clean extraction can run, or a `make
+  test` target — and cite it in the block. `npm test` and other node-only
+  commands are never re-run; they cannot substantiate a close on their own.
+
 A close without steps 2–4 will be reopened by NEEDLE and counts as a failure toward
 quarantine. If you cannot complete any checklist step, do NOT close the bead.
 
@@ -1865,6 +1886,58 @@ mod tests {
                 .join(" ")
                 .contains("go test, go vet, go build, cargo test"),
             "prompt must list the re-run allow-list"
+        );
+        assert!(
+            result.content.contains("literal backslash-n"),
+            "prompt must warn that \\n inside double quotes defeats the block, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("single-quoted"),
+            "prompt must show a quoting shape that preserves real newlines"
+        );
+        // needle-ed0558a6, fingerprint ea603be160bd: after the block
+        // requirement shipped, closes still failed in two shapes. A perfect
+        // evidence block hidden inside one double-quoted, `\n`-escaped
+        // string parses as no block at all (clustertop, 2026-10-17), and a
+        // repository no allow-listed prefix covers (pure JavaScript —
+        // vista, news-trader, 2026-09-16/17) left the worker nothing
+        // re-runnable to cite. The prompt must carry the heredoc recipe and
+        // the ship-a-verifier instruction.
+        assert!(
+            result
+                .content
+                .contains("If no re-runnable prefix covers your repository"),
+            "prompt must address repositories no allow-listed prefix covers"
+        );
+        assert!(
+            result
+                .content
+                .contains("ship the verifier as part of the change"),
+            "prompt must tell the worker to ship a re-runnable verifier"
+        );
+        assert!(
+            result.content.contains("`npm test` and other node-only"),
+            "prompt must say node-only commands cannot substantiate a close"
+        );
+        assert!(
+            result
+                .content
+                .contains("commands are never re-run; they cannot substantiate a close"),
+            "prompt must say node-only commands cannot substantiate a close"
+        );
+        // The shown heredoc terminator must sit at column 0 — an indented
+        // terminator does not close the heredoc, and the recipe is there to
+        // be copied verbatim.
+        let recipe = result
+            .content
+            .split("$(cat <<'REASON'")
+            .nth(1)
+            .expect("prompt must show the heredoc close recipe");
+        assert!(
+            recipe.contains("\nREASON\n"),
+            "heredoc terminator must be shown at column 0, got: {}",
+            recipe
         );
     }
 
