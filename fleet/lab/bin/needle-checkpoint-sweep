@@ -54,16 +54,27 @@ def enumerate_workspaces(root):
         except OSError:
             continue
         for entry in entries:
-            if not entry.is_dir() or entry.is_symlink():
+            try:
+                if not entry.is_dir() or entry.is_symlink():
+                    continue
+            except OSError:
+                continue
+            # Top-level dot-directories are harness state (~/.needle logs and
+            # traces, ~/.config, ~/.cache), never workspace checkouts; one
+            # .beads/config.json under a .needle pgdata dir is not a repo.
+            if depth == 0 and entry.name.startswith("."):
                 continue
             if depth == 0 and entry.name == "scratch":
                 continue
             if entry.name in PRUNE_DIRS:
                 continue
-            if (entry / ".beads/config.json").is_file():
-                found.append(entry)
-            elif depth + 1 < MAX_DEPTH:
-                stack.append((entry, depth + 1))
+            try:
+                if (entry / ".beads/config.json").is_file():
+                    found.append(entry)
+                elif depth + 1 < MAX_DEPTH:
+                    stack.append((entry, depth + 1))
+            except OSError:
+                continue
     return sorted(found)
 
 

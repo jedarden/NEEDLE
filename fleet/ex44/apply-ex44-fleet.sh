@@ -159,6 +159,17 @@ for publisher in needle-checkpoint-unwedge needle-checkpoint-unwedge-beadrs need
             "$SYSTEMD_DIR/$publisher.$kind.d/productivity.conf"
     done
 done
+# Fleet-wide publication sweep (needle-4c858e12): publishes every bead-rs
+# workspace under $HOME through the publication-only wrapper and pushes a
+# branch only when every unpushed commit is checkpoint-only, at the same
+# 15-minute cadence. Unlike the legacy per-repo publication units above, the
+# sweep timer is enabled on every fleet host — it is what keeps the
+# git-committed handoff channel current.
+install_if_changed 755 "$SRC_DIR/../lab/bin/needle-checkpoint-sweep" "$NEEDLE_HOST_HOME/.local/bin/needle-checkpoint-sweep"
+for kind in service timer; do
+    install_if_changed 644 "$SRC_DIR/../lab/needle-checkpoint-sweep.$kind" "$SYSTEMD_DIR/needle-checkpoint-sweep.$kind"
+done
+run systemctl --user enable --now needle-checkpoint-sweep.timer
 install_if_changed 644 "$SRC_DIR/fleet-policy.env" "$NEEDLE_CONFIG_DIR/fleet-policy.env"
 install_if_changed 644 "$SRC_DIR/backlog-policy.env" "$NEEDLE_CONFIG_DIR/backlog-policy.env"
 for adapter in "$MANAGED_ADAPTERS_DIR"/*.yaml; do

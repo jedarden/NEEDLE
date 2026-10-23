@@ -132,6 +132,10 @@ grep -q 'needle-release-upgrade.timer' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q 'needle-checkpoint-unwedge" "$NEEDLE_HOST_HOME/.local/bin/needle-checkpoint-unwedge"' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q '.local/lib/needle-checkpoint' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q 'checkpoint-publication-$kind.conf' "$SRC_DIR/apply-ex44-fleet.sh"
+# The fleet-wide publication sweep (needle-4c858e12) is installed and enabled
+# on this host, unlike the legacy per-repo publication units above.
+grep -q 'needle-checkpoint-sweep" "$NEEDLE_HOST_HOME/.local/bin/needle-checkpoint-sweep"' "$SRC_DIR/apply-ex44-fleet.sh"
+grep -q 'enable --now needle-checkpoint-sweep.timer' "$SRC_DIR/apply-ex44-fleet.sh"
 
 # The activation fragment keeps the lane, the workspace-only codex candidate
 # and the OpenAI cap together: enabling the candidate without the cap is what
