@@ -15,9 +15,10 @@ Facts it relies on (verified against the live cluster 2026-10-23):
 
 - **Trigger chain:** Forgejo push → Forgejo's server-side GitHub push mirror
   → GitHub webhook → `needle-ci` WorkflowTemplate. The mirror leg takes
-  minutes, not seconds — observed ~8 min on one push and 20+ min on another
-  (2026-10-23); the mirror's sync schedule drives the variance. A 2-minute
-  wait finds nothing, and even 25 min can miss.
+  minutes, not seconds — observed ~3 min on one push, and on another it never
+  fired at all: commits confirmed on GitHub 86 min after push, no workflow
+  for that revision (2026-10-23). A 2-minute wait finds nothing, and even
+  25 min can miss.
 - **Reads are credential-free:** `kubectl --server=http://traefik-iad-ci:8001`
   reads workflows, pods, and logs. The `~/.kube/iad-ci.kubeconfig` auth is
   dead (Unauthorized) and cannot even read — do not use it.
@@ -27,6 +28,9 @@ Facts it relies on (verified against the live cluster 2026-10-23):
   full logs — read them instead of streaming while running or re-submitting
   (something outside podGC reaps the pods eventually, so fetch promptly).
   Templates without the override really do lose pods at pod completion.
+  Re-confirmed end-to-end on the failed run `needle-ci-q28lt` (2026-10-23):
+  all 11 pods retained 20+ min after failure, logs fetched with the
+  commands below.
 - **Workflow objects are TTL-reaped** — the `needle-ci` template declares
   `ttlStrategy: 1 h after success, 48 h after failure` (the controller
   default applied to other templates is 5 min / 30 min) — and pods are
@@ -46,7 +50,8 @@ SHA=$(git rev-parse HEAD)
 git push origin main
 
 # Wait up to 40 min for the workflow to appear (mirror propagation is minutes,
-# with real variance: ~8 min and 20+ min observed on two pushes 2026-10-23).
+# with real variance: ~3 min on one push 2026-10-23; another push never
+# triggered at all).
 # If the loop exhausts empty, poll again later — mirror lag is not a green CI.
 WF=""
 for i in $(seq 120); do

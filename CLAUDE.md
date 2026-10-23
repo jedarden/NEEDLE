@@ -100,7 +100,7 @@ The in-process clause was added after 2026-08-05, when `test_config()` in
 `.beads/issues.jsonl` to 0 bytes (2302 beads, recovered from git). The
 subprocess clause above was already in force and did not cover this shape.
 
-**Do not run `cargo test` locally.** Tests run on iad-ci automatically when you push to `main`. The trigger chain is a GitHub webhook fed by Forgejo's server-side push mirror (`github.com/jedarden/NEEDLE`), so the workflow for your push appears only after the mirror leg — minutes, not seconds. Observed 2026-10-23: one push at ~8 min, another still absent 20 min after push; the mirror's sync schedule drives the variance. A 2-minute wait will almost always find nothing.
+**Do not run `cargo test` locally.** Tests run on iad-ci automatically when you push to `main`. The trigger chain is a GitHub webhook fed by Forgejo's server-side push mirror (`github.com/jedarden/NEEDLE`), so the workflow for your push appears only after the mirror leg — minutes, not seconds. Observed 2026-10-23: one push triggered in ~3 min; another never triggered at all — its commits were confirmed on GitHub 86 min after push with no workflow for that revision; the mirror's sync schedule (and the webhook leg) drive the variance. A 2-minute wait will almost always find nothing.
 
 After pushing, poll for the triggered workflow and wait for it to complete:
 
@@ -111,7 +111,8 @@ SHA=$(git rev-parse HEAD)
 git push origin main
 
 # Wait up to 40 min for the workflow to appear (mirror propagation is minutes,
-# with real variance: ~8 min and 20+ min observed on two pushes 2026-10-23).
+# with real variance: ~3 min on one push 2026-10-23; another push never
+# triggered at all).
 # Reads go through the credential-free tailnet endpoint — the iad-ci kubeconfig
 # auth is dead and cannot even read. Match on the revision parameter, not
 # creation time alone: a workflow that appears quickly may belong to an older
