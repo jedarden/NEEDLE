@@ -21,6 +21,7 @@ use needle::types::{
     WorkerState,
 };
 use needle::worker::Worker;
+use needle::zombie_reaper;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::process::{Child, Command, Output, Stdio};
@@ -754,6 +755,92 @@ fn sanitizer_memory_budget_is_measured_in_an_isolated_process() {
     assert!(
         output.status.success(),
         "memory probe failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn zombie_children_scan_finds_an_abandoned_child_of_self() {
+    // `git` is the exact subprocess shape observed defunct in production
+    // (needle-064b92ef): short-lived, spawned per workspace operation, whose
+    // status an agent or worker that drops the handle never collects.
+    let abandoned = Command::new("git")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn abandoned zombie probe");
+    let abandoned_pid = abandoned.id();
+    // Leak the handle: nothing in this process will ever wait() on the pid,
+    // which is exactly how a dispatch-time <defunct> accumulates.
+    std::mem::forget(abandoned);
+    wait_for_zombie(abandoned_pid);
+
+    let scanned = zombie_reaper::zombie_children(std::process::id());
+    assert!(
+        scanned.contains(&abandoned_pid),
+        "scan must discover the abandoned child: {scanned:?}"
+    );
+
+    // Scoped cleanup: reap exactly this probe pid and no other test pid.
+    // Keep comment text in this file free of apostrophes: the isolation
+    // audit blanks comment regions by pairing quote-like bytes, and a
+    // stray apostrophe desyncs that pairing into a panic (see the bead).
+    reap_exited_child(abandoned_pid);
+    assert!(
+        !std::path::Path::new(&format!("/proc/{abandoned_pid}/stat")).exists(),
+        "scoped reap did not collect {abandoned_pid}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn zombie_sweep_reaps_unclaimed_children_in_an_isolated_process() {
+    const PROBE: &str = "NEEDLE_ZOMBIE_SWEEP_PROBE";
+    if std::env::var_os(PROBE).is_some() {
+        // In the isolated probe process: leak a short-lived `git` child (the
+        // production debris shape) so its exited status is never waited on,
+        // then run the production sweep against ourselves.
+        // The sweep runs here (not in the shared test binary) so it can never
+        // steal a status from a concurrently running test child.
+        let abandoned = Command::new("git")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn abandoned zombie probe");
+        let abandoned_pid = abandoned.id();
+        std::mem::forget(abandoned);
+        wait_for_zombie(abandoned_pid);
+
+        let reaped = zombie_reaper::reap_zombie_children_of_self();
+        assert!(
+            reaped.contains(&abandoned_pid),
+            "sweep did not reap {abandoned_pid}: {reaped:?}"
+        );
+        assert!(
+            !std::path::Path::new(&format!("/proc/{abandoned_pid}/stat")).exists(),
+            "sweep left {abandoned_pid} in the process table"
+        );
+        return;
+    }
+
+    let child = Command::new(std::env::current_exe().expect("resolve integration test binary"))
+        .args([
+            "--exact",
+            "process_lifecycle::zombie_sweep_reaps_unclaimed_children_in_an_isolated_process",
+        ])
+        .env(PROBE, "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn zombie sweep probe");
+    let output = ChildGuard::new(child).output();
+    assert!(
+        output.status.success(),
+        "zombie sweep probe failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

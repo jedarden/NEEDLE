@@ -117,3 +117,5 @@ pub mod wip;
 pub mod worker;
 pub mod worker_env;
 pub mod workspace_equality;
+/// Targeted zombie-child reaping for the worker process (needle-064b92ef).
+pub mod zombie_reaper;

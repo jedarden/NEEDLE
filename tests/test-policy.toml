@@ -473,7 +473,10 @@ version = 1
 # /proc liveness, so the unit tier is the cheapest correct home.
 # +1 concurrent scoped-stop liveness regression landed in the shared tree by
 # the in-flight needle stop --all work while this ceiling was being raised.
-max_tests = 4291
+# +3 zombie-reaper parse contracts (needle-064b92ef): parenthesized-comm
+# field extraction, malformed-line rejection, and /proc self-entry skipping.
+# Pure /proc-stat string parsing; the unit tier is the cheapest correct home.
+max_tests = 4294
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -610,7 +613,10 @@ contract = 246
 # the executed-rejection no-regression arm climbing to quarantine.
 
 # +1 operator-managed worker environment launch probe (needle-0a3f0010).
-e2e = 860
+# +2 zombie-child reap contracts in integration_spawn (needle-064b92ef): the
+# abandoned-git scan discovery and the isolated-process sweep reaping both
+# spawn real short-lived children and observe the process table.
+e2e = 862
 soak = 0
 fuzz = 0
 
@@ -670,7 +676,10 @@ tier = "e2e"
 # and worker cancellation kills and reaps the process group.
 # +1 attempt-archive harness transcript copy/status contract (needle-310a29eb).
 # +1 operator-managed worker environment launch probe (needle-0a3f0010).
-max_tests = 450
+# +2 zombie-child reap contracts (needle-064b92ef): an abandoned git child is
+# discovered by the /proc zombie scan, and the teardown sweep reaps it in an
+# isolated probe process so no concurrent test status can be stolen.
+max_tests = 452
 owner = "component:process-integration"
 
 [[harness]]

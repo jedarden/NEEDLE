@@ -134,6 +134,7 @@ use crate::trace::{
 };
 use crate::tsnet::{inject_identity_env, IdentityRegistry, TsnetConfig};
 use crate::types::{BeadId, InputMethod};
+use crate::zombie_reaper;
 
 /// Pure adapters for exporting process observations to the learning kernel.
 pub mod learning;
@@ -3302,6 +3303,21 @@ impl Dispatcher {
         if let (Some(ref identity), Some(ref registry)) = (&tsnet_identity, &self.tsnet_registry) {
             registry.release_identity(&identity.hostname).await;
         }
+
+        // Every child handle this dispatch held — the agent on every branch
+        // above and the output transform in its teardown — has now been
+        // reaped, so this is the sweep's safe point: collect any `<defunct>`
+        // children the attempt left in our process table so an idle worker
+        // never carries process-table debris that external governors treat
+        // as "has children" and refuse to retire (needle-064b92ef). This
+        // must stay after the transform teardown, not earlier: an exited
+        // transform is an unreaped zombie from the moment its stdout EOF
+        // completes the readers until its guard waits on it, and a sweep
+        // inside that window would steal its status from the tokio SIGCHLD
+        // driver, whose waiter would then never resolve. Targeted by PID —
+        // a blind `waitpid(-1)` could steal a status from this runtime's
+        // own concurrent waits; see zombie_reaper's module docs.
+        zombie_reaper::reap_zombie_children_of_self();
 
         Ok(ExecutionResult {
             exit_code,
