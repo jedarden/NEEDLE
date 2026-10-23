@@ -79,7 +79,7 @@ impl GateResolutionTelemetry {
         }
     }
 
-    fn bead_workspace(command_gates_resolved: usize) -> Self {
+    pub(crate) fn bead_workspace(command_gates_resolved: usize) -> Self {
         if command_gates_resolved == 0 {
             return Self::none();
         }
@@ -5269,7 +5269,7 @@ impl OutcomeHandler {
     /// 2. Finds the associated "Gate broken" bead by fingerprint
     /// 3. Closes the bead with a reason
     /// 4. Emits workspace.gate_restored telemetry
-    async fn restore_degraded_workspace(
+    pub(crate) async fn restore_degraded_workspace(
         &self,
         store: &dyn BeadStore,
         workspace_path: &std::path::Path,
@@ -5377,6 +5377,34 @@ impl OutcomeHandler {
         }
 
         Ok(())
+    }
+
+    /// Restoration binding for the idle gate reattempt probe.
+    ///
+    /// Opens a store scoped to `workspace` and runs the ordinary restoration
+    /// path with the synthetic probe bead id as the successful run the close
+    /// reasons cite; `gates_run` feeds the restore telemetry exactly as a
+    /// real dispatch's would. No bead is claimed or created — the probe id
+    /// exists only inside this call.
+    pub(crate) async fn restore_for_probe(
+        &self,
+        workspace: &std::path::Path,
+        gates_run: usize,
+    ) -> Result<()> {
+        let store = crate::bead_store::discover_default(workspace.to_path_buf(), None, None, None)
+            .with_context(|| {
+                format!(
+                    "failed to open a bead store for degraded workspace {}",
+                    workspace.display()
+                )
+            })?;
+        self.restore_degraded_workspace(
+            store.as_ref(),
+            workspace,
+            &BeadId::from(crate::gate_reattempt::PROBE_BEAD_ID),
+            GateResolutionTelemetry::bead_workspace(gates_run),
+        )
+        .await
     }
 
     /// Undo the failure penalties applied while a workspace was

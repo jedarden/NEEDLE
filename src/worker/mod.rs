@@ -8614,6 +8614,50 @@ impl Worker {
 
     // ── Terminal state handlers ─────────────────────────────────────────────
 
+    /// Run at most one idle gate reattempt probe, if the experiment is on
+    /// and the fleet had nothing at all for this worker.
+    ///
+    /// The probe never competes with real work: `probe_allowed_on_idle`
+    /// refuses when the waterfall found candidates it could not take
+    /// (`found_but_excluded`), and probing happens only
+    /// here in the EXHAUSTED wait, where the worker would otherwise merely
+    /// sleep. All probe state is host-shared under the state root, so two
+    /// idle workers cannot double-probe the same workspace inside one
+    /// backoff window.
+    async fn probe_degraded_workspaces_if_idle(&self) {
+        let reattempt = &self.config.validation.gate_reattempt;
+        if !crate::gate_reattempt::probe_allowed_on_idle(reattempt.enabled, self.found_but_excluded)
+        {
+            return;
+        }
+        let handler = &self.outcome_handler;
+        let default_gates = &self.config.validation.default_gates;
+        let timeout =
+            std::time::Duration::from_secs(self.config.validation.outcome_timeout_seconds);
+        match crate::gate_reattempt::probe_most_overdue(
+            reattempt,
+            default_gates,
+            timeout,
+            |workspace, gates_run| async move {
+                handler.restore_for_probe(&workspace, gates_run).await
+            },
+        )
+        .await
+        {
+            Ok(crate::gate_reattempt::IdleProbeOutcome::Idle) => {}
+            Ok(crate::gate_reattempt::IdleProbeOutcome::Probed { workspace, verdict }) => {
+                tracing::info!(
+                    workspace = %workspace.display(),
+                    verdict = ?verdict,
+                    "idle gate reattempt probe completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "idle gate reattempt probe failed");
+            }
+        }
+    }
+
     /// Handle the EXHAUSTED state: either wait and retry or exit.
     async fn handle_exhausted(&mut self) -> Result<WorkerState> {
         // EXHAUSTED is also a safe cycle boundary: no bead is claimed and no
@@ -8656,6 +8700,16 @@ impl Worker {
 
         match self.config.worker.idle_action {
             IdleAction::Wait => {
+                // Experimental idle gate reattempt: the waterfall found no
+                // candidate and not even found-but-excluded work, so this
+                // idle window is free. Spend it probing one due
+                // gate-degraded workspace's own gates — degradation is a
+                // starvation loop (degraded, so skipped, so no gate run
+                // ever clears it), and this is the only automatic way out.
+                // The probe refuses to run when work was found but
+                // excluded, so it never competes with real work.
+                self.probe_degraded_workspaces_if_idle().await;
+
                 // Determine backoff strategy based on whether candidates were found but excluded
                 let (backoff, backoff_reason) = if self.found_but_excluded {
                     (
@@ -15253,6 +15307,88 @@ mod tests {
     }
 
     // ── handle_exhausted tests ──
+
+    /// Shared setup for the idle gate reattempt wiring tests: an isolated
+    /// env whose HOME is temporary (so gate-health records a temporary
+    /// workspace), and a worker home workspace that is gate-degraded with a
+    /// gate that fails fast.
+    fn degraded_workspace_for_reattempt() -> (
+        crate::util::test_env::EnvGuard,
+        tempfile::TempDir,
+        crate::config::Config,
+    ) {
+        let guard = crate::util::test_env::isolate_env();
+        let home_root = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HOME", home_root.path());
+
+        let mut config = valid_test_config();
+        let workspace = home_root.path().join("degraded-ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        config.workspace.home = workspace.clone();
+        config.self_modification.hot_reload = false;
+        config.worker.idle_backoff_min = 0;
+        config.worker.idle_backoff_max = 0;
+        std::fs::write(
+            workspace.join(".needle.yaml"),
+            "gates:\n  - type: command\n    commands:\n      - \"false\"\n    run_in: workspace\n",
+        )
+        .unwrap();
+        for _ in 0..8 {
+            let (_, degraded) = crate::gate_health::record_error(
+                &workspace,
+                "gate-cmd".to_string(),
+                "boom".to_string(),
+            )
+            .unwrap();
+            if degraded {
+                break;
+            }
+        }
+        (guard, home_root, config)
+    }
+
+    #[tokio::test]
+    async fn exhausted_idle_worker_probes_due_degraded_workspace() {
+        let (_guard, _root, config) = degraded_workspace_for_reattempt();
+        let workspace = config.workspace.home.clone();
+
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-gate-reattempt-idle".to_string(), store);
+        worker.boot().await.unwrap();
+        worker.found_but_excluded = false;
+        worker.state = WorkerState::Exhausted;
+
+        worker.handle_exhausted().await.unwrap();
+
+        let schedule = crate::gate_reattempt::load_state(&workspace)
+            .unwrap()
+            .expect("an idle exhausted worker must probe the due degraded workspace");
+        assert_eq!(schedule.consecutive_probe_failures, 1);
+        assert_eq!(schedule.backoff_secs, 1800);
+    }
+
+    #[tokio::test]
+    async fn exhausted_worker_with_found_but_excluded_work_does_not_probe() {
+        let (_guard, _root, config) = degraded_workspace_for_reattempt();
+        let workspace = config.workspace.home.clone();
+
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-gate-reattempt-busy".to_string(), store);
+        worker.boot().await.unwrap();
+        // Work exists but this worker cannot take it: the fleet is not idle,
+        // so the probe must not run even though a degraded workspace is due.
+        worker.found_but_excluded = true;
+        worker.state = WorkerState::Exhausted;
+
+        worker.handle_exhausted().await.unwrap();
+
+        assert!(
+            crate::gate_reattempt::load_state(&workspace)
+                .unwrap()
+                .is_none(),
+            "the probe must never compete with found-but-excluded work"
+        );
+    }
 
     #[tokio::test]
     async fn handle_exhausted_with_exit_returns_stopped() {

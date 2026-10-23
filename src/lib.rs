@@ -37,6 +37,7 @@ pub mod experiments;
 pub mod file_contention;
 pub mod fingerprint;
 pub mod gate_health;
+pub mod gate_reattempt;
 pub mod health;
 pub mod hoop_hooks;
 pub mod improvement_controller;

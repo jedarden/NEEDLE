@@ -476,7 +476,11 @@ version = 1
 # +3 zombie-reaper parse contracts (needle-064b92ef): parenthesized-comm
 # field extraction, malformed-line rejection, and /proc self-entry skipping.
 # Pure /proc-stat string parsing; the unit tier is the cheapest correct home.
-max_tests = 4294
+# +8 idle gate reattempt (needle-c10bd848): probe gating on idle/excluded
+# work, backoff doubling and cap, due-workspace ordering and stale-schedule
+# cleanup, pass-restores and failure-backs-off contracts, and the two
+# worker-level wiring tests (probe-on-idle, no-probe-while-excluded).
+max_tests = 4302
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -1084,9 +1088,16 @@ reason = "The reload outcome test creates an isolated committed Git fixture so g
 [[unit_exception]]
 path = "src/worker/mod.rs"
 kind = "global-env"
-max_occurrences = 15
+max_occurrences = 16
 owner = "component:worker"
-reason = "Twelve grandfathered occurrences plus three test-only safeguards under the repository-wide environment lock: one neutralizes the host-dependent admission probe, one pins the historical gate-failure regression beneath a private HOME, and one proves exhausted-worker reload from a private HOME."
+reason = "Twelve grandfathered occurrences plus four test-only safeguards under the repository-wide environment lock: one neutralizes the host-dependent admission probe, one pins the historical gate-failure regression beneath a private HOME, one proves exhausted-worker reload from a private HOME, and one isolates HOME so the idle gate reattempt wiring tests record gate-health and probe state in a temporary state root (needle-c10bd848)."
+
+[[unit_exception]]
+path = "src/gate_reattempt.rs"
+kind = "global-env"
+max_occurrences = 1
+owner = "needle-c10bd848"
+reason = "The probe-schedule and gate-health state roots resolve from HOME, so the tests pin a temporary one under the repository-wide environment lock to keep fixture state out of the live fleet's ~/.needle."
 
 [[unit_exception]]
 path = "src/strand/mod.rs"

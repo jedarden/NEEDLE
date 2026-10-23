@@ -7293,6 +7293,13 @@ pub struct ValidationConfig {
     /// (plan section 4.4 step 6).
     #[serde(default)]
     pub default_gates: DefaultGatesConfig,
+
+    /// Experimental idle-time gate reattempt for gate-degraded workspaces:
+    /// when a worker finds no work at all, run one due degraded workspace's
+    /// own gates without claiming a bead; success runs the ordinary restore
+    /// path, failure doubles the wait before the next probe (capped).
+    #[serde(default)]
+    pub gate_reattempt: crate::gate_reattempt::GateReattemptConfig,
 }
 
 /// A workspace that declares no `gates:` gets one derived from what it is —
@@ -7356,6 +7363,7 @@ impl Default for ValidationConfig {
             fallback_gate: Self::default_fallback_gate(),
             store_flush_timeout_seconds: Self::default_store_flush_timeout_seconds(),
             default_gates: DefaultGatesConfig::default(),
+            gate_reattempt: crate::gate_reattempt::GateReattemptConfig::default(),
         }
     }
 }

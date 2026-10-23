@@ -206,6 +206,11 @@ pub fn gate_health_dir() -> PathBuf {
     state_root().join("state").join("gate-health")
 }
 
+/// The gate-reattempt probe schedule directory: `<root>/state/gate-reattempt`.
+pub fn gate_reattempt_dir() -> PathBuf {
+    state_root().join("state").join("gate-reattempt")
+}
+
 /// The provider-health state directory: `<root>/state/provider-health`.
 pub fn provider_health_dir() -> PathBuf {
     state_root().join("state").join("provider-health")
