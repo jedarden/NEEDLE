@@ -82,6 +82,44 @@ if [[ "$PHASE" != "Succeeded" ]]; then
 fi
 ```
 
+## Manual WorkflowTemplate submission — blocked without a live kubeconfig
+
+The environment guide's "Submitting a workflow manually" recipe creates a
+Workflow through `~/.kube/iad-ci.kubeconfig`. That kubeconfig's bearer
+token expires repeatedly — dead from 2026-09-24, and again since
+2026-10-22 (`kubeconfig-expiry-sweep` lists `iad-ci.kubeconfig` as
+expired). Verified live 2026-10-23: it cannot even read, and the
+credential-free endpoint cannot fill the gap because the proxy's RBAC is
+read-only (`auth can-i create workflows.argoproj.io` → `no`).
+
+Failure signature of the dead-kubeconfig recipe — recognize it, don't
+retry it: repeated `memcache.go:265] "Unhandled Error" err="couldn't get
+current server API group list: the server has asked for the client to
+provide credentials"` warnings, ending in `error: You must be logged in
+to the server (the server has asked for the client to provide
+credentials)`, exit 1.
+
+Pre-flight before any manual submission:
+
+```bash
+kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
+  auth can-i create workflows.argoproj.io -n argo-workflows   # need: yes
+```
+
+`no` — or the Unauthorized signature above — means manual submission from
+codinghome is blocked. Unblock paths: an operator re-issues the kubeconfig
+(check `~/.local/state/kubeconfig-expiry-sweep/last-report.json`), or a
+human submits from the Argo UI (`https://argo-ci.ardenone.com`, Google
+SSO, VPN only). Report the task blocked with that unblock path; do not
+loop on the dead recipe.
+
+There is no status fallback: neither Forgejo nor the GitHub mirror
+carries commit statuses for NEEDLE (`total_count: 0` on both, checked
+2026-10-23). The durable, credential-free records of a run are the
+CI-check bead, the `.needle/ci/lifecycle.jsonl` ledger, and — until TTL
+reaping — the workflow object and retained pods read through the endpoint
+above.
+
 Enable it in global or repository `.needle.yaml` configuration:
 
 ```yaml
