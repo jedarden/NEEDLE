@@ -100,45 +100,61 @@ The in-process clause was added after 2026-08-05, when `test_config()` in
 `.beads/issues.jsonl` to 0 bytes (2302 beads, recovered from git). The
 subprocess clause above was already in force and did not cover this shape.
 
-**Do not run `cargo test` locally.** Tests run on iad-ci automatically when you push to `main`. A GitHub webhook triggers the `needle-ci` WorkflowTemplate on iad-ci.
+**Do not run `cargo test` locally.** Tests run on iad-ci automatically when you push to `main`. The trigger chain is a GitHub webhook fed by Forgejo's server-side push mirror (`github.com/jedarden/NEEDLE`), so the workflow for your push appears only after the mirror leg — minutes, not seconds (~8 min observed 2026-10-23, up to ~15). A 2-minute wait will almost always find nothing.
 
 After pushing, poll for the triggered workflow and wait for it to complete:
 
 ```bash
-# Record push time, then poll for the triggered workflow
+# Record push time and SHA, then poll for the triggered workflow
 PUSH_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+SHA=$(git rev-parse HEAD)
 git push origin main
 
-# Wait up to 2 min for the workflow to appear, then poll until done
+# Wait up to 25 min for the workflow to appear (mirror propagation is minutes).
+# Reads go through the credential-free tailnet endpoint — the iad-ci kubeconfig
+# auth is dead and cannot even read. Match on the revision parameter, not
+# creation time alone: a workflow that appears quickly may belong to an older
+# queued push.
 WF=""
-for i in $(seq 24); do
-  sleep 5
-  WF=$(kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
-    get workflows -n argo-workflows \
-    --sort-by=.metadata.creationTimestamp \
-    -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.creationTimestamp}{"\n"}{end}' \
-    2>/dev/null | awk -v t="$PUSH_TIME" '$2 >= t && /^needle-ci-/ {print $1}' | tail -1)
+for i in $(seq 75); do
+  sleep 20
+  WF=$(kubectl --server=http://traefik-iad-ci:8001 -n argo-workflows \
+    get workflows --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.creationTimestamp} {.spec.arguments.parameters[?(@.name=="revision")].value}{"\n"}{end}' \
+    2>/dev/null | awk -v t="$PUSH_TIME" -v sha="$SHA" '$2 >= t && $1 ~ /^needle-ci-/ && $3 == sha {print $1}' | tail -1)
   [[ -n "$WF" ]] && break
 done
 echo "Workflow: $WF"
 
-# Poll until complete
+# Poll until done. "Running" can be pure ConfigMap-lock queue wait for an hour
+# or more (runs serialize on a lock of 1) — check the pending node's message
+# before diagnosing a stall. Completed workflow objects are TTL-reaped (about
+# 5 min after success, 30 min after failure), so capture the phase when you
+# see it.
 for i in $(seq 60); do
-  PHASE=$(kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
-    get workflow "$WF" -n argo-workflows -o jsonpath='{.status.phase}' 2>/dev/null)
+  PHASE=$(kubectl --server=http://traefik-iad-ci:8001 -n argo-workflows \
+    get workflow "$WF" -o jsonpath='{.status.phase}' 2>/dev/null)
   echo "[$i] $WF phase=$PHASE"
   if [[ "$PHASE" == "Succeeded" || "$PHASE" == "Failed" || "$PHASE" == "Error" ]]; then break; fi
   sleep 30
 done
 
-# On failure, stream the pod log (pods are deleted on completion — act fast)
+# On failure, fetch logs from the retained pods. needle-ci overrides the
+# controller-default podGC (OnPodCompletion) with `podGC: OnWorkflowSuccess`,
+# so a failed run's pods are NOT deleted when they finish — read them instead
+# of streaming while running or re-submitting. Pods are reaped eventually
+# (within ~30 min of the failure), so fetch promptly. The verify log ends
+# with a "Definition of Done Summary" listing every failed check and exit code.
 if [[ "$PHASE" != "Succeeded" ]]; then
-  POD=$(kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
-    get pods -n argo-workflows -l workflows.argoproj.io/workflow="$WF" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
-    logs -n argo-workflows "$POD" -c main 2>/dev/null \
-    || echo "Pod already deleted — check Argo UI at https://argo-ci.ardenone.com (logs kept 2h on failure)"
+  kubectl --server=http://traefik-iad-ci:8001 -n argo-workflows \
+    get pods -l workflows.argoproj.io/workflow="$WF" \
+    -o custom-columns='NAME:.metadata.name,PHASE:.status.phase'
+  for POD in $(kubectl --server=http://traefik-iad-ci:8001 -n argo-workflows \
+    get pods -l workflows.argoproj.io/workflow="$WF" \
+    -o jsonpath='{range .items[?(@.status.phase=="Failed")]}{.metadata.name}{"\n"}{end}'); do
+    kubectl --server=http://traefik-iad-ci:8001 -n argo-workflows \
+      logs "$POD" -c main --tail=200
+  done
 fi
 ```
 

@@ -182,7 +182,7 @@ Incident analyses, debugging sessions, and operational investigations (newest fi
 |----------|-------------|
 | **[GitHub Draft Releases Root Cause](github-draft-releases-root-cause-analysis.md)** | GitHub release drafting failure analysis |
 | **[GH Release Draft Root Cause](gh-release-draft-root-cause.md)** | Release drafting incident |
-| **[Post-Push CI](post-push-ci.md)** | Post-push CI behavior |
+| **[Post-Push CI](post-push-ci.md)** | Post-push CI behavior and the manual iad-ci verification runbook |
 | **[Sanitize Latency CI](sanitize_latency_ci.md)** | Sanitization latency in CI |
 | **[Child Wait Analysis](child_wait_analysis.md)** | Child process waiting behavior |
 | **[Compilation Error Detection](compilation-error-detection.md)** | Compilation error detection patterns |
