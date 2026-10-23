@@ -108,7 +108,7 @@ while IFS=$'\t' read -r id workspace agent delay explore; do
     }
 done < <(manifest_rows)
 
-mkdir -p "$SYSTEMD_DIR" "$WORKERS_DIR" "$NEEDLE_CONFIG_DIR/adapters" "$NEEDLE_HOST_HOME/.local/bin"
+mkdir -p "$SYSTEMD_DIR" "$WORKERS_DIR" "$NEEDLE_CONFIG_DIR/adapters" "$NEEDLE_HOST_HOME/.local/bin" "$NEEDLE_HOST_HOME/.local/lib/needle-checkpoint"
 
 install_if_changed() {
     local mode=$1 source=$2 target=$3
@@ -139,6 +139,26 @@ install_if_changed 755 "$SRC_DIR/needle-zai-governor" "$NEEDLE_HOST_HOME/.local/
 # Both systemd ExecStart and test.sh invoke the helper directly, so it must
 # land executable; its behavior suite is test.sh's --self-test run.
 install_if_changed 755 "$SRC_DIR/needle-release-upgrade" "$NEEDLE_HOST_HOME/.local/bin/needle-release-upgrade"
+# Publication-only checkpoint publisher (needle-32175577): the September
+# checkpoint storm came from lab timers running claim release and worker
+# restarts every 10 seconds. The corrected wrapper only publishes an aligned
+# checkpoint through the helpers below, which hold bead-rs's publish lock,
+# validate both roots, prune stale objects in one index transaction, and
+# debounce standalone publications to one per 15 minutes. Like the lab
+# converge, the cadence drop-ins apply only where a publication unit already
+# exists; enabling the units themselves stays a per-host decision.
+install_if_changed 755 "$SRC_DIR/../lab/bin/needle-checkpoint-unwedge" "$NEEDLE_HOST_HOME/.local/bin/needle-checkpoint-unwedge"
+for helper in commit-checkpoint.sh checkpoint-publish.sh; do
+    install_if_changed 755 "$SRC_DIR/../../scripts/$helper" "$NEEDLE_HOST_HOME/.local/lib/needle-checkpoint/$helper"
+done
+for publisher in needle-checkpoint-unwedge needle-checkpoint-unwedge-beadrs needle-checkpoint-unwedge-fleet; do
+    for kind in service timer; do
+        [[ -f "$SYSTEMD_DIR/$publisher.$kind" ]] || continue
+        run mkdir -p "$SYSTEMD_DIR/$publisher.$kind.d"
+        install_if_changed 644 "$SRC_DIR/../lab/checkpoint-publication-$kind.conf" \
+            "$SYSTEMD_DIR/$publisher.$kind.d/productivity.conf"
+    done
+done
 install_if_changed 644 "$SRC_DIR/fleet-policy.env" "$NEEDLE_CONFIG_DIR/fleet-policy.env"
 install_if_changed 644 "$SRC_DIR/backlog-policy.env" "$NEEDLE_CONFIG_DIR/backlog-policy.env"
 for adapter in "$MANAGED_ADAPTERS_DIR"/*.yaml; do

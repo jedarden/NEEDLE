@@ -126,6 +126,13 @@ grep -q 'needle-release-upgrade" "$NEEDLE_HOST_HOME/.local/bin/needle-release-up
 grep -q 'needle-release-upgrade.service' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q 'needle-release-upgrade.timer' "$SRC_DIR/apply-ex44-fleet.sh"
 
+# The publication-only checkpoint publisher (needle-32175577) installs the
+# same wrapper and helper pair as the lab converge; the 15-minute cadence
+# drop-ins apply only where a publication unit already exists.
+grep -q 'needle-checkpoint-unwedge" "$NEEDLE_HOST_HOME/.local/bin/needle-checkpoint-unwedge"' "$SRC_DIR/apply-ex44-fleet.sh"
+grep -q '.local/lib/needle-checkpoint' "$SRC_DIR/apply-ex44-fleet.sh"
+grep -q 'checkpoint-publication-$kind.conf' "$SRC_DIR/apply-ex44-fleet.sh"
+
 # The activation fragment keeps the lane, the workspace-only codex candidate
 # and the OpenAI cap together: enabling the candidate without the cap is what
 # would let one adapter pull the fleet onto an unbilled-by-us provider.
