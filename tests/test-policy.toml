@@ -489,7 +489,12 @@ version = 1
 # deserialization regressions (a partial `pricing:` section overlays the
 # default table instead of replacing it; an absent section falls back to
 # the defaults) and the merge helper's per-key override contract.
-max_tests = 4315
+# +3 rotated-ledger-file window contracts (needle-77f96f9d): a size-rotated
+# (-NNN.jsonl) file inside the window is read, an old rotated file is skipped
+# by its real filename day, and a name with no date-shaped segment is trimmed
+# by line timestamps. Pure in-process contracts over the public reader; unit
+# is the cheapest correct tier and the bead's acceptance criteria name them.
+max_tests = 4318
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

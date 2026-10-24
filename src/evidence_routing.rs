@@ -917,6 +917,31 @@ pub fn ledger_rows(log_dir: &Path, window_days: u32) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The `YYYY-MM-DD` day a telemetry log name carries, when it is date-shaped.
+///
+/// Covers both sink shapes — `<worker>-<session>-YYYY-MM-DD.jsonl` and the
+/// size-rotated `<worker>-<session>-YYYY-MM-DD-NNN.jsonl` (three-digit
+/// sequence suffix, `telemetry/file_sink.rs`) — by dropping the optional
+/// `-NNN` suffix and requiring the strict `####-##-##` shape on the last
+/// ten characters. `None` means the name carries no filename day, so the
+/// reader bounds the file by line timestamps instead.
+fn ledger_file_day(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".jsonl")?;
+    // Drop the optional three-digit size-rotation suffix.
+    let stem = match stem.rsplit_once('-') {
+        Some((head, seq)) if seq.len() == 3 && seq.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => stem,
+    };
+    let day = stem.get(stem.len().checked_sub(10)?..)?;
+    let bytes = day.as_bytes();
+    let shaped = bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..].iter().all(u8::is_ascii_digit);
+    shaped.then_some(day)
+}
+
 /// Every `attempt.resolved` row in the window, with its envelope timestamp.
 ///
 /// The sibling of [`ledger_rows`], and the one that does the work: both share
@@ -943,17 +968,11 @@ pub fn timestamped_ledger_rows(log_dir: &Path, window_days: u32) -> Vec<LedgerRo
         {
             continue;
         }
-        // `<worker>-<session>-YYYY-MM-DD.jsonl`: the date suffix bounds the file.
-        let day = name
-            .strip_suffix(".jsonl")
-            .and_then(|s| s.rsplit_once('-').map(|(head, _)| head))
-            .and_then(|s| s.rsplit_once('-').map(|(head, _)| head))
-            .and_then(|s| s.get(s.len().saturating_sub(4)..))
-            .map(|_| &name[name.len() - 16..name.len() - 6]);
-        if let Some(day) = day {
-            if day.len() == 10 && day < cutoff_day.as_str() {
-                continue;
-            }
+        // `<worker>-<session>-YYYY-MM-DD[-NNN].jsonl`: the filename day bounds
+        // the file. A name with no date-shaped day is bounded by the line
+        // timestamps below instead.
+        if ledger_file_day(name).is_some_and(|day| day < cutoff_day.as_str()) {
+            continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -1433,6 +1452,78 @@ mod tests {
         assert_eq!(a.verified, 1);
         assert_eq!(a.infrastructure, 1);
         assert_eq!(a.costed, 2);
+    }
+
+    /// An `attempt.resolved` ledger line with an explicit envelope timestamp.
+    fn ledger_line_at(ts: &str, adapter: &str, outcome: &str) -> String {
+        serde_json::json!({
+            "timestamp": ts,
+            "event_type": "attempt.resolved",
+            "worker_id": "w",
+            "data": {"adapter": adapter, "outcome": outcome, "estimated_cost_usd": 0.5, "provisional": false}
+        })
+        .to_string()
+    }
+
+    fn ledger_line_now(adapter: &str, outcome: &str) -> String {
+        ledger_line_at(&chrono::Utc::now().to_rfc3339(), adapter, outcome)
+    }
+
+    #[test]
+    fn timestamped_ledger_rows_reads_rotated_files_inside_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        // The size-rotating sink names overflow files
+        // `<worker>-<session>-<date>-<seq:03>.jsonl` (telemetry/file_sink.rs).
+        std::fs::write(
+            dir.path().join(format!("w-abcd1234-{today}-001.jsonl")),
+            ledger_line_now("a", "verified_success"),
+        )
+        .unwrap();
+        let rows = timestamped_ledger_rows(dir.path(), 7);
+        assert_eq!(rows.len(), 1, "a rotated file today is inside the window");
+        assert_eq!(
+            rows[0].data.get("adapter").and_then(|v| v.as_str()),
+            Some("a"),
+        );
+    }
+
+    #[test]
+    fn timestamped_ledger_rows_skips_rotated_files_older_than_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        // Fresh line timestamps do not rescue an old filename day: the
+        // filename bounds the file for rotated names like any other.
+        std::fs::write(
+            dir.path().join("w-abcd1234-2020-01-01-001.jsonl"),
+            ledger_line_now("a", "verified_success"),
+        )
+        .unwrap();
+        assert!(
+            timestamped_ledger_rows(dir.path(), 7).is_empty(),
+            "an old rotated file is outside the window",
+        );
+    }
+
+    #[test]
+    fn timestamped_ledger_rows_trims_a_name_without_a_filename_day_by_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        // No date-shaped segment in the name: the file is read and bounded
+        // by line timestamps, not skipped or trusted wholesale.
+        std::fs::write(
+            dir.path().join("plain.jsonl"),
+            format!(
+                "{}\n{}\n",
+                ledger_line_at("2020-01-01T00:00:00Z", "a", "verified_success"),
+                ledger_line_now("a", "work_failure"),
+            ),
+        )
+        .unwrap();
+        let rows = timestamped_ledger_rows(dir.path(), 7);
+        assert_eq!(rows.len(), 1, "only the fresh line survives the trim");
+        assert_eq!(
+            rows[0].data.get("outcome").and_then(|v| v.as_str()),
+            Some("work_failure"),
+        );
     }
 
     // ── N-T48: workspace-scoped evidence ──
