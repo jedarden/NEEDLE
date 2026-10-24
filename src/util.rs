@@ -855,6 +855,10 @@ pub(crate) mod test_env {
     /// seams (plan revision 24 §4.6): admission tests point the resource probe
     /// at a mock directory or resize the hold's backoff, and a leaked value
     /// would silently put every later test's worker into an admission hold.
+    ///
+    /// [`isolate_env`] additionally guards the `NEEDLE_*__*` config-override
+    /// group — see [`is_config_override_var`] — which is captured, removed,
+    /// and restored rather than merely captured.
     const GUARDED_VARS: [&str; 11] = [
         "HOME",
         "PATH",
@@ -883,14 +887,29 @@ pub(crate) mod test_env {
     /// three). `Drop::drop` runs before a struct's fields drop, so restoring
     /// here and holding `_lock` as a field gives the correct order.
     pub(crate) struct EnvGuard {
-        saved: Vec<(&'static str, Option<OsString>)>,
+        saved: Vec<(String, Option<OsString>)>,
         _lock: MutexGuard<'static, ()>,
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
+            // A holder may set an override-group variable mid-body (the
+            // guarded-setter pattern relies on drop for cleanup). Such a
+            // value was never captured at acquire, so restore() alone would
+            // leak it into every later test's config resolution. Remove
+            // anything now set that this guard did not capture, then
+            // restore the captured values. The lock is still held, so no
+            // isolate_env holder can interleave.
+            let captured: Vec<&str> = self.saved.iter().map(|(k, _)| k.as_str()).collect();
+            let holder_set: Vec<String> = std::env::vars_os()
+                .map(|(key, _)| key.to_string_lossy().into_owned())
+                .filter(|key| is_config_override_var(key) && !captured.contains(&key.as_str()))
+                .collect();
+            for key in holder_set {
+                std::env::remove_var(&key);
+            }
             for (key, value) in self.saved.drain(..) {
-                restore(key, value);
+                restore(&key, value);
             }
         }
     }
@@ -900,6 +919,20 @@ pub(crate) mod test_env {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
         }
+    }
+
+    /// The `apply_env_overrides` input grammar (src/config/mod.rs): a
+    /// `NEEDLE_` prefix with a `__` path separator, e.g.
+    /// `NEEDLE_WORKER__MAX_WORKERS`. That layer is part of every layered
+    /// config resolution and reads the LIVE process environment, so a value
+    /// set or leaked by any thread changes what every other thread's
+    /// resolution produces. Full-suite evidence:
+    /// `worker::tests::config_reload_preserves_layered_effective_config`
+    /// failed only in whole-suite runs (needle-2bf4a0de, 2026-10-24) because
+    /// an override var set elsewhere in the process landed between its boot
+    /// resolution and its reload-candidate resolution.
+    fn is_config_override_var(key: &str) -> bool {
+        key.starts_with("NEEDLE_") && key.contains("__")
     }
 
     /// A private, per-caller NEEDLE home for tests.
@@ -940,13 +973,26 @@ pub(crate) mod test_env {
         let lock = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        EnvGuard {
-            saved: GUARDED_VARS
-                .iter()
-                .map(|&key| (key, std::env::var_os(key)))
-                .collect(),
-            _lock: lock,
+        let mut saved: Vec<(String, Option<OsString>)> = GUARDED_VARS
+            .iter()
+            .map(|&key| (key.to_string(), std::env::var_os(key)))
+            .collect();
+        // The config-override group is captured AND removed, unlike
+        // GUARDED_VARS which is only captured: a lock holder resolving
+        // layered config needs that layer empty, not merely restored later.
+        // A leaked value from a test that died mid-body, or one set by a
+        // thread that never took this lock, must not reach the holder's
+        // resolutions. Everything saved here is restored on drop, under the
+        // same lock that removed it.
+        let override_keys: Vec<String> = std::env::vars_os()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .filter(|key| is_config_override_var(key))
+            .collect();
+        for key in override_keys {
+            saved.push((key.clone(), std::env::var_os(&key)));
+            std::env::remove_var(&key);
         }
+        EnvGuard { saved, _lock: lock }
     }
 
     /// [`isolate_env`] plus an admission-neutral launch gate.
@@ -983,6 +1029,48 @@ pub(crate) mod test_env {
         // restored when the returned guard drops.
         std::env::set_var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
         guard
+    }
+
+    #[test]
+    fn isolate_env_scrubs_leaked_config_override_var_while_held() {
+        const PROBE: &str = "NEEDLE_TEST_ENV__SCRUB_PROBE";
+        // Simulate a value leaked by a test that died mid-body: present
+        // before the guard is acquired.
+        std::env::set_var(PROBE, "leaked");
+        {
+            let _guard = isolate_env();
+            assert_eq!(
+                std::env::var(PROBE),
+                Err(std::env::VarError::NotPresent),
+                "a lock holder must resolve layered config with the override layer empty"
+            );
+        }
+        // Deliberately no post-drop assertion here: every concurrent
+        // isolate_env holder scrubs and restores this group at acquire and
+        // drop, so ambient state outside the lock is not observable
+        // deterministically. Restoration reuses the same restore() path as
+        // GUARDED_VARS; the group-specific new behaviors are pinned by this
+        // scrub assert and by the holder-set sweep below.
+        std::env::remove_var(PROBE);
+    }
+
+    #[test]
+    fn isolate_env_sweeps_holder_set_config_override_var_on_drop() {
+        const PROBE: &str = "NEEDLE_TEST_ENV__HELD_PROBE";
+        {
+            let _guard = isolate_env();
+            // The guarded-setter pattern: set after acquiring, rely on the
+            // guard's drop for cleanup. The probe name is unique to this
+            // test, so no concurrent guard captures or scrubs it and the
+            // post-drop absence is deterministic.
+            std::env::set_var(PROBE, "held");
+            assert_eq!(std::env::var(PROBE).unwrap(), "held");
+        }
+        assert_eq!(
+            std::env::var(PROBE),
+            Err(std::env::VarError::NotPresent),
+            "drop must sweep a variable the holder set, so it cannot leak"
+        );
     }
 }
 

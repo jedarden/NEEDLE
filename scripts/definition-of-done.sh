@@ -961,6 +961,49 @@ if [[ "$RUN_SLOW" == true ]]; then
     done < <(selected_cargo_targets)
   fi
 
+  # Lib suite under a replicated close-gate environment (needle-2bf4a0de).
+  #
+  # The shipped-work gate re-runs a verified-block `cargo test --lib` as
+  # `sh -c` under env_clear + COMMAND_GATE_ENV_ALLOWLIST, injecting
+  # NEEDLE_BEAD_ID / NEEDLE_WORKSPACE (src/validation/mod.rs). cargo test
+  # runs the lib suite IN-PROCESS, so process-global state mutated by one
+  # test — an env var set without the test_env lock, or leaked past a test
+  # that died mid-body — is visible to every other test's config
+  # resolution. nextest's per-test processes and a normal-env cargo test
+  # are structurally blind to that failure shape, so without this check a
+  # regression of the 2026-10-24 class is invisible until a close gate
+  # fails on it.
+  #
+  # The allowlist is parsed from src/validation/mod.rs so the replication
+  # cannot drift from what the gate actually grants; a parse failure fails
+  # the check loudly rather than skipping it. Runs in the comprehensive
+  # lanes only (--all / --comprehensive-lint) and only when the lib target
+  # is in scope, so push CI and per-target pods pay nothing for it.
+  if [[ "$LANE" == "all" || "$COMPREHENSIVE_LINT" == true ]] \
+    && { [[ -z "$SLOW_TARGET" ]] || [[ "$SLOW_TARGET" == "lib" ]]; }; then
+    GATE_ENV_ALLOWLIST="$(sed -n '/COMMAND_GATE_ENV_ALLOWLIST: &\[&str\] = &\[/,/\];/p' \
+      src/validation/mod.rs | grep -o '"[^"]*"' | tr -d '"' )"
+    if [[ -z "$GATE_ENV_ALLOWLIST" ]]; then
+      CHECKS+=("lib suite under replicated close-gate env")
+      FAILURES+=("lib suite under replicated close-gate env: COMMAND_GATE_ENV_ALLOWLIST could not be parsed from src/validation/mod.rs")
+      echo "✗ lib suite under replicated close-gate env failed (allowlist parse produced nothing)"
+    else
+      GATE_ENV=(env -i)
+      while IFS= read -r gate_var; do
+        [[ -n "$gate_var" ]] || continue
+        # These two are pinned to the slow lane's own context below so the
+        # run shares the build and TMPDIR isolation of every other check.
+        [[ "$gate_var" == "TMPDIR" || "$gate_var" == "CARGO_TARGET_DIR" ]] && continue
+        [[ -n "${!gate_var+x}" ]] && GATE_ENV+=("$gate_var=${!gate_var}")
+      done <<< "$GATE_ENV_ALLOWLIST"
+      GATE_ENV+=("TMPDIR=$SLOW_TMPDIR" "CARGO_TARGET_DIR=$SLOW_CARGO_TARGET_DIR")
+      GATE_ENV+=("NEEDLE_BEAD_ID=dod-gate-env-check" "NEEDLE_WORKSPACE=$REPO_ROOT")
+      DOD_TIMING_PHASE=run DOD_TIMING_TARGET=lib-gate-env \
+        run_check "lib suite under replicated close-gate env" \
+          "${GATE_ENV[@]}" timeout --kill-after=30 900 cargo test --lib
+    fi
+  fi
+
   # Installer tests (isolated, shell-level regression tests). Not a cargo
   # target, so a per-target run only reaches it when it is the one asked for.
   if [[ -z "$SLOW_TARGET" || "$SLOW_TARGET" == "installer" ]]; then

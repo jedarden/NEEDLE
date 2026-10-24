@@ -11654,6 +11654,7 @@ mod config_tests {
 
     #[test]
     fn env_override_agent_default() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -11672,6 +11673,7 @@ mod config_tests {
 
     #[test]
     fn env_override_worker_max_workers() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -11720,6 +11722,7 @@ mod config_tests {
 
     #[test]
     fn env_override_invalid_integer_ignored() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let original = config.agent.timeout;
         let mut sources = SourceMap::new();
@@ -11738,6 +11741,7 @@ mod config_tests {
 
     #[test]
     fn env_override_beats_workspace_config() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".needle.yaml"),
@@ -11768,6 +11772,7 @@ mod config_tests {
 
     #[test]
     fn cli_overrides_beat_env_vars() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12079,6 +12084,7 @@ strands:
 
     #[test]
     fn env_override_worker_idle_timeout() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12093,6 +12099,7 @@ strands:
 
     #[test]
     fn env_override_worker_launch_stagger() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12107,6 +12114,7 @@ strands:
 
     #[test]
     fn env_override_health_heartbeat_interval() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12121,6 +12129,7 @@ strands:
 
     #[test]
     fn env_override_health_heartbeat_ttl() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12135,6 +12144,7 @@ strands:
 
     #[test]
     fn env_override_self_modification_enabled() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12152,6 +12162,7 @@ strands:
     /// worker dispatches agents into the operator's real repos.
     #[test]
     fn env_override_explore_enabled() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
         assert!(
@@ -12170,6 +12181,7 @@ strands:
 
     #[test]
     fn env_override_explore_workspace_root() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12187,6 +12199,7 @@ strands:
 
     #[test]
     fn env_override_self_modification_auto_promote() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12201,6 +12214,7 @@ strands:
 
     #[test]
     fn env_override_self_modification_canary_timeout() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12215,6 +12229,7 @@ strands:
 
     #[test]
     fn env_override_invalid_bool_ignored() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let original = config.self_modification.enabled;
         let mut sources = SourceMap::new();
@@ -12230,6 +12245,7 @@ strands:
 
     #[test]
     fn env_override_supervisor_heartbeat_path() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -12247,6 +12263,7 @@ strands:
 
     #[test]
     fn env_override_supervisor_socket_path() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -13562,6 +13579,7 @@ agent:
 
     #[test]
     fn env_var_routing_default_adapter_override() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -13586,6 +13604,7 @@ agent:
 
     #[test]
     fn env_var_routing_override_beats_workspace() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".needle.yaml"),
@@ -14685,6 +14704,7 @@ agent:
 
     #[test]
     fn env_override_timeout_triggered_enabled() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -14699,6 +14719,7 @@ agent:
 
     #[test]
     fn env_overrides_low_water_generation_policy() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
         let values = [
@@ -14732,6 +14753,7 @@ agent:
 
     #[test]
     fn env_override_timeout_triggered_agent_wallclock_timeout() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -14752,6 +14774,7 @@ agent:
 
     #[test]
     fn env_override_timeout_triggered_handler_timeout() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 
@@ -14766,6 +14789,7 @@ agent:
 
     #[test]
     fn env_override_timeout_triggered_min_elapsed_fraction() {
+        let _env_guard = crate::util::test_env::isolate_env();
         let mut config = Config::default();
         let mut sources = SourceMap::new();
 

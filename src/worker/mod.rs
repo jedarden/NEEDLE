@@ -11151,6 +11151,7 @@ mod tests {
 
     #[test]
     fn invalid_reload_candidate_is_rejected_without_mutating_running_config() {
+        let _env_lock = crate::util::test_env::isolate_env();
         let worker = make_worker(Arc::new(MockStore::empty()));
         let running_max_workers = worker.config.worker.max_workers;
         let directory = tempfile::tempdir().unwrap();
@@ -11163,6 +11164,7 @@ mod tests {
 
     #[test]
     fn valid_reload_candidate_is_returned_separately_from_running_config() {
+        let _env_lock = crate::util::test_env::isolate_env();
         let worker = make_worker(Arc::new(MockStore::empty()));
         let running_max_workers = worker.config.worker.max_workers;
         let directory = tempfile::tempdir().unwrap();
@@ -11179,6 +11181,7 @@ mod tests {
 
     #[test]
     fn config_reload_preserves_layered_effective_config() {
+        let _env_lock = crate::util::test_env::isolate_env();
         let workspace = tempfile::tempdir().unwrap();
         let global_dir = tempfile::tempdir().unwrap();
         let global_path = global_dir.path().join("config.yaml");

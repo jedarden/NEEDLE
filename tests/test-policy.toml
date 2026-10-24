@@ -494,7 +494,11 @@ version = 1
 # by its real filename day, and a name with no date-shaped segment is trimmed
 # by line timestamps. Pure in-process contracts over the public reader; unit
 # is the cheapest correct tier and the bead's acceptance criteria name them.
-max_tests = 4318
+#
+# +2 for the test_env override-group guard contracts (needle-2bf4a0de): the
+# scrub-at-acquire and holder-set-sweep-on-drop behaviors of the extended
+# isolate_env, pinned in the same module they guard.
+max_tests = 4320
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -1074,9 +1078,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/util.rs"
 kind = "global-env"
-max_occurrences = 24
+max_occurrences = 29
 owner = "component:util"
-reason = "23 grandfathered occurrences, plus one deliberate seam: isolate_env_admitted sets NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK while holding the environment lock, which is how a test neutralizes the launch admission gate instead of letting host load decide its result."
+reason = "23 grandfathered occurrences, plus one deliberate seam: isolate_env_admitted sets NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK while holding the environment lock, which is how a test neutralizes the launch admission gate instead of letting host load decide its result. +5 (needle-2bf4a0de): the config-override guard group is implemented here by necessity — the scrub capture/removal loop, the holder-set sweep in Drop, and the two contracts that pin those behaviors are all raw env::set_var/remove_var calls inside the module that exists to wrap them."
 
 [[unit_exception]]
 path = "src/util.rs"
