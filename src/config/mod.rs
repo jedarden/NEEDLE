@@ -8333,8 +8333,13 @@ pub struct Config {
     /// Provider/model concurrency and rate limits.
     #[serde(default)]
     pub limits: LimitsConfig,
-    /// Per-model token pricing (USD per million tokens).
-    #[serde(default = "crate::cost::default_pricing")]
+    /// Per-model token pricing (USD per million tokens). Entries overlay the
+    /// built-in default table per model: a `pricing:` section extends the
+    /// defaults, it never replaces them (needle-aee8fc94).
+    #[serde(
+        default = "crate::cost::default_pricing",
+        deserialize_with = "crate::cost::deserialize_pricing_overlaid_on_default"
+    )]
     pub pricing: PricingConfig,
     /// Daily budget thresholds for cost enforcement.
     #[serde(default)]
@@ -13123,6 +13128,66 @@ transitions:
         std::fs::write(&path, "transitions:\n  version: 2\n").unwrap();
         let error = ConfigLoader::load_from_path(&path).expect_err("version 2 must fail closed");
         assert!(error.to_string().contains("transitions.version 2"));
+    }
+
+    // ── pricing section merge (needle-aee8fc94, F3) ──
+
+    #[test]
+    fn pricing_section_overlays_default_table_instead_of_replacing_it() {
+        // Regression: a `pricing:` section naming only the luna models used to
+        // replace the built-in table wholesale, silently unpricing the glm
+        // models. Every attempt that had to be priced locally — killed/
+        // `timeout:hard` attempts, which write no result envelope — then came
+        // back `costed: false`.
+        let yaml = r#"
+pricing:
+  gpt-5.6-luna:
+    input_per_million: 1.25
+    output_per_million: 10.0
+  claude-sonnet-4-6:
+    input_per_million: 4.0
+    output_per_million: 20.0
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        let million = crate::cost::UsageBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..crate::cost::UsageBreakdown::default()
+        };
+
+        // A glm model the section omits stays priced, at the built-in rates.
+        let glm = crate::cost::estimate_breakdown_cost(&million, "glm-5.3-flash", &config.pricing);
+        assert_eq!(
+            glm,
+            Some(30.0),
+            "glm-5.3-flash must stay priced at the default 5.0/25.0 rates when the section omits it"
+        );
+
+        // A configured model is priced at its configured rates...
+        let luna = crate::cost::estimate_breakdown_cost(&million, "gpt-5.6-luna", &config.pricing);
+        assert_eq!(luna, Some(11.25));
+
+        // ...and a config entry overrides the default rate for the same key
+        // (4.0/20.0 from the section, not the default 3.0/15.0).
+        let sonnet =
+            crate::cost::estimate_breakdown_cost(&million, "claude-sonnet-4-6", &config.pricing);
+        assert_eq!(
+            sonnet,
+            Some(24.0),
+            "a config entry must win over the built-in rate for the same model"
+        );
+    }
+
+    #[test]
+    fn pricing_defaults_apply_when_section_absent() {
+        // The `default` half of the field attributes: no `pricing:` key at all
+        // still yields the full built-in table.
+        let config: Config = serde_yaml::from_str("budget:\n  warn_usd: 5.0\n").unwrap();
+        assert!(
+            config.pricing.contains_key("glm-5.3"),
+            "an absent pricing section must fall back to the default table"
+        );
     }
 
     // ── dump_with_sources coverage ──

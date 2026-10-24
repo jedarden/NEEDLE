@@ -485,7 +485,11 @@ version = 1
 # bead-row classification, document stability, the lesson promote/demote
 # round-trip, and one ignored host-state join diagnostic. All are pure-record
 # contracts; only the diagnostic leaves the process and it is #[ignore]d.
-max_tests = 4312
+# +3 pricing-section merge contracts (needle-aee8fc94): two Config
+# deserialization regressions (a partial `pricing:` section overlays the
+# default table instead of replacing it; an absent section falls back to
+# the defaults) and the merge helper's per-key override contract.
+max_tests = 4315
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

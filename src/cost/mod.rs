@@ -90,6 +90,37 @@ pub fn default_pricing() -> PricingConfig {
     m
 }
 
+/// Overlay config-supplied pricing entries on the built-in default table.
+///
+/// Serde field-default semantics make a *present* `pricing:` section replace
+/// the whole map, so a section naming only some models silently unprices
+/// every built-in model it does not name. The fleet config's luna entries did
+/// exactly that to the glm models, and every attempt that had to be priced
+/// locally — the killed/`timeout:hard` population, which writes no result
+/// envelope — came back `costed: false` (F3, needle-aee8fc94). Merging keeps a
+/// partial section an extension of the defaults; config entries still win per
+/// key, so naming a built-in model overrides its rates.
+pub fn merge_pricing_over_default(overrides: PricingConfig) -> PricingConfig {
+    let mut merged = default_pricing();
+    merged.extend(overrides);
+    merged
+}
+
+/// `deserialize_with` for `Config::pricing`: deserializes the config's section
+/// as overrides and merges them over [`default_pricing`], so built-ins the
+/// section omits survive. Pairs with a `default` attribute of
+/// [`default_pricing`] so an absent section yields the full default table —
+/// the two paths behave identically.
+pub fn deserialize_pricing_overlaid_on_default<'de, D>(
+    deserializer: D,
+) -> Result<PricingConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let overrides = PricingConfig::deserialize(deserializer)?;
+    Ok(merge_pricing_over_default(overrides))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // BudgetConfig
 // ──────────────────────────────────────────────────────────────────────────────
@@ -509,6 +540,46 @@ mod tests {
                 "{model}: output rate should be positive"
             );
         }
+    }
+
+    // ── merge_pricing_over_default (needle-aee8fc94) ──
+
+    #[test]
+    fn pricing_overrides_merge_over_default_table() {
+        let overrides: PricingConfig = [(
+            "claude-sonnet-4-6".to_string(),
+            ModelPricing {
+                input_per_million: 4.0,
+                output_per_million: 20.0,
+                cache_read_per_million: Some(0.4),
+                cache_write_per_million: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let merged = merge_pricing_over_default(overrides);
+
+        // A config entry wins per key, cache fields included.
+        let sonnet = &merged["claude-sonnet-4-6"];
+        assert_eq!(sonnet.input_per_million, 4.0);
+        assert_eq!(sonnet.output_per_million, 20.0);
+        assert_eq!(sonnet.cache_read_per_million, Some(0.4));
+        assert_eq!(sonnet.cache_write_per_million, None);
+
+        // Built-ins the section does not name survive untouched.
+        for model in ["glm-5.3", "glm-5.3-flash", "claude-opus-4-6"] {
+            assert!(merged.contains_key(model), "{model} must survive the merge");
+        }
+        let glm = &merged["glm-5.3-flash"];
+        assert_eq!(
+            (
+                glm.input_per_million,
+                glm.output_per_million,
+                glm.cache_read_per_million,
+                glm.cache_write_per_million
+            ),
+            (5.0, 25.0, Some(0.5), Some(6.25))
+        );
     }
 
     // ── check_budget ──

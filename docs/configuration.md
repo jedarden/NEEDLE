@@ -48,7 +48,7 @@ This guide covers the most commonly used configuration options.
 **Budget and pricing:**
 - `budget.warn_usd` — Warning threshold in USD
 - `budget.stop_usd` — Stop threshold in USD
-- `pricing` — Provider pricing model
+- `pricing` — Provider pricing table, in USD per million tokens. Entries overlay the built-in default table per model (config wins per key); a partial section extends the defaults rather than replacing them
 
 **Strand thresholds:**
 - `strands.pluck.exclude_labels` — Labels to exclude from plucking
