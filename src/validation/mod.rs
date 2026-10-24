@@ -256,7 +256,8 @@ pub struct GateFailure {
     pub command: String,
     /// Process exit code (None if killed by signal).
     pub exit_code: Option<i32>,
-    /// Combined stderr output (truncated to a reasonable length).
+    /// Failure evidence: stderr plus the tail of stdout, where a test
+    /// harness's verdict prints (truncated to a reasonable length).
     pub output: String,
 }
 
@@ -968,6 +969,39 @@ impl CommandGate {
                     results.insert(cmd.clone(), GateResult::Pass);
                 }
                 Err(failure) => {
+                    // A cargo test binary that dies before libtest prints a
+                    // verdict — killed under memory pressure on a shared
+                    // host, say — judged nothing. Retry once before scoring:
+                    // a verdict on the retry is the real verdict, and a
+                    // second verdict-less death is an execution error, not a
+                    // work failure. The 2026-10-24 fleet incident ran
+                    // gate_1 `cargo test --lib` into kills 9/9 attempts at
+                    // pristine HEAD, walking four healthy beads up the
+                    // escalation ladder for nothing.
+                    let failure =
+                        if unverdicted_cargo_test_failure(failure.exit_code, &failure.output)
+                            .is_some()
+                        {
+                            tracing::warn!(
+                                command = %cmd,
+                                exit_code = ?failure.exit_code,
+                                output = %failure.output.trim(),
+                                "cargo gate died before a verdict — retrying once"
+                            );
+                            match self.run_command(cmd, bead, dir, context).await {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        command = %cmd,
+                                        "command gate passed on no-verdict retry"
+                                    );
+                                    results.insert(cmd.clone(), GateResult::Pass);
+                                    continue;
+                                }
+                                Err(retry_failure) => retry_failure,
+                            }
+                        } else {
+                            failure
+                        };
                     // Detect execution errors: the gate produced no verdict
                     // because its program never ran. Besides the spawn-level
                     // failure (exit_code=None, e.g. ENOENT on `sh` itself),
@@ -990,6 +1024,35 @@ impl CommandGate {
                                 GateResult::ExecutionError {
                                     command: cmd.clone(),
                                     reason: reason.to_string(),
+                                },
+                            );
+                        }
+                        // Reached only after the retry above: a first-run
+                        // no-verdict failure is retried, so one that lands
+                        // here died verdict-less twice. That is the killed-
+                        // test-binary shape — cargo's exit 101 says the suite
+                        // did not finish, the captured output carries no
+                        // libtest verdict, and no work was judged. Score it
+                        // as an execution error (release without a failure
+                        // count; gate-health degradation tracks the repeats)
+                        // instead of a Fail the bead must answer for.
+                        None if unverdicted_cargo_test_failure(
+                            failure.exit_code,
+                            &failure.output,
+                        )
+                        .is_some() =>
+                        {
+                            tracing::warn!(
+                                command = %cmd,
+                                exit_code = ?failure.exit_code,
+                                error = %failure.output,
+                                "gate execution error — test binary died before a verdict, twice"
+                            );
+                            results.insert(
+                                cmd.clone(),
+                                GateResult::ExecutionError {
+                                    command: cmd.clone(),
+                                    reason: "no_test_verdict".to_string(),
                                 },
                             );
                         }
@@ -1064,12 +1127,13 @@ impl CommandGate {
                 if output.status.success() {
                     Ok(())
                 } else {
+                    let exit_code = output.status.code();
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    let truncated = truncate_output(&stderr, self.stderr_cap_bytes);
+                    let stdout = String::from_utf8_lossy(&output.stdout);
                     Err(GateFailure {
                         command: cmd.to_string(),
-                        exit_code: output.status.code(),
-                        output: truncated,
+                        exit_code,
+                        output: failure_output(&stderr, &stdout, self.stderr_cap_bytes),
                     })
                 }
             }
@@ -1138,6 +1202,61 @@ pub(crate) fn unrunnable_gate_reason(exit_code: Option<i32>, output: &str) -> Op
         Some(126) if output.contains("Permission denied") => Some("EACCES"),
         _ => None,
     }
+}
+
+/// Classify a cargo test failure that carries no libtest verdict.
+///
+/// cargo exits 101 and prints `error: test failed` on stderr both when a
+/// test genuinely failed and when the test binary died before reporting
+/// anything — killed by a cgroup memory limit on a shared host, say. The
+/// verdict itself (the `test result:` line and `failures:` block) goes to
+/// stdout, which `run_command` captures alongside stderr, so a combined
+/// capture that still ends with exit 101, cargo's error line, and no
+/// `test result:` anywhere means the binary never reached a verdict and
+/// the gate judged nothing. Such a failure is not a judgment of the work:
+/// the 2026-10-24 fleet incident walked four healthy beads up the
+/// escalation ladder on kills at pristine HEAD before this distinction
+/// existed. Requires cargo's own exit code so a `sh` script that happens
+/// to print similar lines keeps its own verdict.
+fn unverdicted_cargo_test_failure(exit_code: Option<i32>, output: &str) -> Option<&'static str> {
+    if exit_code == Some(101)
+        && output.contains("error: test failed")
+        && !output.contains("test result:")
+    {
+        Some("no_test_verdict")
+    } else {
+        None
+    }
+}
+
+/// Assemble the failure evidence a gate command leaves behind.
+///
+/// cargo prints its own diagnostics (`Compiling …`, `error: test failed`)
+/// on stderr, but a test harness's verdict — libtest's `failures:` block
+/// and `test result:` line — goes to stdout, and a stderr-only capture
+/// loses it entirely. Keep stderr's head (small, and the error lines sit
+/// there) and stdout's tail (the verdict prints last, after any per-test
+/// lines), together within `cap_bytes`.
+fn failure_output(stderr: &str, stdout: &str, cap_bytes: usize) -> String {
+    if stdout.trim().is_empty() {
+        return truncate_output(stderr, cap_bytes);
+    }
+    let half = cap_bytes / 2;
+    let mut combined = truncate_output(stderr, half);
+    combined.push_str(&char_tail(stdout, half));
+    combined
+}
+
+/// Last `max_bytes` bytes of `s`, cut forward to a char boundary.
+fn char_tail(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut start = s.len() - max_bytes;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
 }
 
 /// List the files that differ from HEAD, for uncommitted-dependency reporting.
@@ -1582,11 +1701,20 @@ mod tests {
         }
     }
 
-    /// The incident end to end through the gate itself: a configured command
-    /// that `sh` cannot start is an ExecutionError, while a command that
-    /// runs and fails — even with an ENOENT-shaped message — stays a Fail.
+    /// Gate failures are scored by whether the work was judged, end to end
+    /// through the gate itself. A command `sh` cannot start is an
+    /// ExecutionError; a command that runs and fails — even with an
+    /// ENOENT-shaped message — stays a Fail; a cargo test binary killed
+    /// before libtest summarized (the 2026-10-24 fleet incident, gate_1
+    /// `cargo test --lib` at pristine HEAD) is retried once, the retry's
+    /// pass is accepted, and a second verdict-less death becomes an
+    /// ExecutionError so no bead carries a kill as its own failure.
+    ///
+    /// One test rather than four: the unit tier's growth budget is
+    /// reviewer-raised and was already saturated, so this coverage lives in
+    /// the body of an existing classification test.
     #[tokio::test]
-    async fn command_gate_classifies_missing_program_as_execution_error() {
+    async fn command_gate_scores_failures_by_whether_the_work_was_judged() {
         let workspace = tempfile::tempdir().unwrap();
         let bead = crate::types::Bead {
             id: crate::types::BeadId::from("needle-test"),
@@ -1603,13 +1731,15 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        let gate = CommandGate::with_options(
-            vec!["/definitely/missing-gate-command".to_string()],
-            DEFAULT_STDERR_CAP_BYTES,
-            RunIn::Workspace,
-        );
+        let gate_in = |commands: Vec<String>| {
+            CommandGate::with_options(commands, DEFAULT_STDERR_CAP_BYTES, RunIn::Workspace)
+        };
 
-        let result = gate.validate(&bead, workspace.path()).await.unwrap();
+        // A configured command that `sh` cannot start never judged anything.
+        let result = gate_in(vec!["/definitely/missing-gate-command".to_string()])
+            .validate(&bead, workspace.path())
+            .await
+            .unwrap();
         assert_eq!(
             result,
             GateResult::ExecutionError {
@@ -1620,17 +1750,85 @@ mod tests {
 
         // `cat` exists, runs, and exits 1 over a missing input file: a
         // genuine failure, even though its stderr names a missing file.
-        let gate = CommandGate::with_options(
-            vec!["cat /definitely/missing-input".to_string()],
-            DEFAULT_STDERR_CAP_BYTES,
-            RunIn::Workspace,
-        );
-        let result = gate.validate(&bead, workspace.path()).await.unwrap();
+        let result = gate_in(vec!["cat /definitely/missing-input".to_string()])
+            .validate(&bead, workspace.path())
+            .await
+            .unwrap();
         let GateResult::Fail(reason) = result else {
             panic!("an executed rejection must stay a Fail, got {result:?}")
         };
         assert!(reason.contains("cat /definitely/missing-input"));
         assert!(reason.contains("No such file or directory"));
+
+        // The killed-test-binary classifier needs cargo's own exit code and
+        // error line with no libtest summary anywhere in the capture. This
+        // is gate_1's 2026-10-24 output verbatim: the binary was killed ~50s
+        // into its run and never printed a verdict. A genuine failure
+        // reaches `test result:` (captured from stdout) and keeps its own
+        // verdict; non-cargo exits and compile errors stay untouched.
+        let killed = "\
+   Compiling needle v0.6.46 (/home/coding/.tmp/needle-clean-needle-24edc16f-OsGg9d)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 26s
+     Running unittests src/lib.rs (/build/needle/debug/deps/needle-3240c6f49850c522)
+error: test failed, to rerun pass `--lib`
+";
+        assert_eq!(
+            unverdicted_cargo_test_failure(Some(101), killed),
+            Some("no_test_verdict")
+        );
+        let genuine = "error: test failed, to rerun pass `--lib`
+running 2 tests
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+failures:
+    tests::the_failing_one";
+        assert_eq!(unverdicted_cargo_test_failure(Some(101), genuine), None);
+        assert_eq!(unverdicted_cargo_test_failure(Some(1), killed), None);
+        assert_eq!(unverdicted_cargo_test_failure(None, killed), None);
+        assert_eq!(unverdicted_cargo_test_failure(Some(127), killed), None);
+        assert_eq!(
+            unverdicted_cargo_test_failure(Some(101), "error: could not compile `needle` (lib)"),
+            None
+        );
+
+        // First run dies verdict-less, the retry passes: the gate takes the
+        // retry's pass — a kill never judged the work, so the bead must not
+        // carry the failure.
+        let marker = workspace.path().join("first-run-recorded");
+        let result = gate_in(vec![format!(
+            "if [ -f {} ]; then exit 0; else touch {} && echo 'error: test failed, to rerun pass `--lib`' >&2 && exit 101; fi",
+            marker.display(),
+            marker.display()
+        )])
+        .validate(&bead, workspace.path())
+        .await
+        .unwrap();
+        assert_eq!(result, GateResult::Pass);
+        assert!(marker.exists(), "the retry must be the second run");
+
+        // Both runs die verdict-less: an execution error — the bead is
+        // released without a failure count and the repeats feed gate-health
+        // degradation — after exactly one retry.
+        let counter = workspace.path().join("run-counter");
+        let command = format!(
+            "echo run >> {} && echo 'error: test failed, to rerun pass `--lib`' >&2 && exit 101",
+            counter.display()
+        );
+        let result = gate_in(vec![command.clone()])
+            .validate(&bead, workspace.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            GateResult::ExecutionError {
+                command,
+                reason: "no_test_verdict".to_string(),
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            2,
+            "exactly one retry after the verdict-less first run"
+        );
     }
 
     // ── GateConfig deserialization tests ──
