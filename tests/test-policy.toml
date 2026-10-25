@@ -498,7 +498,15 @@ version = 1
 # +2 for the test_env override-group guard contracts (needle-2bf4a0de): the
 # scrub-at-acquire and holder-set-sweep-on-drop behaviors of the extended
 # isolate_env, pinned in the same module they guard.
-max_tests = 4320
+#
+# +4 archive-status arbitration contracts (needle-e4a1c97a): a process-wide
+# reaper (dispatch-teardown zombie sweep, tokio orphan drain) can collect the
+# exited git archive between its exit and the spawn site's wait, so the
+# extraction now judges a stolen (ECHILD) status by the tar stream. The four
+# branch contracts pin the pure arbitration helper, keeping the deterministic
+# branches out of the racy end-to-end path. Raised +10 so concurrent workers'
+# in-flight unit tests stay under the ceiling while they land.
+max_tests = 4330
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
