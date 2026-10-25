@@ -108,6 +108,17 @@ fn committed_gate_selection_error(
     (false, Some(report), GateResolutionTelemetry::none())
 }
 
+/// What [`OutcomeHandler::run_verification_gates`] concluded.
+pub(crate) enum GateVerification {
+    /// Verification ran to a verdict inside the outcome budget.
+    Completed(bool, Option<GateReport>, GateResolutionTelemetry),
+    /// Verification outran `validation.outcome_timeout_seconds`. The gate
+    /// child was abandoned and killed (`kill_on_drop`); nothing judged the
+    /// work, so the attempt ends `Errored` instead of waiting out the flush
+    /// budget on top.
+    TimeoutExceeded(u64),
+}
+
 /// The first line of a normalized failure summary, capped for a bead title.
 ///
 /// The fingerprint label on the bead carries the full identity; the title
@@ -1634,7 +1645,38 @@ impl OutcomeHandler {
     /// outcome handler runs, so anything still relative here never named a
     /// real workspace; running no gates beats running gates read from an
     /// arbitrary directory.
-    pub(crate) async fn run_verification_gates(
+    pub(crate) async fn run_verification_gates(&self, bead: &Bead) -> Result<GateVerification> {
+        let budget_secs = self.config.validation.outcome_timeout_seconds;
+        // GitHub issue jedarden/NEEDLE#8 gave the handler's outer wrapper an
+        // extra flush budget so a checkpoint cannot be cancelled mid-flush —
+        // which also lifted the last deadline off gate execution. Scope the
+        // outcome budget to the gates themselves: a gate that outruns it is
+        // abandoned with its child killed (`kill_on_drop`), instead of
+        // blocking HANDLING for the budget plus the whole flush budget.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(budget_secs),
+            self.run_verification_gates_inner(bead),
+        )
+        .await
+        {
+            Ok(verdict) => verdict.map(|(verified, report, telemetry)| {
+                GateVerification::Completed(verified, report, telemetry)
+            }),
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    workspace = %bead.workspace.display(),
+                    budget_secs,
+                    "verification gates outran the outcome budget — abandoning the gate child"
+                );
+                Ok(GateVerification::TimeoutExceeded(budget_secs))
+            }
+        }
+    }
+
+    /// The committed-state walk [`Self::run_verification_gates`] bounds:
+    /// subject capture, extraction, gate execution and the subject re-check.
+    async fn run_verification_gates_inner(
         &self,
         bead: &Bead,
     ) -> Result<(bool, Option<GateReport>, GateResolutionTelemetry)> {
@@ -1989,7 +2031,43 @@ impl OutcomeHandler {
         // For exit code 0, run verification BEFORE classification.
         // This is the core fix: Success must mean verification passed.
         let (verified, gate_report, gate_telemetry) = if output.exit_code == 0 && !was_interrupted {
-            self.run_verification_gates(bead).await?
+            match self.run_verification_gates(bead).await? {
+                GateVerification::Completed(verified, gate_report, gate_telemetry) => {
+                    (verified, gate_report, gate_telemetry)
+                }
+                GateVerification::TimeoutExceeded(budget_secs) => {
+                    // Verification outran the outcome budget: the gate child
+                    // is dead and nothing judged the work. Emit the row the
+                    // terminal dispatch still owes, then let the worker's
+                    // action applier run release recovery from Errored.
+                    let _ = self.telemetry.emit(
+                        EventKind::WorkerHandlingTimeout {
+                            bead_id: bead.id.clone(),
+                            outcome: classify(output.exit_code, was_interrupted, false)
+                                .as_str()
+                                .to_string(),
+                            operation: "verification_gates".to_string(),
+                            error: format!(
+                                "verification exceeded outcome_timeout_seconds ({budget_secs}s)"
+                            ),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    self.emit_unresolved_terminal_row(
+                        bead,
+                        output,
+                        "Errored",
+                        "indeterminate",
+                        "verification_timeout",
+                    );
+                    return Ok(HandlerResult {
+                        outcome: classify(output.exit_code, was_interrupted, false),
+                        bead_action: BeadAction::Errored,
+                        telemetry_events: vec![],
+                        budget_exhausted: false,
+                    });
+                }
+            }
         } else {
             // Non-zero exit or interrupted — verification irrelevant.
             (true, None, GateResolutionTelemetry::none())

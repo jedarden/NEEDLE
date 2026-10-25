@@ -548,8 +548,8 @@ fn subject_execution_error(error: impl std::fmt::Display) -> GateResult {
 /// closure accepted.
 ///
 /// `validate` is async so a slow gate is a genuine `.await` yield point:
-/// `OutcomeHandler::handle_with_cancellation`'s `tokio::time::timeout` can
-/// only preempt a future at such a point (see bf-3saat) — a synchronous,
+/// the outcome-budget deadline in `OutcomeHandler::run_verification_gates`
+/// can only preempt a future at such a point (see bf-3saat) — a synchronous,
 /// blocking implementation would let the configured
 /// `validation.outcome_timeout_seconds` observe a slow gate only after the
 /// fact, never actually cut it off.
@@ -1097,12 +1097,12 @@ impl CommandGate {
     ///
     /// Uses `tokio::process::Command` (not `std::process::Command`) with
     /// `kill_on_drop(true)`: this makes the command a genuine `.await` yield
-    /// point, so `OutcomeHandler::handle_with_cancellation`'s
-    /// `tokio::time::timeout` can actually abandon and kill a gate command
-    /// that outruns `validation.outcome_timeout_seconds`, instead of only
-    /// observing after the fact that it ran too long (see bf-3saat — a
-    /// blocking `std::process::Command` call has no yield point, so a
-    /// wrapping timeout can never preempt it mid-command).
+    /// point, so the outcome-budget deadline in
+    /// `OutcomeHandler::run_verification_gates` can actually abandon and
+    /// kill a gate command that outruns `validation.outcome_timeout_seconds`,
+    /// instead of only observing after the fact that it ran too long (see
+    /// bf-3saat — a blocking `std::process::Command` call has no yield
+    /// point, so a wrapping timeout can never preempt it mid-command).
     async fn run_command(
         &self,
         cmd: &str,

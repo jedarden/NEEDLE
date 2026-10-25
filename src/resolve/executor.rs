@@ -944,7 +944,26 @@ impl GuardedApplier<'_> {
         // exactly the rules that workspace declares.
         let (verified, gate_report, gate_telemetry) =
             match self.outcome.run_verification_gates(bead).await {
-                Ok(result) => result,
+                Ok(crate::outcome::GateVerification::Completed(
+                    verified,
+                    gate_report,
+                    gate_telemetry,
+                )) => (verified, gate_report, gate_telemetry),
+                Ok(crate::outcome::GateVerification::TimeoutExceeded(budget_secs)) => {
+                    // The outcome budget killed the gate child: nothing judged
+                    // the work. Release without penalty; the error is reported.
+                    return self
+                        .mutation_failure(
+                            store,
+                            bead,
+                            actor,
+                            "gate resolution",
+                            anyhow::anyhow!(
+                                "verification exceeded outcome_timeout_seconds ({budget_secs}s)"
+                            ),
+                        )
+                        .await;
+                }
                 Err(error) => {
                     // Gates could not even be resolved: nothing judged the work.
                     // Release without penalty; the error is reported.

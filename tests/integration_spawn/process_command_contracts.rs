@@ -3491,11 +3491,28 @@ fn resolution_process_contracts_complete() -> ResolveDecision {
     }
 }
 
+/// A workspace whose gate config is committed. Gate selection reads the
+/// committed tree only — `GateSubject::capture` needs a Git repo with a
+/// HEAD — so a gate fixture is a repository with `.needle.yaml` committed,
+/// not merely a directory holding one.
+fn committed_gate_fixture(yaml: &str) -> TempDir {
+    let workspace = TempDir::new().expect("create gate fixture");
+    fs::write(workspace.path().join(".needle.yaml"), yaml).expect("write gate fixture");
+    git_ok(workspace.path(), &["init", "-q"]);
+    git_ok(
+        workspace.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git_ok(workspace.path(), &["config", "user.name", "Needle Test"]);
+    git_ok(workspace.path(), &["add", ".needle.yaml"]);
+    git_ok(workspace.path(), &["commit", "-q", "-m", "gate fixture"]);
+    workspace
+}
+
 fn resolution_process_contracts_workspace(commands: &[String]) -> (TempDir, Bead) {
-    let workspace = TempDir::new().expect("create gate workspace");
     let yaml = serde_yaml::to_string(&serde_json::json!({ "verification": commands }))
         .expect("serialize gate fixture");
-    fs::write(workspace.path().join(".needle.yaml"), yaml).expect("write gate fixture");
+    let workspace = committed_gate_fixture(&yaml);
     let bead = test_bead(workspace.path(), BeadStatus::InProgress);
     (workspace, bead)
 }
@@ -4032,12 +4049,9 @@ async fn resolution_process_contracts_outcome_rejects_and_reopens_failed_gates()
 async fn resolution_process_contracts_outcome_short_circuits_workspace_gates() {
     let home = TempDir::new().expect("create isolated HOME");
     let _home = HomeGuard::set(home.path());
-    let workspace = TempDir::new().expect("create gate workspace");
-    fs::write(
-        workspace.path().join(".needle.yaml"),
+    let workspace = committed_gate_fixture(
         "gates:\n  - type: command\n    run_in: workspace\n    commands:\n      - touch first-ran\n      - exit 42\n      - touch must-not-run\n",
-    )
-    .expect("write gate config");
+    );
     let bead = test_bead(workspace.path(), BeadStatus::InProgress);
     let store = TestStore::new(bead.clone());
     let mut config = Config::default();
@@ -4063,12 +4077,9 @@ async fn resolution_process_contracts_outcome_short_circuits_workspace_gates() {
 async fn resolution_process_contracts_outcome_releases_missing_path_without_penalty() {
     let home = TempDir::new().expect("create isolated HOME");
     let _home = HomeGuard::set(home.path());
-    let workspace = TempDir::new().expect("create gate workspace");
-    fs::write(
-        workspace.path().join(".needle.yaml"),
+    let workspace = committed_gate_fixture(
         "gates:\n  - type: command\n    run_in: workspace\n    commands:\n      - scripts/definition-of-done.sh --fast\n",
-    )
-    .expect("write gate config");
+    );
     let bead = test_bead(workspace.path(), BeadStatus::InProgress);
     let mut config = Config::default();
     config.worker.enforce_shipped_work = false;
@@ -4103,12 +4114,9 @@ async fn resolution_process_contracts_outcome_releases_missing_path_without_pena
 async fn nt46_split_template_success_resolves_decomposed_and_keeps_gate_results() {
     let home = TempDir::new().expect("create isolated HOME");
     let _home = HomeGuard::set(home.path());
-    let workspace = TempDir::new().expect("create gate workspace");
-    fs::write(
-        workspace.path().join(".needle.yaml"),
+    let workspace = committed_gate_fixture(
         "gates:\n  - type: command\n    run_in: workspace\n    commands:\n      - \"true\"\n",
-    )
-    .expect("write gate config");
+    );
     let bead = test_bead(workspace.path(), BeadStatus::InProgress);
     let store = TestStore::new(test_bead(workspace.path(), BeadStatus::Done));
     let mut config = Config::default();
