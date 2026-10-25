@@ -9741,8 +9741,10 @@ mod tests {
     #[tokio::test]
     async fn fallback_verifier_timeout_and_stderr_cap_are_enforced() {
         // Real runtime, real child, real extraction: a verifier that outruns
-        // the standard gate timeout (`validation.outcome_timeout_seconds`) is
-        // killed, and the run is a could-not-run GateError, not a verdict.
+        // `validation.outcome_timeout_seconds` is killed by the walk-level
+        // deadline in `run_verification_gates` — it arms before the
+        // verifier's own per-gate timeout can — and the run ends unjudged
+        // (`Errored`), not as a could-not-run GateError with a report.
         //
         // `pytest.ini` selects `pytest -q` and no host pytest is depended on:
         // a stub `pytest` at the front of PATH hangs, so the only way this
@@ -9786,24 +9788,26 @@ mod tests {
             .await
             .unwrap();
 
+        // The outcome-budget deadline in `run_verification_gates` fires
+        // before the verifier's own per-gate timeout can: the whole gates
+        // walk is abandoned with the child killed, so nothing judged the
+        // work. `classify` scores an unverified exit 0 as `Failure`; the
+        // bead action is still the unjudged `Errored` release, not a
+        // GateError release, which would require a report from the gate.
         assert_eq!(result.outcome, Outcome::Failure);
-        assert!(
-            matches!(
-                result.bead_action,
-                BeadAction::Released(ReleaseReason::AgentNotFound)
-            ),
-            "a timed-out verifier could not produce a verdict — the GateError \
-             route releases without a penalty, got {:?}",
-            result.bead_action
-        );
+        assert_eq!(result.bead_action, BeadAction::Errored);
         helper.sync().await;
-        let errors = helper.events_by_type("gate.execution_error");
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(rows.len(), 1, "the timed-out dispatch still gets one row");
+        assert_eq!(rows[0].data["outcome"], "indeterminate");
+        assert_eq!(rows[0].data["terminal_reason"], "verification_timeout");
+        let timeouts = helper.events_by_type("worker.handling.timeout");
         assert!(
-            errors.iter().any(|e| e.data["reason"]
+            timeouts.iter().any(|e| e.data["operation"]
                 .as_str()
-                .is_some_and(|reason| reason.contains("timed out"))),
-            "the gate execution error must say the verifier timed out: {:?}",
-            errors.iter().map(|e| &e.data).collect::<Vec<_>>()
+                .is_some_and(|op| op == "verification_gates")),
+            "the deadline event must name the gates walk: {:?}",
+            timeouts.iter().map(|e| &e.data).collect::<Vec<_>>()
         );
     }
 
