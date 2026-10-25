@@ -261,20 +261,73 @@ fn extract_git_archive_with_commands(
     let tar_error = tar_diagnostics.join().unwrap_or_default();
     let git_error = git_diagnostics.join().unwrap_or_default();
     let tar_status = tar_status.context("failed to wait for tar extraction")?;
-    let archive_status = archive_status.context("failed to wait for git archive")?;
+    let archive_status = arbitrate_stolen_archive_status(tar_status.success(), archive_status)?;
     if !tar_status.success() {
         anyhow::bail!(
             "tar extraction failed: {}",
             String::from_utf8_lossy(&tar_error).trim()
         );
     }
-    if !archive_status.success() {
-        anyhow::bail!(
-            "git archive failed: {}",
-            String::from_utf8_lossy(&git_error).trim()
-        );
+    if let Some(archive_status) = archive_status {
+        if !archive_status.success() {
+            anyhow::bail!(
+                "git archive failed: {}",
+                String::from_utf8_lossy(&git_error).trim()
+            );
+        }
     }
     Ok(())
+}
+
+/// Arbitrate the archive child's exit status against the tar result.
+///
+/// A process-wide child reaper (the dispatch-teardown zombie sweep, tokio's
+/// orphan drain) can collect an exited child in the window between its exit
+/// and this spawn site's `wait` — a window the zombie sweep's own module
+/// docs call never-zero — and the exit status is then gone: the `wait`
+/// returns `ECHILD`. In a process running many concurrent dispatches, or in
+/// the parallel lib test binary, that stolen status turned a completed
+/// extraction into a spurious `failed to wait for git archive` failure.
+///
+/// The tar stream is the arbiter, not the archive's status: `git archive`
+/// either emits a complete tar, whose end-of-archive marker tar validates,
+/// or dies leaving a truncated stream tar rejects. So when tar exited
+/// successfully, the extraction demonstrably received a full archive and
+/// the stolen status carries no information; failing on it would report a
+/// defect that never happened. When tar failed, tar's own diagnostics are
+/// the report and the archive side is moot. Any other wait error is
+/// surfaced unchanged.
+#[cfg(unix)]
+fn arbitrate_stolen_archive_status(
+    tar_success: bool,
+    archive_status: std::io::Result<std::process::ExitStatus>,
+) -> Result<Option<std::process::ExitStatus>> {
+    match archive_status {
+        Ok(status) => Ok(Some(status)),
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+            tracing::warn!(
+                tar_success,
+                "git archive exit status was collected by a concurrent \
+                 process-wide reaper before this wait; judging the \
+                 extraction by the tar stream instead"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error).context("failed to wait for git archive"),
+    }
+}
+
+/// Non-unix platforms do not report `ECHILD` from `Child::wait`; the status
+/// is always present and the archive's own verdict stands.
+#[cfg(not(unix))]
+fn arbitrate_stolen_archive_status(
+    tar_success: bool,
+    archive_status: std::io::Result<std::process::ExitStatus>,
+) -> Result<Option<std::process::ExitStatus>> {
+    let _ = tar_success;
+    archive_status
+        .map(Some)
+        .context("failed to wait for git archive")
 }
 
 fn drain_diagnostics(mut stderr: impl std::io::Read) -> Vec<u8> {
@@ -374,6 +427,44 @@ mod tests {
         );
         assert!(!target.path().join("untracked.txt").exists());
         assert!(!target.path().join(".git").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stolen_archive_status_with_successful_tar_still_extracts_successfully() {
+        let stolen = Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+        let status = arbitrate_stolen_archive_status(true, stolen).unwrap();
+        assert!(status.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stolen_archive_status_with_failed_tar_keeps_the_tar_verdict() {
+        let stolen = Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+        let status = arbitrate_stolen_archive_status(false, stolen).unwrap();
+        // The caller reports the tar failure; the archive side is moot.
+        assert!(status.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_echild_wait_error_still_fails_the_extraction() {
+        let broken = Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        let error = arbitrate_stolen_archive_status(true, broken);
+        assert_eq!(
+            error.unwrap_err().to_string(),
+            "failed to wait for git archive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_present_archive_status_is_returned_unchanged() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let failed = std::process::ExitStatus::from_raw(0x100); // exit code 1
+        let status = arbitrate_stolen_archive_status(true, Ok(failed)).unwrap();
+        assert!(!status.unwrap().success());
     }
 
     #[cfg(unix)]
