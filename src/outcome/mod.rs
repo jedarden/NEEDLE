@@ -10441,8 +10441,9 @@ mod tests {
         // A bead store whose `show()` genuinely sleeps (a real .await yield
         // point, unlike a blocking `std::process::Command` gate — see below)
         // for 3s, with a 1s outcome budget and a 1s flush allowance. The
-        // outer handler deadline is 2s, leaving both configured budgets but
-        // still bounding an operation that never reaches a flush.
+        // walk-level outcome budget bounds the slow `show()` inside the
+        // verification walk itself: the walk is abandoned at 1s unjudged
+        // instead of stacking the flush allowance on top of the budget.
         //
         // Note: this deliberately does NOT use a slow `verification:` gate
         // command to trigger the timeout. `CommandGate::run_command` calls
@@ -10480,7 +10481,7 @@ mod tests {
             .unwrap();
         let elapsed = start.elapsed();
 
-        assert_eq!(elapsed, std::time::Duration::from_secs(2));
+        assert_eq!(elapsed, std::time::Duration::from_secs(1));
         assert_eq!(result.bead_action, BeadAction::Errored);
         assert!(result.telemetry_events.is_empty());
     }
@@ -11185,16 +11186,17 @@ mod tests {
         assert_row_satisfies_v1_contract("cancelled dispatch", &rows[0]);
     }
 
-    /// A handler that is torn down by its own timeout must not leave the
-    /// dispatch without a ledger row — and if the aborted `handle` had already
-    /// emitted one, the fallback must not add a second.
+    /// A verification walk abandoned by the outcome budget must not leave the
+    /// dispatch without a ledger row — the TimeoutExceeded arm emits the row
+    /// the terminal dispatch still owes, exactly once.
     #[tokio::test(start_paused = true)]
     async fn attempt_resolved_row_exists_when_the_handler_times_out() {
         let (_guard, _home) = isolated_home();
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
         // `handle_success` goes straight to `store.show()`, which sleeps 3s —
-        // the 2s handler timeout fires and drops the `handle` future.
+        // inside the verification walk, so the walk-level outcome budget (1s)
+        // fires and the TimeoutExceeded arm emits the row itself.
         config.validation.outcome_timeout_seconds = 1;
         config.validation.store_flush_timeout_seconds = 1;
         let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
@@ -11221,7 +11223,7 @@ mod tests {
             rows[0].data["outcome"], "indeterminate",
             "no verdict was reached: the attempt is indeterminate, not a work failure"
         );
-        assert_eq!(rows[0].data["terminal_reason"], "outcome_handler_timeout");
+        assert_eq!(rows[0].data["terminal_reason"], "verification_timeout");
         assert_eq!(rows[0].data["attempt_id"], attempt_id);
         assert_row_satisfies_v1_contract("handler timeout", &rows[0]);
     }
@@ -11459,8 +11461,9 @@ mod tests {
         assert_eq!(rows[2].data["terminal_reason"], "outcome_handler_error");
         assert_row_satisfies_v1_contract("errored after resolved", &rows[2]);
 
-        // Cycle 4 is torn down by the handler timeout. Pause the clock for
-        // the deliberate 3s `show()` and narrow the two budgets to 1s each.
+        // Cycle 4 is abandoned by the walk-level outcome budget. Pause the
+        // clock for the deliberate 3s `show()` and narrow the budgets to 1s;
+        // verification_timeout is the reason string that path emits now.
         tokio::time::pause();
         handler.config.validation.outcome_timeout_seconds = 1;
         handler.config.validation.store_flush_timeout_seconds = 1;
@@ -11480,7 +11483,7 @@ mod tests {
             "a timed-out dispatch after a resolved one still gets its own row, got {rows:?}"
         );
         assert_eq!(rows[3].data["outcome"], "indeterminate");
-        assert_eq!(rows[3].data["terminal_reason"], "outcome_handler_timeout");
+        assert_eq!(rows[3].data["terminal_reason"], "verification_timeout");
         assert_row_satisfies_v1_contract("timed out after resolved", &rows[3]);
     }
 }
