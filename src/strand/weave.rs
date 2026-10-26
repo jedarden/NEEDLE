@@ -36,6 +36,7 @@ use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, InputMethod, StrandResult};
 
 mod candidate_filter;
+mod source_priority;
 
 /// Keep generated prompts comfortably below model context limits after the
 /// agent adds repository instructions and other harness context of its own.
@@ -575,6 +576,26 @@ impl WeaveStrand {
             return StrandResult::NoWork;
         }
 
+        // A quiet workspace with no recent change and no conventional plan
+        // has no admissible source for a Weave proposal.
+        let source_inventory = source_priority::SourceInventory::discover(&self.workspace);
+        if source_inventory.is_empty() {
+            tracing::info!(
+                workspace = %self.workspace.display(),
+                recent_changes = source_inventory.recent_changes().len(),
+                has_plan = source_inventory.has_plan(),
+                "weave strand: no admissible source; skipping the model call"
+            );
+            let _ = self.telemetry.emit(
+                EventKind::StrandSkipped {
+                    strand_name: "weave".to_string(),
+                    reason: "no_admissible_source".to_string(),
+                },
+                Utc::now(),
+            );
+            return StrandResult::NoWork;
+        }
+
         // Discover documentation files.
         let doc_files = self.discover_doc_files();
         if doc_files.is_empty() {
@@ -733,6 +754,23 @@ impl WeaveStrand {
                     continue;
                 }
             };
+
+            // Generic test and documentation proposals require a dated defect
+            // or a citation of the conventional plan.
+            if let Err(rejection) = candidate_filter::classify_candidate(
+                &proposed_bead.title,
+                &evidence,
+                &source_inventory,
+            ) {
+                self.emit_candidate_dropped(
+                    rejection.reason,
+                    &proposed_bead.title,
+                    None,
+                    None,
+                    rejection.detail,
+                );
+                continue;
+            }
 
             // Clamp priority to valid range.
             let priority = proposed_bead.priority.clamp(1, 3);

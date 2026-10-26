@@ -15,17 +15,27 @@
 //!   confirm: a `file_line` whose quoted text is really on that line, a
 //!   `missing_artifact` that really is absent, or a `failing_command` with its
 //!   observed output. At least one item must point at something other than
-//!   the documentation Weave was given, and every cited item must verify. A
-//!   candidate that fails either rule is dropped, never filed.
+//!   the documentation Weave was given — a citation of the plan file counts,
+//!   it is the rank-2 source ([`super::source_priority`]) — and every cited
+//!   item must verify. A candidate that fails either rule is dropped, never
+//!   filed.
+//! - **Source priority** (needle-21c5e0a3). A generic "add tests" or
+//!   "improve documentation" candidate that cites no dated defect (a failing
+//!   command, or a citation in code a recent commit touched) and no plan
+//!   section is dropped as `generic_no_defect`. Every admissible candidate
+//!   is classified into the ranked source it draws from — dated defect,
+//!   plan gap, or bare code citation at HEAD ([`CandidateSource`]).
 //!
-//! Both filters are pure functions of the candidate, the workspace inventory,
-//! and the files on disk, so the same inputs always give the same verdict.
+//! All three filters are pure functions of the candidate, the workspace
+//! inventory, and the files on disk, so the same inputs always give the same
+//! verdict.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Duration, Utc};
 
+use super::source_priority;
 use crate::types::{Bead, BeadStatus};
 
 /// Heading under which verified evidence is appended to a filed bead body.
@@ -39,6 +49,9 @@ pub(crate) const REASON_DUPLICATE: &str = "duplicate";
 pub(crate) const REASON_NO_EVIDENCE: &str = "no_evidence";
 /// Telemetry reason: a cited item is malformed or the checkout contradicts it.
 pub(crate) const REASON_EVIDENCE_UNVERIFIED: &str = "evidence_unverified";
+/// Telemetry reason: a generic documentation or test/coverage proposal that
+/// cites no dated defect and no plan gap (needle-21c5e0a3).
+pub(crate) const REASON_GENERIC_NO_DEFECT: &str = "generic_no_defect";
 
 /// A cited file larger than this is not read; the citation does not verify.
 const MAX_EVIDENCE_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -293,13 +306,147 @@ pub(crate) enum VerifiedEvidence {
 
 impl VerifiedEvidence {
     /// Whether this item shows a gap in the code rather than in the docs.
+    ///
+    /// A line of the plan file is the exception: it is the rank-2 source, so
+    /// a plan citation qualifies a candidate on its own.
     fn qualifies(&self) -> bool {
         match self {
-            VerifiedEvidence::FileLine { documentation, .. } => !documentation,
+            VerifiedEvidence::FileLine {
+                path,
+                documentation,
+                ..
+            } => !documentation || source_priority::is_plan_file(path),
             VerifiedEvidence::MissingArtifact { .. } => true,
             VerifiedEvidence::FailingCommand { .. } => true,
         }
     }
+}
+
+// ─── Source priority (needle-21c5e0a3) ──────────────────────────────────────
+
+/// Where an admissible candidate draws from, in Weave's priority order.
+///
+/// The ordering is the ranking: dated defects file before plan gaps, plan
+/// gaps before bare code citations at HEAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CandidateSource {
+    /// Rank 1: tied to a dated defect — a failing command with observed
+    /// output, or a citation in code a recent commit touched.
+    DatedDefect,
+    /// Rank 2: cites the plan file; the gap is between
+    /// `docs/plan/plan.md` and what is built.
+    PlanGap,
+    /// Neither: a candidate that cites code at HEAD and is not a generic
+    /// documentation or test/coverage proposal. This is the pre-existing
+    /// evidence bar from needle-ddf36d66, filed last.
+    CodeAtHead,
+}
+
+/// The generic flavors a candidate must not carry without a defect or plan
+/// reference.
+#[derive(Debug, Clone, Copy)]
+enum GenericFlavor {
+    TestCoverage,
+    Documentation,
+}
+
+impl GenericFlavor {
+    fn label(&self) -> &'static str {
+        match self {
+            GenericFlavor::TestCoverage => "test/coverage",
+            GenericFlavor::Documentation => "documentation",
+        }
+    }
+}
+
+/// Titles too generic to file: test/coverage or documentation work.
+///
+/// Judged on the title only — a defect bead may legitimately promise tests
+/// or a doc touch in its body without the candidate *being* that kind of
+/// filler. A title carrying these words still files when its evidence cites
+/// a dated defect or a plan section; the flavor only decides bare proposals.
+fn generic_flavor(title: &str) -> Option<GenericFlavor> {
+    const TEST_COVERAGE_WORDS: &[&str] = &[
+        "test",
+        "tests",
+        "testing",
+        "testable",
+        "untested",
+        "uncovered",
+        "unittest",
+        "pytest",
+        "nextest",
+        "coverage",
+    ];
+    const DOCUMENTATION_WORDS: &[&str] = &[
+        "doc",
+        "docs",
+        "document",
+        "documenting",
+        "documented",
+        "documentation",
+        "readme",
+        "changelog",
+    ];
+    let lowercase = title.to_lowercase();
+    let words: HashSet<&str> = lowercase
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .collect();
+    if words.iter().any(|word| TEST_COVERAGE_WORDS.contains(word)) {
+        Some(GenericFlavor::TestCoverage)
+    } else if words.iter().any(|word| DOCUMENTATION_WORDS.contains(word)) {
+        Some(GenericFlavor::Documentation)
+    } else {
+        None
+    }
+}
+
+/// Classify a verified candidate against the ranked sources.
+///
+/// `verify_evidence` has already confirmed every cited item; this decides
+/// *which source* the candidate draws from and whether that source is
+/// admissible. A generic test/coverage or documentation candidate with no
+/// dated defect (failing command, or a citation in recently changed code)
+/// and no plan citation is rejected — measured across 6,937 proposals, that
+/// is the class that flooded the queue (needle-21c5e0a3).
+pub(crate) fn classify_candidate(
+    title: &str,
+    verified: &[VerifiedEvidence],
+    inventory: &source_priority::SourceInventory,
+) -> Result<CandidateSource, CandidateRejection> {
+    let plan_gap = verified.iter().any(|item| {
+        matches!(item, VerifiedEvidence::FileLine { path, .. }
+            if source_priority::is_plan_file(path))
+    });
+    let dated_defect = verified.iter().any(|item| match item {
+        VerifiedEvidence::FailingCommand { .. } => true,
+        VerifiedEvidence::FileLine {
+            path,
+            documentation,
+            ..
+        } => !*documentation && inventory.contains_recent_change(path),
+        VerifiedEvidence::MissingArtifact { path } => inventory.contains_recent_change(path),
+    });
+
+    if dated_defect {
+        return Ok(CandidateSource::DatedDefect);
+    }
+    if plan_gap {
+        return Ok(CandidateSource::PlanGap);
+    }
+    if let Some(flavor) = generic_flavor(title) {
+        return Err(CandidateRejection {
+            reason: REASON_GENERIC_NO_DEFECT,
+            detail: format!(
+                "generic {} proposal cites no dated defect or plan gap; \
+                 only a failing command, a citation in recently changed code, \
+                 or a {} section qualifies",
+                flavor.label(),
+                source_priority::PLAN_FILE
+            ),
+        });
+    }
+    Ok(CandidateSource::CodeAtHead)
 }
 
 /// Verify a candidate's `evidence` against the workspace checkout.
@@ -925,5 +1072,75 @@ mod tests {
         assert!(rendered.contains("- `src/auth.rs:4`: `todo!('x')`"));
         assert!(rendered.contains("- missing artifact: `tests/auth_refresh.rs`"));
         assert!(rendered.len() < 1_000, "observed output must be bounded");
+    }
+
+    fn inventory_with_recent_change() -> source_priority::SourceInventory {
+        source_priority::SourceInventory::fixture(&["src/lib.rs"])
+    }
+
+    #[test]
+    fn a_dated_defect_files_even_with_a_generic_title() {
+        let inventory = inventory_with_recent_change();
+        let failing = [VerifiedEvidence::FailingCommand {
+            command: "cargo test".to_string(),
+            observed: "1 failed".to_string(),
+        }];
+        assert!(matches!(
+            classify_candidate("Add more tests", &failing, &inventory),
+            Ok(CandidateSource::DatedDefect)
+        ));
+        let cited = [VerifiedEvidence::FileLine {
+            path: "src/lib.rs".to_string(),
+            line: 1,
+            quote: "fn main".to_string(),
+            documentation: false,
+        }];
+        assert!(matches!(
+            classify_candidate("Handle the empty input", &cited, &inventory),
+            Ok(CandidateSource::DatedDefect)
+        ));
+        // A missing artifact is dated when a recent commit touched its path.
+        let missing = [VerifiedEvidence::MissingArtifact {
+            path: "src/lib.rs".to_string(),
+        }];
+        assert!(matches!(
+            classify_candidate("Add more tests", &missing, &inventory),
+            Ok(CandidateSource::DatedDefect)
+        ));
+    }
+
+    #[test]
+    fn a_plan_citation_is_the_rank_2_source_and_beats_the_generic_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs/plan")).unwrap();
+        std::fs::write(dir.path().join("docs/plan/plan.md"), "# Plan\n").unwrap();
+        let inventory = source_priority::SourceInventory::discover(dir.path());
+        // doc_patterns cover docs/**/*, so this citation is documentation;
+        // the plan-file exception is what qualifies it.
+        let plan_line = [VerifiedEvidence::FileLine {
+            path: "docs/plan/plan.md".to_string(),
+            line: 1,
+            quote: "# Plan".to_string(),
+            documentation: true,
+        }];
+        assert!(matches!(
+            classify_candidate("Add more tests", &plan_line, &inventory),
+            Ok(CandidateSource::PlanGap)
+        ));
+    }
+
+    #[test]
+    fn a_generic_title_with_no_defect_or_plan_citation_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let inventory = source_priority::SourceInventory::discover(dir.path());
+        let bare_code = [VerifiedEvidence::FileLine {
+            path: "src/lib.rs".to_string(),
+            line: 1,
+            quote: "fn main".to_string(),
+            documentation: false,
+        }];
+        let rejection = classify_candidate("Add more tests", &bare_code, &inventory)
+            .expect_err("a bare generic proposal must be rejected");
+        assert_eq!(rejection.reason, REASON_GENERIC_NO_DEFECT);
     }
 }
