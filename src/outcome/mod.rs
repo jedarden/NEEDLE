@@ -11475,6 +11475,9 @@ mod tests {
             .handle_with_cancellation(&slow, &bead, &test_output(0), false, not_cancelled)
             .await
             .unwrap();
+        // The timeout is settled; let the telemetry writer acknowledge its
+        // flush against real time instead of Tokio's auto-advancing clock.
+        tokio::time::resume();
         helper.sync().await;
         let rows = helper.events_by_type("attempt.resolved");
         assert_eq!(
