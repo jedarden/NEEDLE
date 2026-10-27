@@ -25,7 +25,7 @@ use std::panic::catch_unwind;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -1935,14 +1935,24 @@ impl crate::telemetry::Sink for OtlpSink {
             }))
         });
 
-        // Wait for each flush with the hard deadline
-        // Use join_timeout pattern: sleep for deadline, then check if thread is finished
-        let (tracer_result, tracer_timed_out) =
-            self.join_with_timeout(tracer_handle, hard_deadline, "tracer");
-        let (meter_result, meter_timed_out) =
-            self.join_with_timeout(meter_handle, hard_deadline, "meter");
-        let (logger_result, logger_timed_out) =
-            self.join_with_timeout(logger_handle, hard_deadline, "logger");
+        // All providers share one deadline. A completed flush should not
+        // consume time merely because another provider is still exporting.
+        let deadline_at = Instant::now() + hard_deadline;
+        let (tracer_result, tracer_timed_out) = self.join_with_timeout(
+            tracer_handle,
+            deadline_at.saturating_duration_since(Instant::now()),
+            "tracer",
+        );
+        let (meter_result, meter_timed_out) = self.join_with_timeout(
+            meter_handle,
+            deadline_at.saturating_duration_since(Instant::now()),
+            "meter",
+        );
+        let (logger_result, logger_timed_out) = self.join_with_timeout(
+            logger_handle,
+            deadline_at.saturating_duration_since(Instant::now()),
+            "logger",
+        );
 
         // Collect providers that timed out
         let mut timed_out_providers = Vec::new();
@@ -2017,8 +2027,7 @@ impl OtlpSink {
     /// Helper to join a thread with a timeout.
     ///
     /// This is a synchronous timeout implementation since we're not in an async context.
-    /// The pattern is: spawn thread, sleep for deadline, check if done.
-    /// If not done, we consider it timed out and return an error.
+    /// Poll the handle until it finishes or the remaining deadline expires.
     ///
     /// Returns (result, timed_out) where timed_out is true if the thread did not
     /// complete within the deadline.
@@ -2033,30 +2042,30 @@ impl OtlpSink {
         timeout: Duration,
         name: &str,
     ) -> (anyhow::Result<()>, bool) {
-        // Sleep for the timeout duration
-        std::thread::sleep(timeout);
-
-        // Check if the thread is done
-        if handle.is_finished() {
-            // Thread is done, join it (should return immediately)
-            match handle.join() {
-                Ok(Ok(result)) => {
-                    // Convert OTelSdkError to anyhow::Error
-                    (result.map_err(|e| anyhow::anyhow!("{e}")), false)
-                }
-                Ok(Err(e)) => {
-                    warn!("OTLP {name} provider flush failed: {:?}", e);
-                    (Err(anyhow::anyhow!("{name} provider flush failed")), false)
-                }
-                Err(_) => {
-                    warn!("OTLP {name} provider flush panicked");
-                    (Ok(()), false)
-                }
+        let deadline_at = Instant::now() + timeout;
+        while !handle.is_finished() {
+            let remaining = deadline_at.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                warn!("OTLP {name} provider flush timed out after {timeout:?}");
+                return (Ok(()), true);
             }
-        } else {
-            // Thread is still running, consider it timed out
-            warn!("OTLP {name} provider flush timed out after {timeout:?}");
-            (Ok(()), true)
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+
+        // The provider finished within the shared deadline.
+        match handle.join() {
+            Ok(Ok(result)) => {
+                // Convert OTelSdkError to anyhow::Error
+                (result.map_err(|e| anyhow::anyhow!("{e}")), false)
+            }
+            Ok(Err(e)) => {
+                warn!("OTLP {name} provider flush failed: {:?}", e);
+                (Err(anyhow::anyhow!("{name} provider flush failed")), false)
+            }
+            Err(_) => {
+                warn!("OTLP {name} provider flush panicked");
+                (Ok(()), false)
+            }
         }
     }
 }

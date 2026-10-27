@@ -21,11 +21,14 @@ use tempfile::TempDir;
 
 const ADAPTER_NAME: &str = "claim-verification-probe";
 const WORKER_NAME: &str = "claim-verification-worker";
-const MARKER: &str = "needle-agent-spawned.log";
+// Timeout recovery cleans untracked workspace files, so keep the spawn marker
+// in the fixture's Git metadata for post-run assertions.
+const MARKER: &str = ".git/needle-agent-spawned.log";
 const QUERY_LOG: &str = ".needle-claim-query.log";
 #[cfg(feature = "otlp")]
 const OTLP_HEADER_ENV: &str = "NEEDLE_TEST_OTLP_HEADER_PROBE_0FFB7802";
-const FIXTURE_CLOSE_REASON: &str = r#"$'fixture agent completed\n\n```verified:\n```'"#;
+const FIXTURE_CLOSE_REASON: &str =
+    r#"$'fixture agent completed\n\n```verified:\nmake test exit=0\n```'"#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FixtureMode {
@@ -151,7 +154,7 @@ impl Fixture {
     }
 
     #[cfg(feature = "otlp")]
-    fn configure_otlp(&self, required: bool) {
+    fn configure_otlp(&self, required: bool, endpoint: &str) {
         let path = self.root.path().join(".config/needle/config.yaml");
         let config = fs::read_to_string(&path).expect("read isolated worker config");
         let disabled = "  otlp_sink:\n    enabled: false\n";
@@ -161,7 +164,7 @@ impl Fixture {
         );
         let required_field = if required { "    required: true\n" } else { "" };
         let enabled = format!(
-            "  otlp_sink:\n    enabled: true\n{required_field}    protocol: http\n    endpoint: http://127.0.0.1:9\n    headers:\n      - 'Authorization: env:{OTLP_HEADER_ENV}'\n"
+            "  otlp_sink:\n    enabled: true\n{required_field}    protocol: http\n    endpoint: {endpoint}\n    headers:\n      - 'Authorization: env:{OTLP_HEADER_ENV}'\n"
         );
         fs::write(path, config.replace(disabled, &enabled))
             .expect("enable OTLP in isolated worker config");
@@ -385,12 +388,13 @@ impl Fixture {
                 .args(["show", bead_id, "--json"]),
             "read fixture bead state",
         );
-        let records: Vec<Value> = serde_json::from_slice(&output.stdout)
-            .expect("bead show --json must return a JSON array");
-        records
-            .into_iter()
-            .next()
-            .expect("bead show --json must return the requested bead")
+        let record: Value = serde_json::from_slice(&output.stdout)
+            .expect("bead show --json must return a JSON object");
+        assert_eq!(
+            record["id"], bead_id,
+            "bead show --json must return the requested bead"
+        );
+        record
     }
 
     fn assert_open_and_unassigned(&self, workspace: &Path, bead_id: &str) {
@@ -562,6 +566,30 @@ fn init_git_workspace(workspace: &Path) {
             .current_dir(workspace)
             .args(["init", "-q"]),
         "initialize fixture git repository",
+    );
+    // The adapter only exercises claim routing; give close verification a
+    // committed, reproducible command to run in the extracted fixture.
+    fs::write(workspace.join("Makefile"), "test:\n\t@true\n")
+        .expect("write fixture verification target");
+    run_checked(
+        Command::new("git")
+            .current_dir(workspace)
+            .args(["add", "Makefile"]),
+        "stage fixture verification target",
+    );
+    run_checked(
+        Command::new("git").current_dir(workspace).args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "initialize fixture",
+        ]),
+        "create fixture gate subject",
     );
 }
 
@@ -1353,6 +1381,87 @@ fn subprocess_concurrent_workers_dispatch_once_with_distinct_claim_identities() 
 }
 
 #[cfg(feature = "otlp")]
+struct OtlpProbeServer {
+    endpoint: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "otlp")]
+impl OtlpProbeServer {
+    fn start() -> Self {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::Ordering;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated OTLP collector");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("read OTLP collector address")
+        );
+        listener
+            .set_nonblocking(true)
+            .expect("make OTLP collector stoppable");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                        let response = (|| -> std::io::Result<()> {
+                            let mut reader = BufReader::new(&mut stream);
+                            let mut content_length = 0_u64;
+                            loop {
+                                let mut line = String::new();
+                                if reader.read_line(&mut line)? == 0 {
+                                    return Ok(());
+                                }
+                                if line == "\r\n" || line == "\n" {
+                                    break;
+                                }
+                                if let Some((name, value)) = line.split_once(':') {
+                                    if name.eq_ignore_ascii_case("content-length") {
+                                        content_length = value.trim().parse().unwrap_or(0);
+                                    }
+                                }
+                            }
+                            std::io::copy(&mut reader.take(content_length), &mut std::io::sink())?;
+                            stream.write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                        })();
+                        assert!(
+                            response.is_ok(),
+                            "serve isolated OTLP request: {response:?}"
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept isolated OTLP request: {error}"),
+                }
+            }
+        });
+        Self {
+            endpoint,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+#[cfg(feature = "otlp")]
+impl Drop for OtlpProbeServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("join isolated OTLP collector");
+        }
+    }
+}
+
+#[cfg(feature = "otlp")]
 struct OtlpProbeChild(Option<std::process::Child>);
 
 #[cfg(feature = "otlp")]
@@ -1386,7 +1495,12 @@ fn run_otlp_probe(fixture: &Fixture, command: &mut Command) -> Output {
         {
             break status;
         }
-        assert!(Instant::now() < deadline, "isolated OTLP worker timed out");
+        assert!(
+            Instant::now() < deadline,
+            "isolated OTLP worker timed out: stdout={} stderr={}",
+            fs::read_to_string(&stdout_path).unwrap_or_default(),
+            fs::read_to_string(&stderr_path).unwrap_or_default()
+        );
         std::thread::sleep(Duration::from_millis(50));
     };
     child
@@ -1406,7 +1520,7 @@ fn run_otlp_probe(fixture: &Fixture, command: &mut Command) -> Output {
 #[test]
 fn otlp_header_degrade_contract_survives_worker_boot_and_claim() {
     let optional = Fixture::new(FixtureLayout::Local);
-    optional.configure_otlp(false);
+    optional.configure_otlp(false, "http://127.0.0.1:9");
     let output = run_otlp_probe(
         &optional,
         optional
@@ -1425,7 +1539,7 @@ fn otlp_header_degrade_contract_survives_worker_boot_and_claim() {
     optional.assert_booted_and_claimed();
 
     let required = Fixture::new(FixtureLayout::Local);
-    required.configure_otlp(true);
+    required.configure_otlp(true, "http://127.0.0.1:9");
     let output = run_otlp_probe(
         &required,
         required
@@ -1449,7 +1563,8 @@ fn otlp_header_degrade_contract_survives_worker_boot_and_claim() {
     required.assert_open_and_unassigned(&required.home_workspace, &required.home_bead_id);
 
     let present = Fixture::new(FixtureLayout::Local);
-    present.configure_otlp(false);
+    let collector = OtlpProbeServer::start();
+    present.configure_otlp(false, &collector.endpoint);
     let output = run_otlp_probe(
         &present,
         present
