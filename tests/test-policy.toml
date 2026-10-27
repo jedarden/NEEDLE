@@ -1042,6 +1042,13 @@ owner = "component:strand-unravel"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
 [[unit_exception]]
+path = "src/strand/weave.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-12591ddb"
+reason = "The Weave fixture needs a real temporary Git history to classify a missing artifact as a dated defect."
+
+[[unit_exception]]
 path = "src/tailscale_api.rs"
 kind = "global-env"
 max_occurrences = 2
