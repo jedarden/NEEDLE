@@ -1508,6 +1508,51 @@ mod tests {
             "# Test Project\n\nA test project.",
         )
         .unwrap();
+        std::fs::create_dir_all(workspace.join("docs/plan")).unwrap();
+        std::fs::write(workspace.join("docs/plan/plan.md"), "# Test Plan\n").unwrap();
+        // Give the workspace git history so a missing_artifact citation can
+        // be a dated defect: src/missing.rs is touched by a commit inside
+        // the 14-day lookback window and no longer exists at HEAD, which is
+        // what candidate_filter::classify_candidate requires before it will
+        // file a generic test/doc proposal.
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&workspace)
+                .args(["-c", "user.email=needle@example.test"])
+                .args(["-c", "user.name=needle-test"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let init = git(&["init", "-q"]);
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src/missing.rs"), "fn original() {}\n").unwrap();
+        let add = git(&["add", "src/missing.rs"]);
+        assert!(
+            add.status.success(),
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let commit = git(&["commit", "-q", "-m", "add src/missing.rs"]);
+        assert!(
+            commit.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        std::fs::remove_file(workspace.join("src/missing.rs")).unwrap();
+        let removal = git(&["commit", "-q", "-am", "remove src/missing.rs"]);
+        assert!(
+            removal.status.success(),
+            "git removal commit failed: {}",
+            String::from_utf8_lossy(&removal.stderr)
+        );
         (dir, workspace)
     }
 
