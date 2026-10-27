@@ -309,7 +309,7 @@ See [Investigations & Post-Mortems](#investigations--post-mortems) for:
 
 ## File Count Summary
 
-- **Total markdown files:** 201
+- **Total markdown files:** 200
 - **ADRs:** 34
 - **Research documents:** 18
 - **Operational notes:** 33
