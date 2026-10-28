@@ -124,8 +124,14 @@ impl Fixture {
         Ok(id)
     }
     fn show(&self, dir: &Path, id: &str) -> Result<Value> {
-        serde_json::from_slice(&self.bead(dir, &["show", id, "--json"])?.stdout)
-            .context("bead show JSON")
+        let output: Value =
+            serde_json::from_slice(&self.bead(dir, &["show", id, "--json"])?.stdout)
+                .context("bead show JSON")?;
+        match output {
+            Value::Array(mut rows) if rows.len() == 1 => Ok(rows.remove(0)),
+            Value::Object(_) => Ok(output),
+            _ => bail!("bead show did not return one object"),
+        }
     }
     fn needle(&self, args: &[&str]) -> Result<Output> {
         self.command(&self.root, &needle_binary(), args)

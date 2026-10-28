@@ -257,7 +257,7 @@ pub fn collect_report(root: &Path) -> Result<DedupeReport> {
             &workspace.path,
             &["list", "--status", "open", "--json", "--limit", "999999"],
         )?;
-        let beads: Vec<RawBead> = serde_json::from_slice(&raw)
+        let beads = parse_bead_list(&raw)
             .with_context(|| format!("cannot parse bead list for {}", workspace.path.display()))?;
         let proposals: Vec<Proposal> = beads
             .into_iter()
@@ -514,6 +514,35 @@ fn artifacts(title: &str, body: &str, pattern: &Regex, workspace: &Path) -> BTre
     paths
 }
 
+// bead-rs 0.2.6 prints one object per line for `list --json` (and `[]`
+// when empty); 0.3.0 prints one array. Both are active in fleet workspaces.
+fn parse_bead_list(raw: &[u8]) -> Result<Vec<RawBead>> {
+    let output = std::str::from_utf8(raw).context("bead list was not UTF-8")?;
+    if output.trim_start().starts_with('[') {
+        return serde_json::from_str(output).context("invalid bead list array");
+    }
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).context("invalid bead list JSONL row"))
+        .collect()
+}
+
+// bead-rs 0.2.6 wraps `show --json` in a one-element array; 0.3.0
+// returns the object directly.
+fn parse_bead_show(raw: &[u8]) -> Result<RawBead> {
+    let output = std::str::from_utf8(raw).context("bead show was not UTF-8")?;
+    if output.trim_start().starts_with('[') {
+        let mut rows: Vec<RawBead> =
+            serde_json::from_str(output).context("invalid bead show array")?;
+        if rows.len() != 1 {
+            bail!("bead show returned {} rows, expected one", rows.len());
+        }
+        return Ok(rows.remove(0));
+    }
+    serde_json::from_str(output).context("invalid bead show object")
+}
+
 fn bead_command(binary: &Path, workspace: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new(binary)
         .current_dir(workspace)
@@ -598,7 +627,7 @@ fn apply_group(group: &Group) -> Result<usize> {
     // independently carry their observed revisions to reject later races.
     for member in &group.members {
         let raw = bead_command(&binary, &group.workspace, &["show", &member.id, "--json"])?;
-        let current: RawBead = serde_json::from_slice(&raw)
+        let current = parse_bead_show(&raw)
             .with_context(|| format!("cannot parse current bead {}", member.id))?;
         if current.revision != member.revision {
             bail!(
