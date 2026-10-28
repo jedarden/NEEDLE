@@ -176,6 +176,7 @@ needle_slow_targets() {
     nt_contracts \
     adapter_smoke \
     gate_health_atomic_write \
+    proposal_backlog_dedupe \
     installer
 }
 
@@ -183,6 +184,7 @@ needle_cargo_selector() {
   case "$1" in
     adapter_smoke) printf '%s\n' --test adapter_smoke ;;
     gate_health_atomic_write) printf '%s\n' --test gate_health_atomic_write ;;
+    proposal_backlog_dedupe) printf '%s\n' --test proposal_backlog_dedupe ;;
     lib) printf '%s
 ' --lib ;;
     integration_spawn) printf '%s
@@ -210,6 +212,7 @@ needle_nextest_filter() {
   case "$1" in
     adapter_smoke) printf '%s\n' 'binary_id(=needle::adapter_smoke)' ;;
     gate_health_atomic_write) printf '%s\n' 'binary_id(=needle::gate_health_atomic_write)' ;;
+    proposal_backlog_dedupe) printf '%s\n' 'binary_id(=needle::proposal_backlog_dedupe)' ;;
     lib) printf '%s
 ' 'binary_id(=needle)' ;;
     integration_spawn) printf '%s

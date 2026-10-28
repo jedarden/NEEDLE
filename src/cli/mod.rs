@@ -36,6 +36,7 @@ pub mod file_contention;
 pub mod improvements;
 mod lesson;
 mod policy_doctor;
+pub mod proposals;
 #[cfg(test)]
 mod reconciliation_tests;
 
@@ -459,6 +460,12 @@ pub enum CliCommand {
         format: ListFormat,
     },
 
+    /// Review held proposals and close explicitly selected duplicate groups.
+    Proposals {
+        #[command(subcommand)]
+        command: proposals::ProposalsCommand,
+    },
+
     /// Run learning consolidation on demand.
     ///
     /// Reads bead close bodies since the last consolidation, extracts
@@ -832,6 +839,7 @@ pub fn run() -> Result<()> {
         CliCommand::Rollback => cmd_rollback(),
         CliCommand::Gates { workspace } => cmd_gates(workspace),
         CliCommand::HumanQueue { workspace, format } => cmd_human_queue(workspace, format),
+        CliCommand::Proposals { command } => proposals::run(command),
         CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
         CliCommand::Lesson { command } => match command {
             LessonCommand::Promote {

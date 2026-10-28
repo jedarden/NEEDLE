@@ -649,7 +649,8 @@ contract = 246
 # +2 zombie-child reap contracts in integration_spawn (needle-064b92ef): the
 # abandoned-git scan discovery and the isolated-process sweep reaping both
 # spawn real short-lived children and observe the process table.
-e2e = 862
+# +6 operator proposal-dedupe subprocess contracts (needle-b6785aa0).
+e2e = 868
 soak = 0
 fuzz = 0
 
@@ -835,6 +836,15 @@ tier = "contract"
 #   nt52_state_dir_isolation 10 -- component:state-isolation.
 max_tests = 170
 owner = "component:improvement-loop"
+
+[[harness]]
+name = "proposal_backlog_dedupe"
+path = "tests/proposal_backlog_dedupe.rs"
+tier = "e2e"
+# Real bead-rs stores and isolated NEEDLE subprocesses exercise review,
+# explicit apply, revision guards, and legacy-workspace skips.
+max_tests = 6
+owner = "needle-b6785aa0"
 
 [[harness]]
 name = "gate_health_atomic_write"

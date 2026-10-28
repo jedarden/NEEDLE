@@ -18,6 +18,7 @@ EXPECTED_TARGETS="$(printf '%s\n' \
   nt_contracts \
   p2_integration_tests \
   p3_integration_tests \
+  proposal_backlog_dedupe \
   real_br_integration_tests)"
 
 fail() {
@@ -129,7 +130,7 @@ for marker_fragment in \
   'nextest_profile=ci' \
   'features=default' \
   'target_triple=' \
-  'target_set=lib,adapter_smoke,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt_contracts,gate_health_atomic_write' \
+  'target_set=lib,adapter_smoke,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt_contracts,gate_health_atomic_write,proposal_backlog_dedupe' \
   'workspace_root=/workspace' \
   'target_dir=/opt/needle-ci-target' \
   'cargo_build_jobs=2'; do

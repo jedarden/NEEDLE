@@ -35,7 +35,7 @@ use crate::process_guard::ProcessGroupKillGuard;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, InputMethod, StrandResult};
 
-mod candidate_filter;
+pub(crate) mod candidate_filter;
 mod source_priority;
 
 /// Keep generated prompts comfortably below model context limits after the

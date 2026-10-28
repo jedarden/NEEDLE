@@ -216,6 +216,12 @@ name = "gate_health_atomic_write"
 path = "tests/gate_health_atomic_write.rs"
 harness = true
 
+# Operator review of pending proposal duplicates (needle-b6785aa0).
+[[test]]
+name = "proposal_backlog_dedupe"
+path = "tests/proposal_backlog_dedupe.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false
