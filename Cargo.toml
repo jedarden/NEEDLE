@@ -210,6 +210,12 @@ name = "adapter_smoke"
 path = "tests/adapter_smoke.rs"
 harness = true
 
+# Gate-health crash consistency acceptance (needle-35e6cbe8).
+[[test]]
+name = "gate_health_atomic_write"
+path = "tests/gate_health_atomic_write.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false

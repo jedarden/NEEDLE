@@ -175,12 +175,14 @@ needle_slow_targets() {
     escalation_ladder \
     nt_contracts \
     adapter_smoke \
+    gate_health_atomic_write \
     installer
 }
 
 needle_cargo_selector() {
   case "$1" in
     adapter_smoke) printf '%s\n' --test adapter_smoke ;;
+    gate_health_atomic_write) printf '%s\n' --test gate_health_atomic_write ;;
     lib) printf '%s
 ' --lib ;;
     integration_spawn) printf '%s
@@ -207,6 +209,7 @@ needle_cargo_selector() {
 needle_nextest_filter() {
   case "$1" in
     adapter_smoke) printf '%s\n' 'binary_id(=needle::adapter_smoke)' ;;
+    gate_health_atomic_write) printf '%s\n' 'binary_id(=needle::gate_health_atomic_write)' ;;
     lib) printf '%s
 ' 'binary_id(=needle)' ;;
     integration_spawn) printf '%s

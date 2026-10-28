@@ -168,20 +168,21 @@ else
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
-assert_lines "target table lists 10 names" 10 needle_slow_targets
+assert_lines "target table lists 11 names" 11 needle_slow_targets
 
 # Exact set, asserted literally: a renamed or dropped target must be caught
 # here rather than silently accepted by every consumer of the table.
-WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt_contracts adapter_smoke installer)"
+WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt_contracts adapter_smoke gate_health_atomic_write installer)"
 GOT_TABLE="$(needle_slow_targets)"
 if [[ "$GOT_TABLE" == "$WANT_TABLE" ]]; then
-  ok "target table is exactly the 9 cargo targets plus installer"
+  ok "target table is exactly the 10 cargo targets plus installer"
 else
   bad "target table drifted (got: $(echo "$GOT_TABLE" | tr '\n' ' '))"
 fi
 
 # ── needle_cargo_selector ────────────────────────────────────────────────────
 assert_selector "adapter smoke selects its target" "--test adapter_smoke" adapter_smoke
+assert_selector "gate-health atomic write selects its target" "--test gate_health_atomic_write" gate_health_atomic_write
 assert_selector "lib selects the unit-test target" "--lib" lib
 assert_selector "integration_spawn selects its target" "--test integration_spawn" integration_spawn
 assert_selector "integration_tests selects its target" "--test integration_tests" integration_tests
@@ -196,6 +197,7 @@ assert_fails "installer is not a cargo target" needle_cargo_selector installer
 
 # ── needle_nextest_filter ────────────────────────────────────────────────────
 assert_nextest_filter "adapter smoke has an exact nextest binary ID" "binary_id(=needle::adapter_smoke)" adapter_smoke
+assert_nextest_filter "gate-health atomic write has an exact nextest binary ID" "binary_id(=needle::gate_health_atomic_write)" gate_health_atomic_write
 assert_nextest_filter "lib has an exact nextest binary ID" "binary_id(=needle)" lib
 assert_nextest_filter "integration_spawn has an exact nextest binary ID" "binary_id(=needle::integration_spawn)" integration_spawn
 assert_nextest_filter "integration_tests has an exact nextest binary ID" "binary_id(=needle::integration_tests)" integration_tests
@@ -210,7 +212,7 @@ assert_fails "installer has no nextest filter" needle_nextest_filter installer
 
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
-assert_lines "default selection is all 9 cargo targets" 9 selected_cargo_targets
+assert_lines "default selection is all 10 cargo targets" 10 selected_cargo_targets
 
 WANT_DEFAULT="$(needle_expected_slow_targets | grep -vx installer)"
 GOT_DEFAULT="$(selected_cargo_targets)"
@@ -328,7 +330,8 @@ WANT_HARNESSES="$(printf '%s\t%s\n' \
   real_br_integration_tests tests/real_br_integration_tests.rs \
   escalation_ladder tests/escalation_ladder.rs \
   nt_contracts tests/nt_contracts.rs \
-  adapter_smoke tests/adapter_smoke.rs)"
+  adapter_smoke tests/adapter_smoke.rs \
+  gate_health_atomic_write tests/gate_health_atomic_write.rs)"
 GOT_HARNESSES="$(needle_declared_test_harnesses)"
 if [[ "$GOT_HARNESSES" == "$WANT_HARNESSES" ]]; then
   ok "Clippy reads every declared test harness root from Cargo.toml"

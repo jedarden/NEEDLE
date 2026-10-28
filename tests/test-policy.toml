@@ -532,7 +532,9 @@ max_tests = 4332
 # (needle-165ab6f6).
 # +1 OTLP header degrade subprocess contract (needle-0ffb7802): optional
 # boot and claim, required fatal startup, and present-header exporter path.
-push = 687
+# +2 gate-health crash consistency contracts (needle-35e6cbe8): the
+# isolated writer helper and kill-during-partial-write assertion.
+push = 689
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -833,6 +835,15 @@ tier = "contract"
 #   nt52_state_dir_isolation 10 -- component:state-isolation.
 max_tests = 170
 owner = "component:improvement-loop"
+
+[[harness]]
+name = "gate_health_atomic_write"
+path = "tests/gate_health_atomic_write.rs"
+tier = "push"
+# The writer subprocess is killed after a partial temporary write. The
+# published record must remain complete and parseable.
+max_tests = 2
+owner = "needle-35e6cbe8"
 
 # These are strict ceilings on existing debt. A new occurrence fails the fast
 # lane; deleting an occurrence makes the corresponding exception stale so the

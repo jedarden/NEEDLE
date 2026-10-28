@@ -12,6 +12,7 @@ CI_VERSION_FILE="$REPO_ROOT/ci/VERSION"
 EXPECTED_TARGETS="$(printf '%s\n' \
   adapter_smoke \
   escalation_ladder \
+  gate_health_atomic_write \
   integration_spawn \
   integration_tests \
   nt_contracts \
@@ -128,7 +129,7 @@ for marker_fragment in \
   'nextest_profile=ci' \
   'features=default' \
   'target_triple=' \
-  'target_set=lib,adapter_smoke,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt_contracts' \
+  'target_set=lib,adapter_smoke,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt_contracts,gate_health_atomic_write' \
   'workspace_root=/workspace' \
   'target_dir=/opt/needle-ci-target' \
   'cargo_build_jobs=2'; do
@@ -254,7 +255,7 @@ workdir_line="$(grep -nF 'WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
    "$nextest_assert_line" -lt "$workdir_line" ]] || fail \
   'base image must add cargo-nextest after the pinned Rust toolchain layer and before WORKDIR'
 
-[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.17" ]] \
+[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.18" ]] \
   || fail 'ci/VERSION must move with the exact-profile dependency image contents'
 grep -Fq 'nextest-version = { required = "0.9.144" }' "$NEXTEST_CONFIG" \
   || fail 'nextest config must set the minimum supported runner version'
