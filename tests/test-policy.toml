@@ -507,7 +507,12 @@ version = 1
 # branches out of the racy end-to-end path. Raised +10 so concurrent workers'
 # in-flight unit tests stay under the ceiling while they land.
 # +2 gate-health malformed-record and stale-temp unit contracts (needle-35e6cbe8).
-max_tests = 4332
+# +3 needs-human fallback narrowing contracts (needle-7f40c7c2): the
+# readling-bf50da3d description with a prior committed attempt, the backticked
+# `human` label exemption, and needle-11f7ad60's genuine operator-step case.
+# Raised +6 so concurrent workers' in-flight unit tests stay under the
+# ceiling while they land.
+max_tests = 4338
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

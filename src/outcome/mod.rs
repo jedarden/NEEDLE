@@ -392,12 +392,14 @@ pub(crate) const NEEDS_HUMAN_NOTE_PREFIX: &str = "analysis: needs_human:";
 /// Detect an operator-only handoff from all evidence available at outcome
 /// time. The order is intentional: an explicit agent handoff is the most
 /// authoritative explanation, followed by a store permission gate, followed
-/// by the bead's own operator-step description when no commit was delivered.
+/// by the bead's own operator-step description when neither this attempt nor
+/// an earlier one delivered a commit.
 pub fn detect_needs_human(
     output: &AgentOutcome,
     gate_report: Option<&GateReport>,
     description: Option<&str>,
     commits: &[String],
+    prior_attempt_commits: &[String],
 ) -> Option<String> {
     if let Some(reason) = declared_handoff_reason(output) {
         return Some(format!("agent handoff: {reason}"));
@@ -407,7 +409,8 @@ pub fn detect_needs_human(
         return Some(reason);
     }
 
-    if commits.iter().all(|commit| commit.trim().is_empty()) {
+    let undelivered = |slice: &[String]| slice.iter().all(|commit| commit.trim().is_empty());
+    if undelivered(commits) && undelivered(prior_attempt_commits) {
         if let Some(reason) = operator_step_reason(description) {
             return Some(reason);
         }
@@ -481,8 +484,14 @@ fn operator_step_reason(description: Option<&str>) -> Option<String> {
         return None;
     }
     let lower = description.to_ascii_lowercase();
-    let names_operator =
-        lower.contains("operator") || lower.contains("manual") || lower.contains("human");
+    // A backticked `human` names NEEDLE's own rung label — acceptance text
+    // like "add the `human` label" instructs the worker about the mechanism,
+    // it does not describe a person whose step only an operator can perform
+    // (readling-bf50da3d parked twice on a pushed deliverable this way).
+    let operator_haystack = lower.replace("`human`", " ");
+    let names_operator = operator_haystack.contains("operator")
+        || operator_haystack.contains("manual")
+        || operator_haystack.contains("human");
     let names_step = [
         "step",
         "action",
@@ -498,7 +507,7 @@ fn operator_step_reason(description: Option<&str>) -> Option<String> {
         "only",
     ]
     .iter()
-    .any(|word| lower.contains(word));
+    .any(|word| operator_haystack.contains(word));
     if names_operator && names_step {
         Some(format!(
             "operator step named in bead description: {}",
@@ -2089,11 +2098,39 @@ impl OutcomeHandler {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // The description fallback's premise is operator-only work that can
+        // produce no commit. An earlier attempt that DID deliver a commit
+        // contradicts it — readling-bf50da3d's re-pluck parked an already
+        // pushed deliverable as human because its acceptance text mentions
+        // the `human` label. The attempt ledger records commits per attempt,
+        // and the record for the attempt being resolved is written only after
+        // this routing decision, so a load here sees strictly the priors.
+        let prior_attempt_commits = if attempt_context
+            .commits
+            .iter()
+            .all(|commit| commit.trim().is_empty())
+        {
+            let workspace = if bead.workspace.as_os_str().is_empty()
+                || bead.workspace == std::path::Path::new(".")
+            {
+                self.config.workspace.default.clone()
+            } else {
+                bead.workspace.clone()
+            };
+            crate::attempt_history::load_for_prompt(&workspace, &bead.id, store)
+                .await
+                .into_iter()
+                .flat_map(|record| record.commits)
+                .collect::<Vec<String>>()
+        } else {
+            Vec::new()
+        };
         let needs_human_reason = detect_needs_human(
             output,
             gate_report.as_ref(),
             bead.body.as_deref(),
             &attempt_context.commits,
+            &prior_attempt_commits,
         );
         let attempt_provider = attempt_context.provider.clone();
         let adapter_name = attempt_context.adapter;
@@ -7301,7 +7338,7 @@ mod tests {
             stderr: String::new(),
         };
         assert_eq!(
-            detect_needs_human(&handoff, None, None, &[]).as_deref(),
+            detect_needs_human(&handoff, None, None, &[], &[]).as_deref(),
             Some("agent handoff: write the production secret")
         );
 
@@ -7312,22 +7349,127 @@ mod tests {
         );
         let report = GateReport::new(results);
         assert!(
-            detect_needs_human(&test_output(1), Some(&report), None, &[])
+            detect_needs_human(&test_output(1), Some(&report), None, &[], &[])
                 .expect("permission gate should need a human")
                 .contains("OpenBao returned HTTP 403")
         );
 
         let description = "Operator step required: write the secret to OpenBao.";
-        let reason = detect_needs_human(&test_output(1), None, Some(description), &[])
+        let reason = detect_needs_human(&test_output(1), None, Some(description), &[], &[])
             .expect("operator description should need a human");
         assert!(reason.contains("operator step named"));
         assert!(detect_needs_human(
             &test_output(1),
             None,
             Some(description),
-            &["commit-1".to_string()]
+            &["commit-1".to_string()],
+            &[]
         )
         .is_none());
+    }
+
+    /// The readling-bf50da3d description, verbatim: a patent-check task whose
+    /// acceptance tells the worker to add the `human` label only when the
+    /// patent status is live. NEEDLE's description fallback parked its second
+    /// attempt as human even though the first attempt had already committed
+    /// and pushed the deliverable (02289d2).
+    const READLING_BF50DA3D_DESCRIPTION: &str = r##"Outcome: a dated record that Slide and read's sound-on-drag does not meet a live patent claim, before Slide and read is built (R24).
+
+Deliverables: `docs/notes/slider-patent-check-<date>.md` recording:
+- the application's current legal status on Google Patents (and USPTO Patent Center if Google is ambiguous), with the retrieval date and URLs;
+- one sentence confirming the design stays position-triggered playback at the recorded rate (AC-C10) either way.
+
+Read first: §9 Phase 0 (deliverable), §15 R24, docs/research/10-competitor-methods.md §8.
+Acceptance: the note is committed. If the status is anything other than abandoned or expired, do not close this bead. Instead, add the finding to plan §16 Open Questions with a proposed answer, add the `human` label and leave a note; the Slide and read bead stays blocked until the user decides.
+
+---
+Plan: docs/plan/plan.md. Read its "Reading guide (by phase)" row for this bead first, plus §2, §3 and §4; child-route work also reads the P-A table (§5).
+House rules: work on main; stage named paths only (never `git add -A` or `.`); push only to Forgejo origin; never force-push. Private build: no pack artwork, name clips or screenshots of them in docs/, beads, Claude artifacts, issues or anything public (§3). Secrets travel by reference only, never in argv, files or logs (§11). Every npm script and scripts/* file exits 0 pass / 1 check failed / 2 usage or environment and prints one `RESULT {json}` line last (§14.4). A fork the plan does not decide goes to §16 Open Questions with a proposed answer; it is never guessed in code. Before closing, record in this bead's notes the commands you ran with their exit codes and the commit SHA."##;
+
+    /// The needle-11f7ad60 description, verbatim: it names a real operator
+    /// step ("one OpenBao write only an operator can perform") and must keep
+    /// classifying as needs_human after the label-shaped `human` exemption.
+    const NEEDLE_11F7AD60_DESCRIPTION: &str = r##"Plan: docs/plan/plan.md section 4.5, ledger N-T28; ADR-024 resolution classes; Phase 19 rung 5. Blocked by
+needle-96dec90b (resolution classes on attempt.resolved). Relates to needle-ea2ebe10 (rung 4 analysis) and
+needle-e896b565 (human-rung count in status).
+
+## Why
+declarat-676a2892 needed one OpenBao write only an operator can perform. It was dispatched six times, failed
+verification six times, was split by mitosis into two identical children, and one of those is still cycling.
+Every retry cost a dispatch and taught the ledger nothing.
+
+## Task
+- At outcome time, classify needs_human when: the agent's final output contains a declared handoff marker
+  (`NEEDLE-HANDOFF: <reason>`), or the gate output shows a permission denial against a store agents cannot
+  write (OpenBao 403, ClusterSecretStore not ready), or the bead description names an operator step and the
+  attempt made no commit.
+- Resolution needs_human: release, add `human` (already excluded by Pluck), do not increment failure count,
+  write the reason to the bead's notes and to attempt.resolved.
+- `needle human-queue [--workspace]` lists parked beads with reason, age and the upstream they wait on.
+
+## Acceptance
+- Fixture attempts with each marker resolve as needs_human with no failure-count change (tests).
+- The queue command output is stable JSON and text."##;
+
+    #[test]
+    fn readling_bf50da3d_with_a_prior_committed_attempt_is_not_needs_human() {
+        // Attempt 2's shape: no new commit this attempt, but attempt 1's
+        // ledger row carries 02289d2. The description fallback must not fire
+        // — its premise (operator-only work that can produce no commit) is
+        // contradicted by the delivered commit.
+        assert!(detect_needs_human(
+            &test_output(0),
+            None,
+            Some(READLING_BF50DA3D_DESCRIPTION),
+            &[],
+            &["02289d2c7d274d1a85fff7377d0914c4e9260dfe".to_string()],
+        )
+        .is_none());
+
+        // The same description alone no longer trips the heuristic either:
+        // its only "human" mention is the backticked rung label, and it names
+        // no operator or manual work.
+        assert!(detect_needs_human(
+            &test_output(0),
+            None,
+            Some(READLING_BF50DA3D_DESCRIPTION),
+            &[],
+            &[],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn operator_step_with_an_unbackticked_human_mention_needs_a_prior_commit_to_be_exempt() {
+        let description = "The human operator must apply the production secret before this ships.";
+
+        // No attempt ever delivered: the operator step stands.
+        let reason = detect_needs_human(&test_output(1), None, Some(description), &[], &[])
+            .expect("an unbackticked operator step still needs a human");
+        assert!(reason.contains("operator step named"));
+
+        // A prior attempt that committed exempts the re-pluck.
+        assert!(detect_needs_human(
+            &test_output(1),
+            None,
+            Some(description),
+            &[],
+            &["feedc0de".to_string()],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn needle_11f7ad60_operator_step_cases_still_classify_as_needs_human() {
+        let reason = detect_needs_human(
+            &test_output(1),
+            None,
+            Some(NEEDLE_11F7AD60_DESCRIPTION),
+            &[],
+            &[],
+        )
+        .expect("a genuine operator step must still park as human");
+        assert!(reason.contains("operator step named"));
     }
 
     #[tokio::test]
