@@ -783,7 +783,7 @@ async fn fallback_marker_commands_are_selected_and_executed_in_clean_extractions
     }
 
     assert_fallback_failed_verifier_captures_and_caps_stderr(&environment).await;
-    assert_fallback_verifier_timeout_is_released_as_execution_error(&environment).await;
+    assert_fallback_verifier_timeout_is_unjudged(&environment).await;
     gate_workspace_resolution::run_gate_workspace_resolution_regression()
         .await
         .expect("per-workspace gate resolution regression");
@@ -911,9 +911,7 @@ async fn assert_fallback_failed_verifier_captures_and_caps_stderr(
     );
 }
 
-async fn assert_fallback_verifier_timeout_is_released_as_execution_error(
-    environment: &IsolatedEnvironment,
-) {
+async fn assert_fallback_verifier_timeout_is_unjudged(environment: &IsolatedEnvironment) {
     install_sleeping_tool_shim(environment, "pytest");
     let log = environment.home().join("timeout.log");
     let workspace = marker_fixture("python-pytest-ini", &log);
@@ -944,22 +942,31 @@ async fn assert_fallback_verifier_timeout_is_released_as_execution_error(
     telemetry.shutdown().await;
 
     assert_eq!(result.outcome, needle::types::Outcome::Failure);
-    assert_eq!(
-        result.bead_action,
-        BeadAction::Released(ReleaseReason::AgentNotFound)
-    );
+    assert_eq!(result.bead_action, BeadAction::Errored);
     let actions = store.actions();
     assert!(
         !actions.contains(&StoreAction::AddLabel("verification-failed".into())),
-        "a timeout is an execution error, not a failed verification: {actions:?}"
+        "the expired verification budget did not judge the work: {actions:?}"
     );
-    let errors = telemetry_rows(&events, "gate.execution_error");
-    assert_eq!(errors.len(), 1);
+    assert!(telemetry_rows(&events, "gate.execution_error").is_empty());
+    let timeouts = telemetry_rows(&events, "worker.handling.timeout");
+    assert_eq!(timeouts.len(), 1);
     assert!(
-        errors[0]["data"]["reason"]
+        timeouts[0]["data"]["operation"] == "verification_gates",
+        "the timeout must identify the verification walk: {timeouts:?}"
+    );
+    let resolved = telemetry_rows(&events, "attempt.resolved");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0]["data"]["outcome"], "indeterminate");
+    assert_eq!(
+        resolved[0]["data"]["terminal_reason"],
+        "verification_timeout"
+    );
+    assert!(
+        timeouts[0]["data"]["error"]
             .as_str()
-            .is_some_and(|reason| reason.contains("timed out")),
-        "timeout reason should be recorded: {errors:?}"
+            .is_some_and(|reason| reason.contains("outcome_timeout_seconds")),
+        "timeout budget should be recorded: {timeouts:?}"
     );
 }
 
@@ -1053,6 +1060,7 @@ async fn fallback_gate_false_skips_execution_and_logs_the_dispatch_opt_out() {
         "validation:\n  fallback_gate: false\n",
     );
     write_file(workspace.path(), "go.mod", "module example.test/opt-out\n");
+    commit_fixture(workspace.path(), &[".needle.yaml", "go.mod"]);
 
     let store = OutcomeStore::new(bead(workspace.path(), "opt-out"));
     let log_dir = tempfile::tempdir().expect("opt-out telemetry directory");
