@@ -15,6 +15,15 @@ fn needle_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_needle")))
 }
 
+// Older bead-rs releases follow parent directories during `init` and can
+// silently adopt a real store when TMPDIR sits below a repository. A config
+// marker without a database makes the requested directory the init target.
+fn mark_native_workspace(path: &Path) -> Result<()> {
+    fs::create_dir_all(path.join(".beads"))?;
+    fs::write(path.join(".beads/config.json"), "{}")?;
+    Ok(())
+}
+
 // A queue-fence wrapper on PATH can redirect a command to an operator store.
 fn native_bead_binary() -> PathBuf {
     let mut candidates = Vec::new();
@@ -36,7 +45,10 @@ fn native_bead_binary() -> PathBuf {
         };
         let workspace = probe.path().join("workspace");
         let home = probe.path().join("home");
-        if fs::create_dir_all(&workspace).is_err() || fs::create_dir_all(&home).is_err() {
+        if fs::create_dir_all(&workspace).is_err()
+            || fs::create_dir_all(&home).is_err()
+            || mark_native_workspace(&workspace).is_err()
+        {
             continue;
         }
         let usable = Command::new(&candidate)
@@ -45,7 +57,7 @@ fn native_bead_binary() -> PathBuf {
             .args(["init", "--prefix", "probe", "--skip-foreign-workspace"])
             .output()
             .is_ok_and(|output| output.status.success());
-        if usable {
+        if usable && workspace.join(".beads/beads.db").is_file() {
             return candidate;
         }
     }
@@ -79,7 +91,14 @@ impl Fixture {
     fn workspace(&self, name: &str) -> Result<PathBuf> {
         let path = self.root.join(name);
         fs::create_dir_all(&path)?;
+        mark_native_workspace(&path)?;
         self.bead(&path, &["init", "--prefix", name])?;
+        if !path.join(".beads/beads.db").is_file() {
+            bail!(
+                "bead init did not create an isolated store in {}",
+                path.display()
+            );
+        }
         fs::write(path.join(".needle.yaml"), format!(
             "bead_cli:\n  backend: bead-rs\n  path: {}\nstrands:\n  weave:\n    duplicate_similarity_threshold: 0.5\n", self.bead.display()))?;
         Ok(path)
@@ -363,6 +382,10 @@ fn apply_closes_only_named_group_and_preserves_survivor_labels() -> Result<()> {
         &evidence(&["src/queue.rs"]),
         true,
     )?;
+    f.bead(
+        &w,
+        &["update", &survivor, "--notes", "Existing operator note."],
+    )?;
     let report = f.report()?;
     assert_eq!(groups(&report, "high_groups").len(), 2);
     let chosen = groups(&report, "high_groups")
@@ -387,6 +410,13 @@ fn apply_closes_only_named_group_and_preserves_survivor_labels() -> Result<()> {
         .any(|edge| edge["blocker"] == survivor && edge["kind"] == "relates_to"));
     let kept = f.show(&w, &survivor)?;
     assert_eq!(kept["status"], "open");
+    let notes = kept["notes"].as_str().expect("survivor notes");
+    assert!(notes.starts_with("Existing operator note.\n"));
+    assert!(notes.contains(&format!(
+        "dedupe group {}",
+        chosen["id"].as_str().expect("group ID")
+    )));
+    assert!(notes.contains(&duplicate));
     for label in ["proposal-pending", "human"] {
         assert!(kept["labels"]
             .as_array()

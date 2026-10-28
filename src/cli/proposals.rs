@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -15,6 +15,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tempfile::Builder as TempFileBuilder;
 
 use crate::cli::audit::discover_workspaces;
 use crate::config::{expand_tilde_str, resolve_bead_cli, BeadBackend, CliOverrides, ConfigLoader};
@@ -107,6 +108,8 @@ struct RawBead {
     assignee: Option<String>,
     #[serde(default)]
     labels: Vec<String>,
+    #[serde(default)]
+    notes: Option<String>,
     created_at: DateTime<Utc>,
     revision: u64,
 }
@@ -623,8 +626,9 @@ fn apply_group(group: &Group) -> Result<usize> {
     }
     let (_, binary, _) = resolve_bead_cli(&config.bead_cli)?;
 
-    // Validate the entire group before the first write. The close commands
-    // independently carry their observed revisions to reject later races.
+    // Validate the entire group before the first write. The manifest also
+    // guards every member's revision inside one transaction.
+    let mut survivor_notes = None;
     for member in &group.members {
         let raw = bead_command(&binary, &group.workspace, &["show", &member.id, "--json"])?;
         let current = parse_bead_show(&raw)
@@ -654,9 +658,13 @@ fn apply_group(group: &Group) -> Result<usize> {
         {
             bail!("{} lost proposal-pending", member.id);
         }
+        if member.id == group.survivor {
+            survivor_notes = Some(current.notes.unwrap_or_default());
+        }
     }
 
     let mut closed = Vec::new();
+    let mut operations = Vec::new();
     for member in group
         .members
         .iter()
@@ -666,45 +674,19 @@ fn apply_group(group: &Group) -> Result<usize> {
             "Duplicate of {} (needle proposals dedupe group {}, operator-approved)",
             group.survivor, group.id
         );
-        bead_command(
-            &binary,
-            &group.workspace,
-            &[
-                "close",
-                &member.id,
-                "--if-revision",
-                &member.revision.to_string(),
-                "--reason",
-                &reason,
-            ],
-        )
-        .with_context(|| {
-            format!(
-                "close of {} failed after {} close(s)",
-                member.id,
-                closed.len()
-            )
-        })?;
+        operations.push(json!({
+            "op": "close",
+            "id": member.id,
+            "reason": reason,
+            "if_revision": member.revision,
+        }));
+        operations.push(json!({
+            "op": "dep_add",
+            "blocked": member.id,
+            "blocker": group.survivor,
+            "kind": "relates_to",
+        }));
         closed.push(member.id.clone());
-        bead_command(
-            &binary,
-            &group.workspace,
-            &[
-                "dep",
-                "add",
-                &member.id,
-                &group.survivor,
-                "--kind",
-                "relates_to",
-            ],
-        )
-        .with_context(|| {
-            format!(
-                "relation for {} failed after {} close(s)",
-                member.id,
-                closed.len()
-            )
-        })?;
     }
 
     let note = format!(
@@ -712,34 +694,53 @@ fn apply_group(group: &Group) -> Result<usize> {
         group.id,
         closed.join(", ")
     );
-    bead_comment(&binary, &group.workspace, &group.survivor, &note)
-        .with_context(|| format!("survivor note failed after {} close(s)", closed.len()))?;
-    Ok(closed.len())
-}
-
-fn bead_comment(binary: &Path, workspace: &Path, id: &str, body: &str) -> Result<()> {
-    let mut child = Command::new(binary)
-        .current_dir(workspace)
-        .args(["comment", "create", id, "--body-file", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("cannot append comment to {id}"))?;
-    child
-        .stdin
-        .take()
-        .context("bead comment stdin unavailable")?
-        .write_all(body.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        bail!(
-            "bead comment failed ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    let mut notes = survivor_notes.context("survivor absent from group")?;
+    if !notes.is_empty() {
+        notes.push('\n');
     }
-    Ok(())
+    notes.push_str(&note);
+    let survivor_revision = group
+        .members
+        .iter()
+        .find(|member| member.id == group.survivor)
+        .context("survivor absent from group")?
+        .revision;
+    operations.push(json!({
+        "op": "update",
+        "id": group.survivor,
+        "notes": notes,
+        "if_revision": survivor_revision,
+    }));
+
+    // bead-rs 0.2.6 has no comment command. A manifest uses the same guarded
+    // close and dependency primitives while committing the entire group or
+    // nothing, including the survivor note. Keep note content out of argv.
+    let mut manifest = TempFileBuilder::new()
+        .prefix("proposal-dedupe-")
+        .tempfile_in(group.workspace.join(".beads"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        manifest
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    serde_json::to_writer(
+        &mut manifest,
+        &json!({"manifest_version": 1, "operations": operations}),
+    )?;
+    manifest.flush()?;
+    let path = manifest
+        .path()
+        .to_str()
+        .context("manifest path is not UTF-8")?;
+    bead_command(
+        &binary,
+        &group.workspace,
+        &["manifest", "commit", "--input", path],
+    )
+    .with_context(|| format!("atomic apply of group {} failed", group.id))?;
+    Ok(closed.len())
 }
 
 fn print_report(report: &DedupeReport) {
