@@ -6,12 +6,16 @@
 
 use crate::types::Bead;
 
+/// Reserved label for NEEDLE-generated control-plane records.
+pub const INTERNAL_ARTIFACT_LABEL: &str = "needle-internal";
+
 /// Labels reserved for NEEDLE-owned diagnostics and generated artifacts.
 ///
 /// These labels are intentionally conservative.  A bead carrying one is
 /// already inside the control-plane boundary even when it also carries the
 /// `human` label or has otherwise become claimable.
 pub const INTERNAL_LABELS: &[&str] = &[
+    INTERNAL_ARTIFACT_LABEL,
     "alert",
     "crash",
     "starvation",
@@ -23,7 +27,6 @@ pub const INTERNAL_LABELS: &[&str] = &[
     "unravel-proposal",
     "worker-failure",
     "worker-loop",
-    "infra",
 ];
 
 /// Exact body headings emitted by NEEDLE's diagnostic producers.
@@ -52,9 +55,7 @@ pub fn is_internal_label(label: &str) -> bool {
 ///    It requires diagnostic evidence in the body; a title by itself is never
 ///    enough for the alert-shaped fallback.
 pub fn is_internal_artifact(bead: &Bead) -> bool {
-    bead.labels.iter().any(|label| is_internal_label(label))
-        || body_has_internal_marker(bead.body.as_deref())
-        || historical_diagnostic_shape(&bead.title, bead.body.as_deref())
+    internal_artifact_reason(bead).is_some()
 }
 
 /// Explain the first matching classification layer for structured telemetry or
@@ -65,6 +66,16 @@ pub fn internal_artifact_reason(bead: &Bead) -> Option<&'static str> {
     }
     if body_has_internal_marker(bead.body.as_deref()) {
         return Some("internal_body_marker");
+    }
+    // `infra` is a topic label in ordinary workspaces. Legacy NEEDLE records
+    // carrying it must also have a reserved label or exact generated marker;
+    // the broader historical text heuristic is insufficient on its own.
+    if bead
+        .labels
+        .iter()
+        .any(|label| label.trim().eq_ignore_ascii_case("infra"))
+    {
+        return None;
     }
     if historical_diagnostic_shape(&bead.title, bead.body.as_deref()) {
         return Some("historical_diagnostic_shape");

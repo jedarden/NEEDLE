@@ -862,7 +862,15 @@ impl SpliceStrand {
 
         // Create the bead.
         let bead_id = store
-            .create_bead(&title, &body, &["worker-failure", "human"])
+            .create_bead(
+                &title,
+                &body,
+                &[
+                    crate::internal::INTERNAL_ARTIFACT_LABEL,
+                    "worker-failure",
+                    "human",
+                ],
+            )
             .await
             .context("failed to create worker failure bead")?;
 
@@ -1041,7 +1049,15 @@ impl SpliceStrand {
 
         // Create the bead.
         let bead_id = store
-            .create_bead(&title, &body, &["worker-loop", "human"])
+            .create_bead(
+                &title,
+                &body,
+                &[
+                    crate::internal::INTERNAL_ARTIFACT_LABEL,
+                    "worker-loop",
+                    "human",
+                ],
+            )
             .await
             .context("failed to create worker loop bead")?;
 

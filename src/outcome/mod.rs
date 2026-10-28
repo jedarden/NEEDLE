@@ -5001,7 +5001,11 @@ impl OutcomeHandler {
             distinct_beads,
         );
 
-        let labels = [label, "infra".to_string(), "priority:0".to_string()];
+        let labels = [
+            label,
+            crate::internal::INTERNAL_ARTIFACT_LABEL.to_string(),
+            "priority:0".to_string(),
+        ];
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
         let created = tokio::time::timeout(
@@ -5335,7 +5339,7 @@ impl OutcomeHandler {
                     previous_state.map(|s| s.consecutive_errors.to_string()).unwrap_or_else(|| "unknown".to_string())
                 );
 
-                let labels = build_alert_labels(&fingerprint, &["infra", "priority:0"]);
+                let labels = build_alert_labels(&fingerprint, &["priority:0"]);
                 let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
                 let bead_id = tokio::time::timeout(

@@ -826,7 +826,9 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
         .get("labels")
         .and_then(Value::as_array)
         .context("Gate broken alert had no labels")?;
-    assert!(gate_alert_labels.iter().any(|label| label == "infra"));
+    assert!(gate_alert_labels
+        .iter()
+        .any(|label| label == "needle-internal"));
 
     Ok(())
 }

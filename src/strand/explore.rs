@@ -166,7 +166,13 @@ struct WorkspaceFrontier {
     store: Arc<dyn BeadStore>,
     candidates: Vec<crate::types::Bead>,
     filtered_candidates: usize,
+    internal_artifact_ids: Vec<BeadId>,
     split_out_of_scope_candidates: usize,
+}
+
+struct CandidateAdmission {
+    candidates: Vec<crate::types::Bead>,
+    internal_artifact_ids: Vec<BeadId>,
 }
 
 /// Emits one timing event when the measured workspace phase finishes. Guards
@@ -1191,21 +1197,31 @@ impl ExploreStrand {
         store: &dyn crate::bead_store::BeadStore,
         candidates: Vec<crate::types::Bead>,
         filters: &Filters,
-    ) -> Vec<crate::types::Bead> {
+    ) -> CandidateAdmission {
         let candidates = self
             .lift_expired_quarantine_markings(store, candidates)
             .await;
         let now = Utc::now();
-        candidates
-            .into_iter()
-            .filter(|bead| {
-                !filters.exclude_ids.contains(&bead.id)
-                    && bead.assignee.is_none()
-                    && !crate::bead_store::excluded_by_labels(bead, filters, now)
-                    && !crate::internal::is_internal_artifact(bead)
-                    && self.lane_admits(bead)
-            })
-            .collect()
+        let mut admission = CandidateAdmission {
+            candidates: Vec::new(),
+            internal_artifact_ids: Vec::new(),
+        };
+        for bead in candidates {
+            if filters.exclude_ids.contains(&bead.id)
+                || bead.assignee.is_some()
+                || crate::bead_store::excluded_by_labels(&bead, filters, now)
+            {
+                continue;
+            }
+            if crate::internal::is_internal_artifact(&bead) {
+                admission.internal_artifact_ids.push(bead.id);
+                continue;
+            }
+            if self.lane_admits(&bead) {
+                admission.candidates.push(bead);
+            }
+        }
+        admission
     }
 
     /// Strip the expired quarantine marking from ready candidates of a
@@ -1622,10 +1638,12 @@ impl ExploreStrand {
         self.filter_circuit_candidates(workspace, &mut candidates)
             .await;
         let before_admission = candidates.len();
-        let mut candidates = self
+        let admission = self
             .admit_candidates(remote_store.as_ref(), candidates, filters)
             .await;
-        let filtered_candidates = before_admission - candidates.len();
+        let filtered_candidates =
+            before_admission - admission.candidates.len() - admission.internal_artifact_ids.len();
+        let mut candidates = admission.candidates;
         let before_scope_filter = candidates.len();
         candidates.retain(|bead| {
             !crate::mitosis::would_release_as_split_out_of_scope(bead, self.split_after_failures)
@@ -1641,6 +1659,7 @@ impl ExploreStrand {
             store: remote_store,
             candidates,
             filtered_candidates,
+            internal_artifact_ids: admission.internal_artifact_ids,
             split_out_of_scope_candidates,
         }))
     }
@@ -2004,6 +2023,16 @@ impl ExploreStrand {
                 exclusion_reasons.insert(format!("filtered_{}", frontier.filtered_candidates));
                 excluded_ready_candidates += frontier.filtered_candidates;
             }
+            if !frontier.internal_artifact_ids.is_empty() {
+                exclusion_reasons.insert(format!(
+                    "internal_artifact_{}",
+                    frontier.internal_artifact_ids.len()
+                ));
+                for id in &frontier.internal_artifact_ids {
+                    exclusion_reasons.insert(format!("internal_artifact:{id}"));
+                }
+                excluded_ready_candidates += frontier.internal_artifact_ids.len();
+            }
 
             if frontier.split_out_of_scope_candidates > 0 {
                 exclusion_reasons.insert(format!(
@@ -2084,14 +2113,28 @@ impl ExploreStrand {
                                 self.filter_circuit_candidates(workspace, &mut retry_candidates)
                                     .await;
                                 let retry_before = retry_candidates.len();
-                                let mut retry_candidates = self
+                                let admission = self
                                     .admit_candidates(
                                         remote_store.as_ref(),
                                         retry_candidates,
                                         &filters,
                                     )
                                     .await;
-                                let retry_filtered = retry_before - retry_candidates.len();
+                                let retry_filtered = retry_before
+                                    - admission.candidates.len()
+                                    - admission.internal_artifact_ids.len();
+                                let mut retry_candidates = admission.candidates;
+                                if !admission.internal_artifact_ids.is_empty() {
+                                    exclusion_reasons.insert(format!(
+                                        "internal_artifact_{}",
+                                        admission.internal_artifact_ids.len()
+                                    ));
+                                    for id in &admission.internal_artifact_ids {
+                                        exclusion_reasons.insert(format!("internal_artifact:{id}"));
+                                    }
+                                    excluded_ready_candidates +=
+                                        admission.internal_artifact_ids.len();
+                                }
 
                                 if retry_filtered > 0 {
                                     exclusion_reasons
@@ -2745,6 +2788,7 @@ mod tests {
         };
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].workspace, target);
+        assert_infra_work_is_admitted_and_internal_artifacts_are_named().await;
     }
 
     async fn assert_explore_emits_per_workspace_timing_event() {
@@ -7652,6 +7696,76 @@ mod tests {
         });
     }
 
+    async fn assert_infra_work_is_admitted_and_internal_artifacts_are_named() {
+        fn bead(id: &str, labels: &[&str], body: &str) -> Bead {
+            Bead {
+                id: BeadId::from(id.to_string()),
+                title: id.to_string(),
+                body: Some(body.to_string()),
+                priority: 1,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: labels.iter().map(|label| (*label).to_string()).collect(),
+                workspace: PathBuf::new(),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote");
+        fs::create_dir_all(remote.join(".beads")).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let helper = TestHelper::new("infra-label-regression");
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![remote.clone()],
+            root.path().join("home"),
+            Registry::new(state.path()),
+            helper.telemetry_handle(),
+            "infra-label-regression".to_string(),
+            Arc::new(FrontierRankingFactory::new(vec![(
+                remote,
+                vec![
+                    bead(
+                        "ordinary-infra",
+                        &["infra", "phase:1"],
+                        "Repair bead filtering in the application.",
+                    ),
+                    bead("new-internal", &["needle-internal"], "Operator alert."),
+                    bead(
+                        "legacy-internal",
+                        &["infra"],
+                        "## Gate Execution Error\nGate failed.",
+                    ),
+                ],
+            )])),
+            300,
+        );
+
+        let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
+        let StrandResult::BeadFound(candidates) = result else {
+            panic!("ordinary infra work should be admitted: {result:?}");
+        };
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id.as_ref(), "ordinary-infra");
+
+        helper.sync().await;
+        let summaries = helper.events_by_type("explore.scan_summary");
+        assert_eq!(summaries.len(), 1);
+        let reasons = summaries[0].data["exclusion_reasons"].as_array().unwrap();
+        assert!(reasons.iter().any(|reason| reason == "internal_artifact_2"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "internal_artifact:new-internal"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "internal_artifact:legacy-internal"));
+        assert!(!reasons.iter().any(|reason| reason == "filtered_2"));
+    }
+
     // ── Reserved lanes (N-T59, needle-bc162127) ──────────────────────────────
 
     #[tokio::test]
@@ -7705,7 +7819,11 @@ mod tests {
         let admitted = lane_worker
             .admit_candidates(&DummyStore, candidates.clone(), &filters)
             .await;
-        let ids: Vec<String> = admitted.iter().map(|b| b.id.to_string()).collect();
+        let ids: Vec<String> = admitted
+            .candidates
+            .iter()
+            .map(|b| b.id.to_string())
+            .collect();
         assert_eq!(
             ids,
             vec!["lane-bead".to_string()],
@@ -7716,7 +7834,11 @@ mod tests {
         let admitted = ordinary
             .admit_candidates(&DummyStore, candidates, &filters)
             .await;
-        let ids: Vec<String> = admitted.iter().map(|b| b.id.to_string()).collect();
+        let ids: Vec<String> = admitted
+            .candidates
+            .iter()
+            .map(|b| b.id.to_string())
+            .collect();
         assert_eq!(
             ids,
             vec!["unlabelled".to_string(), "lane-bead".to_string()],
@@ -7808,7 +7930,7 @@ mod tests {
             )
             .await;
         assert!(
-            admitted.is_empty(),
+            admitted.candidates.is_empty(),
             "a lane-bound worker whose binding survived the workspace merge must \
              claim nothing in a remote workspace whose only ready bead lacks the \
              lane label"
@@ -7856,7 +7978,11 @@ mod tests {
         let admitted = strand
             .admit_candidates(&DummyStore, candidates, &filters)
             .await;
-        let ids: Vec<String> = admitted.iter().map(|b| b.id.to_string()).collect();
+        let ids: Vec<String> = admitted
+            .candidates
+            .iter()
+            .map(|b| b.id.to_string())
+            .collect();
         assert_eq!(
             ids,
             vec!["fresh-work".to_string()],

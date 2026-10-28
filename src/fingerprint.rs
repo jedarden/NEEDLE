@@ -196,7 +196,10 @@ pub async fn append_alert_note(
 /// Returns a vector of labels including the fingerprint label and any
 /// additional labels needed for the alert type.
 pub fn build_alert_labels(fingerprint: &str, additional_labels: &[&str]) -> Vec<String> {
-    let mut labels = vec![fingerprint.to_string()];
+    let mut labels = vec![
+        fingerprint.to_string(),
+        crate::internal::INTERNAL_ARTIFACT_LABEL.to_string(),
+    ];
     labels.extend(additional_labels.iter().map(|s| s.to_string()));
     labels
 }
@@ -266,6 +269,7 @@ mod tests {
         let labels = build_alert_labels(fp, &["alert", "starvation"]);
 
         assert!(labels.contains(&fp.to_string()));
+        assert!(labels.contains(&crate::internal::INTERNAL_ARTIFACT_LABEL.to_string()));
         assert!(labels.contains(&"alert".to_string()));
         assert!(labels.contains(&"starvation".to_string()));
     }

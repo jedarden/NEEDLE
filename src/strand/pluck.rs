@@ -444,7 +444,7 @@ fn exclusion_reasons_for_bead(
     let mut reasons = Vec::new();
 
     if crate::internal::is_internal_artifact(bead) {
-        reasons.push("internal_artifact".to_string());
+        reasons.push(format!("internal_artifact:{}", bead.id));
     }
 
     for dependency in &bead.dependencies {
@@ -3013,14 +3013,26 @@ impl super::Strand for PluckStrand {
             .map(|bead| bead.id.clone())
             .collect();
         candidates.retain(|bead| !is_internal_artifact(bead));
-        if before_internal_filter != candidates.len() {
-            stats.excluded_count += before_internal_filter - candidates.len();
-            for bead_id in internal_ids {
+        let internal_count = internal_ids.len();
+        if internal_count > 0 {
+            stats.excluded_count += internal_count;
+            for bead_id in &internal_ids {
                 stats
                     .exclusion_reasons
                     .push(format!("internal_artifact:{bead_id}"));
             }
+            tracing::info!(count = internal_count, bead_ids = ?internal_ids, "Pluck excluded internal artifacts");
         }
+        filter_stages.push(FilterStage {
+            stage_name: "internal_artifact_filter".to_string(),
+            before_count: before_internal_filter,
+            after_count: candidates.len(),
+            filtered_count: internal_count,
+            filter_reasons: internal_ids
+                .iter()
+                .map(|id| format!("internal_artifact:{id}"))
+                .collect(),
+        });
 
         // 5. Check for split trigger: if the first candidate has accumulated
         //    enough consecutive failures, dispatch a SPLIT instruction instead
@@ -3144,6 +3156,19 @@ impl super::Strand for PluckStrand {
                         }
                     }
                 }
+            }
+
+            // Keep internal exclusions distinct even when ready() withheld the
+            // artifact and only the inventory pass could explain it.
+            let internal_count = stats
+                .exclusion_reasons
+                .iter()
+                .filter(|reason| reason.starts_with("internal_artifact:"))
+                .count();
+            if internal_count > 0 {
+                stats
+                    .exclusion_reasons
+                    .push(format!("internal_artifact_{internal_count}"));
             }
 
             // Refresh the strand's observable statistics after the inventory
@@ -7774,6 +7799,39 @@ mod tests {
         assert!(!stale_ids.contains(&BeadId::from("unassigned".to_string())));
     }
 
+    async fn assert_internal_artifact_exclusions_name_count_and_bead_ids() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("internal-artifact-exclusions");
+        let mut legacy = make_bead_with_labels("legacy-internal", 1, vec!["infra"]);
+        legacy.body = Some("## Gate Execution Error\nGate failed.".to_string());
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_labels("new-internal", 1, vec!["needle-internal"]),
+                legacy,
+            ],
+        };
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::NoWork
+        ));
+
+        helper.sync().await;
+        let events = helper.events_by_type("strand.pluck.no_candidate");
+        assert_eq!(events.len(), 1);
+        let reasons = events[0].data["candidate_exclusion_reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons.iter().any(|reason| reason == "internal_artifact_2"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "internal_artifact:new-internal"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "internal_artifact:legacy-internal"));
+    }
+
     #[tokio::test]
     async fn auto_repair_clears_stale_assignees_and_returns_candidates() {
         use crate::telemetry::test_utils::TestHelper;
@@ -7843,6 +7901,7 @@ mod tests {
         let reason_strings: Vec<&str> = reasons.iter().filter_map(|r| r.as_str()).collect();
         assert!(reason_strings.iter().any(|r| r.contains("assignee")));
         assert!(reason_strings.iter().any(|r| r.contains("label")));
+        assert_internal_artifact_exclusions_name_count_and_bead_ids().await;
     }
 
     // ──────────────────────────────────────────────────────────────────────────

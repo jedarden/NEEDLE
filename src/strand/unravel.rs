@@ -582,6 +582,7 @@ impl super::Strand for UnravelStrand {
                             "Failed to check unravel proposal deduplication, including anyway"
                         );
                         let labels = vec![
+                            crate::internal::INTERNAL_ARTIFACT_LABEL.to_string(),
                             "unravel-proposal".to_string(),
                             "proposal-pending".to_string(),
                             "human".to_string(),
