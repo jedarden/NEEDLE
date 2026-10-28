@@ -9874,7 +9874,29 @@ impl ConfigLoader {
 
         if let Some(ref strands) = overrides.strands {
             if let Some(ref pluck) = strands.pluck {
-                config.strands.pluck = pluck.clone();
+                // The block replaces the whole `PluckConfig`, but the lane
+                // roster (`strands.pluck.lanes` in the global config) is a
+                // fleet-level admission control binding NAMED workers to a
+                // required label everywhere they roam — not a per-workspace
+                // selection knob. Every workspace file in the fleet omits
+                // `lanes`, so a verbatim replace silently stripped the roster:
+                // a worker homed on such a workspace (codex-sol-pdftract on
+                // NEEDLE) ran unbound and Explore admitted unlabelled work
+                // abroad (needle-5e98691f). Union instead: the global roster
+                // stays binding, workspace-declared lanes are appended without
+                // duplication, and `lane_for`'s first-match order gives the
+                // global roster precedence. Boot and reload resolve the same
+                // way, so the merged binding is deterministic. A label the
+                // global roster already defines is governed by the global
+                // entry — a workspace file may add labels, never alter a
+                // fleet label's worker set.
+                let global_lanes = std::mem::take(&mut config.strands.pluck.lanes);
+                let mut merged = pluck.clone();
+                merged
+                    .lanes
+                    .retain(|lane| !global_lanes.iter().any(|g| g.label == lane.label));
+                merged.lanes.splice(..0, global_lanes);
+                config.strands.pluck = merged;
                 sources.insert("strands.pluck".to_string(), source.clone());
             }
             if let Some(ref explore) = strands.explore {
@@ -11530,6 +11552,104 @@ mod config_tests {
             sources.get("bead_cli.path"),
             Some(ConfigSource::WorkspaceFile(_))
         ));
+    }
+
+    /// A workspace `strands.pluck` block that omits `lanes` must not strip the
+    /// global lane roster (needle-5e98691f). The block replaces the whole
+    /// `PluckConfig`, and the roster is a fleet-level admission control: the
+    /// NEEDLE workspace file wiped it for its homed worker, whose Explore then
+    /// claimed an unlabelled bead abroad.
+    #[test]
+    fn workspace_pluck_override_preserves_the_global_lane_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        // Mirrors /home/coding/NEEDLE/.needle.yaml: a pluck block with no
+        // `lanes` key, written long before lanes existed.
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "strands:\n  pluck:\n    exclude_labels: []\n    split_after_failures: 0\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        config.strands.pluck.lanes = vec![PluckLaneConfig {
+            label: "subgov-codex-productive".to_string(),
+            workers: vec!["codex-sol-pdftract".to_string()],
+            when_empty: LaneWhenEmpty::Idle,
+        }];
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        // The binding survives, under the same qualified-id matching
+        // `StrandRunner::from_config` performs at boot.
+        let bound = config
+            .strands
+            .pluck
+            .lane_for("codex-gpt-6-sol-xhigh-codex-sol-pdftract")
+            .expect("workspace pluck override must not strip the global lane roster");
+        assert_eq!(bound.label, "subgov-codex-productive");
+        assert_eq!(bound.when_empty, LaneWhenEmpty::Idle);
+
+        // The fields the workspace file actually sets still win.
+        assert_eq!(config.strands.pluck.exclude_labels, Vec::<String>::new());
+        assert_eq!(config.strands.pluck.split_after_failures, 0);
+    }
+
+    /// Workspace-declared lanes are appended after the global roster without
+    /// duplication, so `lane_for`'s first-match order keeps the global
+    /// binding authoritative for a worker bound in both.
+    #[test]
+    fn workspace_pluck_lanes_union_with_the_global_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            concat!(
+                "strands:\n",
+                "  pluck:\n",
+                "    lanes:\n",
+                "    - label: subgov-codex-productive\n",
+                "      workers: [local-worker]\n",
+                "      when_empty: normal\n",
+                "    - label: workspace-only\n",
+                "      workers: [local-worker]\n",
+            ),
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        config.strands.pluck.lanes = vec![PluckLaneConfig {
+            label: "subgov-codex-productive".to_string(),
+            // `local-worker` appears in both rosters, so the merge has a real
+            // precedence question to answer.
+            workers: vec!["codex-sol-pdftract".to_string(), "local-worker".to_string()],
+            when_empty: LaneWhenEmpty::Idle,
+        }];
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        let labels: Vec<&str> = config
+            .strands
+            .pluck
+            .lanes
+            .iter()
+            .map(|lane| lane.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["subgov-codex-productive", "workspace-only"],
+            "global roster first, workspace lanes appended, no duplicates"
+        );
+        // The global binding keeps precedence for a worker both rosters name.
+        let bound = config.strands.pluck.lane_for("local-worker").unwrap();
+        assert_eq!(bound.label, "subgov-codex-productive");
+        // The fleet label's worker set and shape are global-governed: the
+        // workspace's same-label entry is dropped whole, not merged field
+        // by field.
+        let fleet = config.strands.pluck.lane_for("codex-sol-pdftract").unwrap();
+        assert_eq!(fleet.label, "subgov-codex-productive");
+        assert_eq!(fleet.when_empty, LaneWhenEmpty::Idle);
+        assert_eq!(fleet.workers.len(), 2);
     }
 
     #[test]

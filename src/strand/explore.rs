@@ -7724,6 +7724,97 @@ mod tests {
         );
     }
 
+    /// Regression for needle-5e98691f, on the path that leaked: the global
+    /// roster binds the worker, but its home workspace's `.needle.yaml`
+    /// overrides `strands.pluck` without a `lanes` key (as
+    /// /home/coding/NEEDLE/.needle.yaml does). The pre-fix workspace merge
+    /// replaced the whole `PluckConfig`, so the roster was gone before
+    /// `StrandRunner::from_config` ever resolved `lane_for`, and Explore
+    /// admitted an unlabelled remote bead for the lane-bound worker. The
+    /// merge runs for real here, and the binding it leaves must make
+    /// admission reject the unlabelled candidate.
+    #[tokio::test]
+    async fn workspace_pluck_override_leaves_explore_lane_bound() {
+        // The workspace layer exactly as NEEDLE's file declares it: a pluck
+        // block, no `lanes` key.
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join(".needle.yaml"),
+            "strands:\n  pluck:\n    exclude_labels: []\n    split_after_failures: 0\n",
+        )
+        .unwrap();
+        let overrides = crate::config::ConfigLoader::load_workspace(ws.path())
+            .unwrap()
+            .expect("the workspace file declares a pluck block");
+        let mut config = crate::config::Config::default();
+        config.strands.pluck.lanes = vec![crate::config::PluckLaneConfig {
+            label: "subgov-codex-productive".to_string(),
+            workers: vec!["codex-sol-pdftract".to_string()],
+            when_empty: crate::config::LaneWhenEmpty::Idle,
+        }];
+        let mut sources = crate::config::SourceMap::new();
+        crate::config::ConfigLoader::apply_workspace(
+            &mut config,
+            &overrides,
+            ws.path(),
+            &mut sources,
+        );
+
+        // Bind exactly as `StrandRunner::from_config` does.
+        let lane = config
+            .strands
+            .pluck
+            .lane_for("codex-gpt-6-sol-xhigh-codex-sol-pdftract")
+            .expect("the workspace pluck override must not unbind the worker")
+            .clone();
+
+        fn candidate(id: &str, labels: Vec<&str>) -> Bead {
+            Bead {
+                id: BeadId::from(id.to_string()),
+                title: id.to_string(),
+                body: None,
+                priority: 0,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: labels.into_iter().map(|s| s.to_string()).collect(),
+                workspace: fixture_root("lane-merge-remote"),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        let temp_root = tempfile::tempdir().unwrap();
+        let pinned = vec![temp_root.path().to_path_buf()];
+        let home = temp_root.path().join("home");
+        let filters = Filters {
+            assignee: None,
+            exclude_labels: vec![
+                "deferred".to_string(),
+                "human".to_string(),
+                "blocked".to_string(),
+            ],
+            exclude_ids: HashSet::new(),
+        };
+
+        let strand = make_test_explore_strand(true, pinned, home).with_lane(Some(lane));
+        let admitted = strand
+            .admit_candidates(
+                &DummyStore,
+                vec![candidate("readling-bf50da3d", vec![])],
+                &filters,
+            )
+            .await;
+        assert!(
+            admitted.is_empty(),
+            "a lane-bound worker whose binding survived the workspace merge must \
+             claim nothing in a remote workspace whose only ready bead lacks the \
+             lane label"
+        );
+    }
+
     /// Candidate-level claimability: a bead named in `filters.exclude_ids` is
     /// dropped before ranking/aggregation, so an excluded candidate can never
     /// make its workspace look claimable ahead of one with real work.
