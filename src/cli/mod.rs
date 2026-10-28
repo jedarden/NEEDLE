@@ -6698,9 +6698,20 @@ fn doctor_check_gate_health_errors(needle_home: &Path) -> CheckResult {
     let mut errored: Vec<crate::gate_health::GateHealthState> = entries
         .flatten()
         .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
-        .filter_map(|entry| std::fs::read(entry.path()).ok())
-        .filter_map(|bytes| {
-            serde_json::from_slice::<crate::gate_health::GateHealthState>(&bytes).ok()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let bytes = std::fs::read(&path).ok()?;
+            match serde_json::from_slice::<crate::gate_health::GateHealthState>(&bytes) {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "ignoring unparseable gate health state"
+                    );
+                    None
+                }
+            }
         })
         .filter(|state| state.consecutive_errors > 0)
         .collect();
@@ -8561,11 +8572,20 @@ fn scan_degraded_workspaces(
             continue;
         }
 
-        let content = std::fs::read_to_string(&path)
+        let content = std::fs::read(&path)
             .with_context(|| format!("failed to read gate health state file: {:?}", path))?;
 
-        let state: crate::gate_health::GateHealthState = serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse gate health state file: {:?}", path))?;
+        let state: crate::gate_health::GateHealthState = match serde_json::from_slice(&content) {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "ignoring unparseable gate health state"
+                );
+                continue;
+            }
+        };
 
         if state.degraded {
             degraded_states.push(state);

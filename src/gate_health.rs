@@ -27,7 +27,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Get the home directory, falling back to the process temp dir if HOME is not set.
 fn home_dir() -> PathBuf {
@@ -332,16 +334,21 @@ pub fn state_file_path(workspace: &Path) -> Result<PathBuf> {
 pub fn load_state(workspace: &Path) -> Result<Option<GateHealthState>> {
     let path = state_file_path(workspace)?;
 
-    if !path.exists() {
-        return Ok(None);
+    let content = match fs::read(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+
+    match serde_json::from_slice(&content) {
+        Ok(state) => Ok(Some(state)),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "ignoring unparseable gate health state");
+            Ok(None)
+        }
     }
-
-    let content = fs::read_to_string(&path).context("failed to read gate health state file")?;
-
-    let state: GateHealthState =
-        serde_json::from_str(&content).context("failed to parse gate health state")?;
-
-    Ok(Some(state))
 }
 
 /// Save gate health state for a workspace.
@@ -355,11 +362,94 @@ pub fn save_state(state: &GateHealthState) -> Result<()> {
     fs::create_dir_all(parent).context("failed to create gate health state directory")?;
 
     let content =
-        serde_json::to_string_pretty(state).context("failed to serialize gate health state")?;
-
-    fs::write(&path, content).context("failed to write gate health state file")?;
+        serde_json::to_vec_pretty(state).context("failed to serialize gate health state")?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix("gate-health-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .with_context(|| {
+            format!(
+                "failed to create temporary gate health state in {}",
+                parent.display()
+            )
+        })?;
+    for chunk in content.chunks(16 * 1024) {
+        temporary.write_all(chunk).with_context(|| {
+            format!(
+                "failed to write temporary gate health state for {}",
+                path.display()
+            )
+        })?;
+    }
+    temporary.as_file().sync_all().with_context(|| {
+        format!(
+            "failed to sync temporary gate health state for {}",
+            path.display()
+        )
+    })?;
+    temporary
+        .persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            format!(
+                "failed to rename temporary gate health state to {}",
+                path.display()
+            )
+        })?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| {
+            format!(
+                "failed to sync gate health state directory {}",
+                parent.display()
+            )
+        })?;
 
     Ok(())
+}
+
+/// Remove orphaned temporary gate-health writes from workers that stopped mid-write.
+/// Recent files are left alone because another worker may still be writing them.
+pub(crate) fn cleanup_stale_temporary_files(max_age: Duration) -> Result<usize> {
+    let dir = crate::state_dir::gate_health_dir();
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0;
+    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry.context("failed to inspect gate health temporary file")?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !name.starts_with("gate-health-") || !name.ends_with(".tmp") {
+            continue;
+        }
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if !metadata.is_file()
+            || SystemTime::now()
+                .duration_since(metadata.modified()?)
+                .unwrap_or_default()
+                < max_age
+        {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", path.display()))
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Record a gate execution error for a workspace.
@@ -790,6 +880,27 @@ mod tests {
         assert!(!missing_path.exists());
         assert_eq!(fs::read(&existing_path).unwrap(), existing_bytes);
         assert!(malformed_path.exists(), "untrusted records fail closed");
+    }
+
+    #[test]
+    fn malformed_state_is_absent_and_next_write_repairs_it() {
+        let (_env_guard, _home) = isolated_home();
+        let workspace = TempDir::new().unwrap();
+        let path = state_file_path(workspace.path()).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for malformed in [b"".as_slice(), b"\xff".as_slice(), b"{".as_slice()] {
+            fs::write(&path, malformed).unwrap();
+            assert!(load_state(workspace.path()).unwrap().is_none());
+            assert!(!is_degraded(workspace.path()).unwrap());
+        }
+        record_error(workspace.path(), "gate".into(), "failed".into()).unwrap();
+        assert_eq!(
+            load_state(workspace.path())
+                .unwrap()
+                .unwrap()
+                .consecutive_errors,
+            1
+        );
     }
 
     #[test]

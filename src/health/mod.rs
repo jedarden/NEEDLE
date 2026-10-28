@@ -364,6 +364,39 @@ fn resolve_heartbeat_dir(heartbeat_dir: Option<PathBuf>) -> PathBuf {
     crate::state_dir::heartbeats_dir()
 }
 
+/// Remove heartbeat temp files left by dead emitters while preserving recent
+/// writes that may belong to another live worker.
+fn cleanup_stale_heartbeat_temps(dir: &Path, max_age: Duration) -> Result<usize> {
+    let mut removed = 0;
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read heartbeat directory {}", dir.display()))?
+    {
+        let entry = entry.context("failed to inspect heartbeat directory entry")?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !name.ends_with(".json.tmp") || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let age = std::time::SystemTime::now()
+            .duration_since(entry.metadata()?.modified()?)
+            .unwrap_or_default();
+        if age < max_age {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
+            }
+        }
+    }
+    Ok(removed)
+}
+
 impl HealthMonitor {
     /// Create a new health monitor.
     ///
@@ -455,6 +488,27 @@ impl HealthMonitor {
                         e
                     ));
                 }
+            }
+        }
+
+        // Reap only old temp files: another worker may be writing a recent one.
+        let stale_after = self.heartbeat_ttl.max(Duration::from_secs(300));
+        match cleanup_stale_heartbeat_temps(&self.heartbeat_dir, stale_after) {
+            Ok(removed) if removed > 0 => {
+                tracing::info!(removed, "removed stale heartbeat temporary files")
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to clean stale heartbeat temporary files")
+            }
+        }
+        match crate::gate_health::cleanup_stale_temporary_files(stale_after) {
+            Ok(removed) if removed > 0 => {
+                tracing::info!(removed, "removed stale gate health temporary files")
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to clean stale gate health temporary files")
             }
         }
 
@@ -2052,6 +2106,51 @@ mod tests {
         config.health.heartbeat_interval_secs = 1;
         config.health.heartbeat_ttl_secs = 5;
         config
+    }
+
+    #[serial]
+    #[test]
+    fn startup_removes_only_stale_temporary_files() {
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = isolate_test_home_at(home.path());
+        let heartbeat_dir = home.path().join(".needle/state/heartbeats");
+        let gate_health_dir = home.path().join(".needle/state/gate-health");
+        std::fs::create_dir_all(&heartbeat_dir).unwrap();
+        std::fs::create_dir_all(&gate_health_dir).unwrap();
+        let stale_heartbeat = heartbeat_dir.join("dead-worker.json.tmp");
+        let fresh_heartbeat = heartbeat_dir.join("active-worker.json.tmp");
+        let unrelated = heartbeat_dir.join("keep.txt.tmp");
+        let stale_gate_health = gate_health_dir.join("gate-health-orphan.tmp");
+        let fresh_gate_health = gate_health_dir.join("gate-health-active.tmp");
+        for path in [
+            &stale_heartbeat,
+            &fresh_heartbeat,
+            &unrelated,
+            &stale_gate_health,
+            &fresh_gate_health,
+        ] {
+            std::fs::write(path, b"partial").unwrap();
+        }
+        let old = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - Duration::from_secs(3600),
+        );
+        for path in [&stale_heartbeat, &unrelated, &stale_gate_health] {
+            filetime::set_file_mtime(path, old).unwrap();
+        }
+
+        let mut monitor = HealthMonitor::new(
+            test_config(&heartbeat_dir),
+            "startup-cleanup".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+        monitor.start_emitter().unwrap();
+        assert!(!stale_heartbeat.exists());
+        assert!(!stale_gate_health.exists());
+        assert!(fresh_heartbeat.exists());
+        assert!(fresh_gate_health.exists());
+        assert!(unrelated.exists());
+        monitor.stop();
     }
 
     #[serial]

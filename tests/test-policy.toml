@@ -506,7 +506,8 @@ version = 1
 # branch contracts pin the pure arbitration helper, keeping the deterministic
 # branches out of the racy end-to-end path. Raised +10 so concurrent workers'
 # in-flight unit tests stay under the ceiling while they land.
-max_tests = 4330
+# +2 gate-health malformed-record and stale-temp unit contracts (needle-35e6cbe8).
+max_tests = 4332
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

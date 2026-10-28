@@ -199,12 +199,15 @@ pub fn due_workspaces(now: DateTime<Utc>) -> Result<Vec<PathBuf>> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Ok(content) = std::fs::read(&path) else {
             continue;
         };
-        let Ok(state) = serde_json::from_str::<crate::gate_health::GateHealthState>(&content)
-        else {
-            continue;
+        let state = match serde_json::from_slice::<crate::gate_health::GateHealthState>(&content) {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), error = %error, "ignoring unparseable gate health state");
+                continue;
+            }
         };
         if !state.degraded || !matches!(crate::gate_health::is_degraded(&state.workspace), Ok(true))
         {
