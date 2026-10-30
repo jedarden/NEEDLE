@@ -43,6 +43,20 @@ pub(crate) const GATE_NAME: &str = "close_verification";
 /// Rejection reason for a close reason without a `verified:` block.
 pub(crate) const MISSING_EVIDENCE_REASON: &str = "close reason carries no verification evidence";
 
+/// Whether this gate failure is the close-evidence gate rejecting a close
+/// reason that carries no re-runnable evidence.
+///
+/// Such a rejection is one agent's close-format habit judged against one
+/// bead — a bead penalty, not a broken gate. It must never enter the
+/// workspace's gate-health fingerprint window: readling (2026-10-29) degraded
+/// on four missing-evidence rejections across three beads plus one unrelated
+/// real failure, and 3 h 55 min of dispatch silence followed. A close whose
+/// *claimed* command genuinely fails on re-run is a different fingerprint
+/// (the command's output) and still counts.
+pub(crate) fn is_missing_evidence_rejection(gate: &str, reason: &str) -> bool {
+    gate == GATE_NAME && reason == MISSING_EVIDENCE_REASON
+}
+
 /// Per-command ceiling for a re-run. The whole handling pass is additionally
 /// bounded by `validation.outcome_timeout_seconds`, the same way command gates
 /// are.

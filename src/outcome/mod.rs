@@ -3067,6 +3067,7 @@ impl OutcomeHandler {
                     failures,
                     distinct_beads,
                     summary,
+                    ..
                 } = &recording
                 {
                     tracing::error!(
@@ -4675,59 +4676,71 @@ impl OutcomeHandler {
         // (needle-0abc120d), and both the tripping failure and any later
         // failure carrying the degraded fingerprint release without a
         // penalty.
-        let verification_recording = match gate_health::record_verification_failure(
-            &bead.workspace,
-            bead.id.as_ref(),
+        let verification_recording = if close_verification::is_missing_evidence_rejection(
             &failed_gate,
             &reason,
-            &self.config.workspace_health.detector_config(),
         ) {
-            Ok(recording) => {
-                if let gate_health::VerificationRecording::Tripped {
-                    fingerprint,
-                    failures,
-                    distinct_beads,
-                    summary,
-                } = &recording
-                {
-                    tracing::error!(
-                        bead_id = %bead.id,
-                        workspace = %bead.workspace.display(),
-                        gate = %failed_gate,
-                        fingerprint = %fingerprint,
-                        failures = failures,
-                        distinct_beads = distinct_beads,
-                        "verification-failure fingerprint dominates the workspace window — degrading"
-                    );
-                    if let Err(e) = self
-                        .create_or_update_fingerprint_gate_broken_bead(
-                            store,
-                            bead,
-                            &failed_gate,
-                            fingerprint,
-                            summary,
-                            *failures,
-                            *distinct_beads,
-                            gate_telemetry,
-                        )
-                        .await
+            // A missing `verified:` block is a close-format mistake on this
+            // bead, not evidence that the workspace's gate is broken. Keep
+            // the rejection and bead penalty below, but exclude it from the
+            // workspace fingerprint window.
+            None
+        } else {
+            match gate_health::record_verification_failure(
+                &bead.workspace,
+                bead.id.as_ref(),
+                &failed_gate,
+                &reason,
+                &self.config.workspace_health.detector_config(),
+            ) {
+                Ok(recording) => {
+                    if let gate_health::VerificationRecording::Tripped {
+                        fingerprint,
+                        failures,
+                        distinct_beads,
+                        gate,
+                        summary,
+                    } = &recording
                     {
                         tracing::error!(
-                            error = %e,
+                            bead_id = %bead.id,
                             workspace = %bead.workspace.display(),
-                            "failed to create or update the fingerprint Gate broken bead"
+                            gate = %failed_gate,
+                            fingerprint = %fingerprint,
+                            failures = failures,
+                            distinct_beads = distinct_beads,
+                            "verification-failure fingerprint dominates the workspace window — degrading"
                         );
+                        if let Err(e) = self
+                            .create_or_update_fingerprint_gate_broken_bead(
+                                store,
+                                bead,
+                                gate,
+                                fingerprint,
+                                summary,
+                                *failures,
+                                *distinct_beads,
+                                gate_telemetry,
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                error = %e,
+                                workspace = %bead.workspace.display(),
+                                "failed to create or update the fingerprint Gate broken bead"
+                            );
+                        }
                     }
+                    Some(recording)
                 }
-                Some(recording)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "could not record the verification fingerprint — treating the failure as a bead failure"
-                );
-                None
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "could not record the verification fingerprint — treating the failure as a bead failure"
+                    );
+                    None
+                }
             }
         };
         let infra_failure = verification_recording
@@ -7667,6 +7680,62 @@ Every retry cost a dispatch and taught the ledger nothing.
                 .any(|a| matches!(a, StoreAction::Reopen(_))),
             "the closed bead must be reopened, got: {:?}",
             store.actions()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_evidence_close_rejections_do_not_degrade_workspace() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-health");
+        let (mut handler, _extraction) = close_evidence_handler(
+            &helper,
+            Arc::new(crate::process_runner::FakeProcessRunner::new()),
+        );
+        handler
+            .config
+            .workspace_health
+            .fingerprint_min_window_failures = 4;
+        handler
+            .config
+            .workspace_health
+            .fingerprint_min_distinct_beads = 3;
+
+        let workspace = committed_git_workspace(&[("README.md", "close evidence fixture\n")]);
+        for (index, id) in [
+            "close-missing-a",
+            "close-missing-a",
+            "close-missing-b",
+            "close-missing-c",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let store = test_store(BeadStatus::Done)
+                .with_close_reason("completed the work without a verification block");
+            let mut bead = bead_in_workspace(BeadStatus::InProgress, workspace.path());
+            bead.id = BeadId::from(id);
+
+            let result = handler
+                .handle(&store, &bead, &test_output(0), false)
+                .await
+                .unwrap();
+
+            assert!(
+                matches!(result.bead_action, BeadAction::Released(_)),
+                "rejection {index} must still release the bead: {:?}",
+                result.bead_action
+            );
+        }
+
+        assert!(
+            !crate::gate_health::is_degraded(workspace.path()).unwrap(),
+            "close-format rejections must not degrade the workspace"
+        );
+        assert!(
+            crate::gate_health::load_state(workspace.path())
+                .unwrap()
+                .is_none(),
+            "missing-evidence rejections must not create a gate-health window"
         );
     }
 

@@ -803,7 +803,8 @@ pub fn record_adapter_failure(
     // provider the same failure signal is one fingerprint across every
     // adapter in the group (N-T51); unkeyed adapters hash their own name and
     // see exactly the fingerprints they always did.
-    let failure = VerificationFailure::new(now, bead, &format!("{key}::{reason}"), reason);
+    let gate_half = format!("{key}::{reason}");
+    let failure = VerificationFailure::new(now, bead, &gate_half, reason);
     let summary = normalize_output(reason);
 
     let mut state =
@@ -834,16 +835,27 @@ pub fn record_adapter_failure(
                 failures,
                 distinct_beads,
             } => {
+                // As in `gate_health`: describe the fingerprint that dominates
+                // the window, not the failure that happened to complete the
+                // pattern.
+                let (dominant_gate, dominant_summary) =
+                    crate::verification_fingerprint::failure_shape(
+                        &state.window,
+                        &fingerprint,
+                        &gate_half,
+                        &summary,
+                    );
                 state.degraded = true;
                 state.degraded_fingerprint = Some(fingerprint.clone());
-                state.degraded_summary = Some(summary.clone());
+                state.degraded_summary = Some(dominant_summary.clone());
                 state.degraded_at = Some(now.to_rfc3339());
                 state.last_degraded_failure_at = Some(now.to_rfc3339());
                 VerificationRecording::Tripped {
                     fingerprint,
                     failures,
                     distinct_beads,
-                    summary,
+                    gate: dominant_gate,
+                    summary: dominant_summary,
                 }
             }
             crate::verification_fingerprint::Decision::Window {

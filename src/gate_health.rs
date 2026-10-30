@@ -204,7 +204,11 @@ pub enum VerificationRecording {
         failures: usize,
         /// Distinct beads behind those failures.
         distinct_beads: usize,
-        /// Normalized failure text, for the "Gate broken" bead.
+        /// The gate behind the dominant fingerprint — the alert bead names
+        /// this, which is not necessarily the gate that tripped the window.
+        gate: String,
+        /// Normalized failure text of the dominant fingerprint, for the
+        /// "Gate broken" bead.
         summary: String,
     },
 }
@@ -277,15 +281,30 @@ pub fn record_verification_failure(
                 failures,
                 distinct_beads,
             } => {
+                // The alert must describe the fingerprint that dominates the
+                // window, which is not necessarily the failure that completed
+                // the pattern: readling (2026-10-29) tripped on four
+                // close-evidence rejections plus one real `gate_0` failure and
+                // its alert named `gate_0` while `ea603be160bd` was the
+                // fingerprint that actually degraded the workspace. Fall back
+                // to the tripping failure's shape only when the window's
+                // entries predate the retained gate/summary.
+                let (alert_gate, alert_summary) = crate::verification_fingerprint::failure_shape(
+                    &state.fingerprint_window,
+                    &fingerprint,
+                    gate,
+                    &summary,
+                );
                 state.degraded = true;
                 state.degraded_fingerprint = Some(fingerprint.clone());
-                state.degraded_gate = Some(gate.to_string());
-                state.degraded_summary = Some(summary.clone());
+                state.degraded_gate = Some(alert_gate.clone());
+                state.degraded_summary = Some(alert_summary.clone());
                 VerificationRecording::Tripped {
                     fingerprint,
                     failures,
                     distinct_beads,
-                    summary,
+                    gate: alert_gate,
+                    summary: alert_summary,
                 }
             }
             crate::verification_fingerprint::Decision::Window {
@@ -1039,6 +1058,114 @@ fatal: not a git repository (or any of the parent directories): .git";
                 .unwrap_or_default()
                 .contains("not a git repository"),
             "the summary names the failure"
+        );
+    }
+
+    #[test]
+    fn mixed_window_alert_names_the_dominant_fingerprints_gate() {
+        // The window is four `gate_0` failures across three distinct beads
+        // plus one `gate_1` failure. The `gate_1` failure completes the
+        // pattern, but `gate_0`'s fingerprint is what dominates — so the
+        // degradation state and the Tripped recording both describe `gate_0`
+        // (readling, 2026-10-29: the alert named the one real failure's gate
+        // while a different fingerprint dominated and did the degrading).
+        let (_env_guard, _home) = isolated_home();
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        let dominant_output = "command 'scripts/definition-of-done.sh --fast' failed: \
+fatal: not a git repository (or any of the parent directories): .git";
+        for bead in ["bead-a", "bead-a", "bead-b", "bead-c"] {
+            let recording = record_verification_failure(
+                workspace,
+                bead,
+                "gate_0",
+                dominant_output,
+                &DetectorConfig::default(),
+            )
+            .unwrap();
+            assert!(!recording.is_infra());
+        }
+
+        let tripping = record_verification_failure(
+            workspace,
+            "bead-d",
+            "gate_1",
+            "no substantial pushed commit and no bead note recorded for this dispatch",
+            &DetectorConfig::default(),
+        )
+        .unwrap();
+
+        match tripping {
+            VerificationRecording::Tripped {
+                fingerprint,
+                failures,
+                distinct_beads,
+                gate,
+                summary,
+            } => {
+                assert_eq!(
+                    fingerprint,
+                    crate::verification_fingerprint::fingerprint("gate_0", dominant_output),
+                    "the tripped fingerprint is the dominant one"
+                );
+                assert_eq!(failures, 4);
+                assert_eq!(distinct_beads, 3);
+                assert_eq!(gate, "gate_0", "the alert names the dominant gate");
+                assert_eq!(
+                    summary,
+                    crate::verification_fingerprint::normalize_output(dominant_output),
+                    "the summary is the dominant fingerprint's output"
+                );
+            }
+            other => panic!("expected Tripped, got {other:?}"),
+        }
+
+        let state = load_state(workspace).unwrap().expect("state persisted");
+        assert_eq!(state.degraded_gate.as_deref(), Some("gate_0"));
+        assert_eq!(
+            state.degraded_summary.as_deref(),
+            Some(crate::verification_fingerprint::normalize_output(dominant_output).as_str())
+        );
+    }
+
+    /// Four identical `gate_0` failures across three distinct beads must
+    /// degrade the workspace with a `gate_0` summary — the acceptance shape
+    /// for the dominant-fingerprint alert (the default detector needs five
+    /// window entries, so this pins the same behavior at the configured
+    /// threshold).
+    #[test]
+    fn four_identical_failures_across_three_beads_trip_with_that_gates_summary() {
+        let (_env_guard, _home) = isolated_home();
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        let output = "cargo test --lib failed: assertion `left == right` failed";
+        let config = DetectorConfig {
+            min_window_failures: 4,
+            trip_ratio: 0.75,
+            ..DetectorConfig::default()
+        };
+
+        for bead in ["bead-a", "bead-a", "bead-b", "bead-c"] {
+            let recording =
+                record_verification_failure(workspace, bead, "gate_0", output, &config).unwrap();
+            if bead == "bead-c" {
+                assert!(
+                    matches!(recording, VerificationRecording::Tripped { .. }),
+                    "the fourth failure trips: {recording:?}"
+                );
+            } else {
+                assert!(!recording.is_infra());
+            }
+        }
+
+        assert!(is_degraded(workspace).unwrap());
+        let state = load_state(workspace).unwrap().expect("state persisted");
+        assert_eq!(state.degraded_gate.as_deref(), Some("gate_0"));
+        assert_eq!(
+            state.degraded_summary.as_deref(),
+            Some(crate::verification_fingerprint::normalize_output(output).as_str())
         );
     }
 

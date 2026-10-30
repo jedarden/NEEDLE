@@ -87,6 +87,18 @@ pub struct VerificationFailure {
     pub bead: String,
     /// Stable fingerprint of gate name + normalized output.
     pub fingerprint: String,
+    /// The gate that failed, retained so a trip can describe the dominant
+    /// fingerprint's own failure shape rather than the tripping failure's
+    /// (readling, 2026-10-29: the alert named `gate_0` while the window was
+    /// dominated by close-evidence rejections). `None` in windows persisted
+    /// before this field existed — `serde(default)` keeps those loading.
+    #[serde(default)]
+    pub gate: Option<String>,
+    /// The normalized output the fingerprint was computed from — the
+    /// human-readable half of the "Gate broken" alert when this failure's
+    /// fingerprint dominates the window.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 impl VerificationFailure {
@@ -96,6 +108,8 @@ impl VerificationFailure {
             at,
             bead: bead.to_string(),
             fingerprint: fingerprint(gate, output),
+            gate: Some(gate.to_string()),
+            summary: Some(normalize_output(output)),
         }
     }
 }
@@ -344,6 +358,30 @@ pub fn normalize_output(output: &str) -> String {
         result.truncate(cut);
     }
     result
+}
+
+/// The gate and normalized output of the most recent failure carrying
+/// `fingerprint` in `window`, so a degradation alert describes the fingerprint
+/// that *dominates* the window rather than the failure that happened to
+/// complete the pattern. Falls back to `fallback_gate`/`fallback_summary` —
+/// the tripping failure's own shape — when no window entry carries the
+/// fingerprint's stored shape (windows persisted before gate/summary were
+/// retained).
+pub fn failure_shape(
+    window: &[VerificationFailure],
+    fingerprint: &str,
+    fallback_gate: &str,
+    fallback_summary: &str,
+) -> (String, String) {
+    window
+        .iter()
+        .rev()
+        .find(|failure| failure.fingerprint == fingerprint)
+        .and_then(|failure| match (&failure.gate, &failure.summary) {
+            (Some(gate), Some(summary)) => Some((gate.clone(), summary.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| (fallback_gate.to_string(), fallback_summary.to_string()))
 }
 
 #[cfg(test)]

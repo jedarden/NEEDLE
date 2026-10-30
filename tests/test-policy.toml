@@ -512,7 +512,9 @@ version = 1
 # `human` label exemption, and needle-11f7ad60's genuine operator-step case.
 # Raised +6 so concurrent workers' in-flight unit tests stay under the
 # ceiling while they land.
-max_tests = 4338
+# +3 gate-health close-evidence and dominant-fingerprint contracts
+# (needle-ab642a3d).
+max_tests = 4341
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
