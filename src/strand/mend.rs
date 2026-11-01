@@ -379,6 +379,10 @@ enum ClaimIdentityVerdict {
     /// The exact claim identity carries the expiry returned by the backend's
     /// verified fenced handle, and the live snapshot still has that epoch.
     Expired,
+    /// A legacy claim has a revision but no claim epoch. A fresh live
+    /// heartbeat no longer names the bead, and the claim is older than Mend's
+    /// configured TTL, so revision-only recovery may release it.
+    ExpiredWithoutEpoch,
     /// The live claim no longer matches the bead inventory or heartbeat claim.
     FencedConflict,
     /// Ownership could not be determined. The decisive reason is carried for
@@ -387,6 +391,14 @@ enum ClaimIdentityVerdict {
         heartbeat: UndeterminedHeartbeat,
         registry: RegistryLiveness,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClaimIdentityContext {
+    registry: RegistryLiveness,
+    heartbeat_ttl: Duration,
+    stale_by_claim_ttl: bool,
+    now: DateTime<Utc>,
 }
 
 impl ClaimIdentityVerdict {
@@ -402,6 +414,7 @@ impl ClaimIdentityVerdict {
             Self::Superseded { named: None } => ("superseded", "fresh_heartbeat_reports_idle"),
             Self::Dead { evidence } => ("dead", evidence.as_str()),
             Self::Expired => ("expired", "exact_claim_lease_expired"),
+            Self::ExpiredWithoutEpoch => ("expired_without_epoch", "legacy_claim_ttl_expired"),
             Self::FencedConflict => ("fenced_conflict", "live_claim_no_longer_matches_inventory"),
             Self::Unknown { heartbeat, .. } => ("unknown", heartbeat.as_str()),
         }
@@ -630,10 +643,14 @@ fn classify_claim_identity(
     heartbeat: Option<&ClaimHeartbeatLookup>,
     live_claim: Option<&ClaimStatus>,
     store_workspace_identity: Option<&str>,
-    registry: RegistryLiveness,
-    heartbeat_ttl: Duration,
-    now: DateTime<Utc>,
+    context: ClaimIdentityContext,
 ) -> ClaimIdentityVerdict {
+    let ClaimIdentityContext {
+        registry,
+        heartbeat_ttl,
+        stale_by_claim_ttl,
+        now,
+    } = context;
     let unknown = |heartbeat| ClaimIdentityVerdict::Unknown {
         heartbeat,
         registry,
@@ -647,7 +664,7 @@ fn classify_claim_identity(
     {
         return ClaimIdentityVerdict::FencedConflict;
     }
-    let (Some(_), Some(live_claim_epoch)) = (live_claim.revision, live_claim.claim_epoch) else {
+    let Some(_) = live_claim.revision else {
         return unknown(UndeterminedHeartbeat::ClaimSnapshotUnknown);
     };
 
@@ -692,6 +709,25 @@ fn classify_claim_identity(
         return unknown(UndeterminedHeartbeat::Stale);
     }
 
+    // Older bead-rs claims can have a revision without a claim epoch. A fresh
+    // heartbeat that is alive but no longer announces this bead, combined
+    // with Mend's claim-age threshold, is the bounded recovery evidence for
+    // that legacy shape. This is deliberately narrower than age alone and is
+    // unavailable when the registry cannot positively identify the worker as
+    // alive. A heartbeat claim identity that still names the bead also wins.
+    let heartbeat_announces_bead = heartbeat.current_bead.as_ref() == Some(&bead.id)
+        || heartbeat
+            .claim_identity
+            .as_ref()
+            .is_some_and(|identity| identity.bead_id == bead.id);
+    if live_claim.claim_epoch.is_none()
+        && stale_by_claim_ttl
+        && registry == RegistryLiveness::RegisteredAlive
+        && !heartbeat_announces_bead
+    {
+        return ClaimIdentityVerdict::ExpiredWithoutEpoch;
+    }
+
     let correlated_identity = match correlate_mend_claim_identity(
         bead,
         heartbeat,
@@ -707,7 +743,7 @@ fn classify_claim_identity(
     // attempt that made the old claim. A reused qualified name alone therefore
     // cannot prove supersession of another bead.
     if correlated_identity.bead_id != bead.id
-        || correlated_identity.claim_epoch.0 != live_claim_epoch
+        || Some(correlated_identity.claim_epoch.0) != live_claim.claim_epoch
     {
         return unknown(UndeterminedHeartbeat::ClaimIdentityUnknown);
     }
@@ -757,9 +793,7 @@ fn classify_claim_with_policy(
     bead: &Bead,
     heartbeat: Option<&ClaimHeartbeatLookup>,
     live_claim: Option<&ClaimStatus>,
-    registry: RegistryLiveness,
-    heartbeat_ttl: Duration,
-    now: DateTime<Utc>,
+    context: ClaimIdentityContext,
 ) -> ClaimIdentityVerdict {
     match policy {
         ClaimCleanupPolicy::MendExact { workspace_identity } => classify_claim_identity(
@@ -767,11 +801,15 @@ fn classify_claim_with_policy(
             heartbeat,
             live_claim,
             workspace_identity.as_deref(),
-            registry,
-            heartbeat_ttl,
-            now,
+            context,
         ),
         ClaimCleanupPolicy::SharedLegacy => {
+            let ClaimIdentityContext {
+                registry,
+                heartbeat_ttl,
+                now,
+                ..
+            } = context;
             let projected = legacy_executor_lookup(heartbeat, heartbeat_ttl, now);
             match classify_claim_ownership(&bead.id, projected.as_ref(), registry, now) {
                 ClaimOwnership::ConfirmedCurrent => ClaimIdentityVerdict::Current,
@@ -870,10 +908,12 @@ fn emit_claim_identity_verdict(
 
 /// Apply the selected recovery policy. Mend's exact mode requires a fresh
 /// heartbeat identity matching the configured store workspace and live
-/// bead-rs status, assignee, and claim epoch. A different heartbeat claim is
-/// Unknown because the snapshot does not bind the old claim to its session or
-/// attempt. Every release uses the revision and epoch from its observed live
-/// snapshot; renewal or reassignment wins through the backend compare-and-swap.
+/// bead-rs status, assignee, and claim epoch. Legacy snapshots with a
+/// revision but no epoch may use the narrower TTL-plus-idle-heartbeat gate.
+/// A different heartbeat claim is otherwise Unknown because the snapshot does
+/// not bind the old claim to its session or attempt. Every release uses the
+/// revision and epoch (when present) from its observed live snapshot; renewal
+/// or reassignment wins through the backend compare-and-swap.
 async fn cleanup_in_progress(
     store: &dyn BeadStore,
     registry: &Registry,
@@ -1041,9 +1081,12 @@ async fn cleanup_in_progress(
             bead,
             heartbeat_evidence,
             observed.as_ref(),
-            registry_evidence,
-            heartbeat_ttl,
-            now,
+            ClaimIdentityContext {
+                registry: registry_evidence,
+                heartbeat_ttl,
+                stale_by_claim_ttl: stale_by_ttl,
+                now,
+            },
         );
         let (classified_verdict, classified_evidence) = ownership.telemetry_fields(&policy);
 
@@ -1122,6 +1165,11 @@ async fn cleanup_in_progress(
             ),
             ClaimIdentityVerdict::Expired => (
                 "expired: exact claim identity reports its lease expired".to_string(),
+                Some((classified_verdict, classified_evidence)),
+            ),
+            ClaimIdentityVerdict::ExpiredWithoutEpoch => (
+                "expired: legacy claim has no epoch and its live heartbeat no longer names it"
+                    .to_string(),
                 Some((classified_verdict, classified_evidence)),
             ),
         };
@@ -3541,6 +3589,7 @@ mod tests {
         release_count: Arc<AtomicU32>,
         clear_assignee_count: Arc<AtomicU32>,
         recovery_conflicts: Mutex<HashSet<BeadId>>,
+        claim_status_errors: Mutex<HashSet<BeadId>>,
         claim_snapshots: Mutex<HashMap<BeadId, ClaimStatus>>,
         recovery_current: Mutex<HashMap<BeadId, ClaimStatus>>,
         recovery_observed: Mutex<Vec<(BeadId, ClaimStatus)>>,
@@ -3563,6 +3612,7 @@ mod tests {
                     release_count: release_count.clone(),
                     clear_assignee_count: clear_assignee_count.clone(),
                     recovery_conflicts: Mutex::new(HashSet::new()),
+                    claim_status_errors: Mutex::new(HashSet::new()),
                     claim_snapshots: Mutex::new(HashMap::new()),
                     recovery_current: Mutex::new(HashMap::new()),
                     recovery_observed: Mutex::new(Vec::new()),
@@ -3577,6 +3627,10 @@ mod tests {
 
         fn set_claim_snapshot(&self, id: BeadId, snapshot: ClaimStatus) {
             self.claim_snapshots.lock().unwrap().insert(id, snapshot);
+        }
+
+        fn set_claim_status_error(&self, id: BeadId) {
+            self.claim_status_errors.lock().unwrap().insert(id);
         }
 
         fn set_recovery_current(&self, id: BeadId, snapshot: ClaimStatus) {
@@ -3634,6 +3688,9 @@ mod tests {
             anyhow::bail!("mend recovery must not use claimant-owned release")
         }
         async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+            if self.claim_status_errors.lock().unwrap().contains(id) {
+                anyhow::bail!("claim status unavailable for {id}");
+            }
             if let Some(snapshot) = self.claim_snapshots.lock().unwrap().get(id).cloned() {
                 return Ok(snapshot);
             }
@@ -4885,6 +4942,118 @@ mod tests {
             assert!(!serialized.contains("attempt-session-current-secret"));
             assert!(!serialized.contains("session-expired-secret"));
             assert!(!serialized.contains("attempt-session-expired-secret"));
+        }
+
+        mend_releases_stale_epochless_claim_only_when_heartbeat_is_idle().await;
+    }
+
+    async fn mend_releases_stale_epochless_claim_only_when_heartbeat_is_idle() {
+        // Legacy bead-rs claims can retain a revision while projecting no
+        // claim epoch. Only a successful live snapshot with that shape, a
+        // fresh heartbeat that does not name the bead, and an expired claim
+        // may use revision-only recovery. The neighboring cases pin the
+        // fail-closed boundaries for the regression.
+        let cases = [
+            ("legacy-expired", true, false, false, false),
+            ("heartbeat-names-claim", true, true, false, false),
+            ("claim-within-ttl", false, false, false, false),
+            ("snapshot-read-error", true, false, true, false),
+            ("revision-missing", true, false, false, true),
+        ];
+
+        for (name, stale_by_ttl, heartbeat_names_claim, snapshot_error, missing_revision) in cases {
+            let heartbeat_dir = tempfile::tempdir().unwrap();
+            let registry_dir = tempfile::tempdir().unwrap();
+            let workspace = fixture_root("mend-epochless-legacy-workspace");
+            let assignee = format!("worker-epochless-{name}");
+            let mut bead = make_in_progress_bead(&format!("nd-epochless-{name}"), &assignee);
+            bead.workspace = workspace.clone();
+            bead.updated_at = if stale_by_ttl {
+                Utc::now() - chrono::Duration::seconds(90)
+            } else {
+                Utc::now()
+            };
+
+            let registry = Registry::new(registry_dir.path());
+            registry
+                .register(crate::registry::WorkerEntry {
+                    id: assignee.clone(),
+                    pid: std::process::id(),
+                    workspace: workspace.clone(),
+                    agent: "test".to_string(),
+                    model: None,
+                    provider: None,
+                    started_at: Utc::now(),
+                    beads_processed: 0,
+                    beads_completed: 0,
+                    config_reload_generation: 0,
+                    otlp_degraded: None,
+                    state: None,
+                })
+                .unwrap();
+
+            let current_bead = heartbeat_names_claim.then(|| bead.id.as_ref());
+            let mut heartbeat = make_stale_heartbeat(&assignee, std::process::id(), current_bead);
+            heartbeat.qualified_id = assignee.clone();
+            heartbeat.workspace = workspace.clone();
+            heartbeat.last_heartbeat = Utc::now();
+            write_heartbeat(heartbeat_dir.path(), &heartbeat);
+
+            let (store, release_count, _) = MockBeadStore::new(vec![bead.clone()]);
+            let snapshot = ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: bead.assignee.clone(),
+                revision: (!missing_revision).then_some(4),
+                claim_epoch: None,
+            };
+            if snapshot_error {
+                store.set_claim_status_error(bead.id.clone());
+            } else {
+                store.set_claim_snapshot(bead.id.clone(), snapshot.clone());
+                store.set_recovery_current(bead.id.clone(), snapshot);
+            }
+
+            let telemetry = TestHelper::new("mend-epochless-legacy");
+            let released = cleanup_in_progress(
+                &store,
+                &registry,
+                telemetry.telemetry(),
+                Some(Duration::from_secs(60)),
+                Some(heartbeat_dir.path()),
+                Duration::from_secs(300),
+                ClaimCleanupPolicy::MendExact {
+                    workspace_identity: canonical_workspace_identity(&workspace),
+                },
+            )
+            .await
+            .unwrap();
+            telemetry.sync().await;
+
+            let should_release = name == "legacy-expired";
+            assert_eq!(released, u32::from(should_release), "{name}");
+            assert_eq!(
+                release_count.load(Ordering::Relaxed),
+                u32::from(should_release),
+                "{name}: release mutation count"
+            );
+            assert_eq!(
+                store.recovery_observed().len(),
+                usize::from(should_release),
+                "{name}: release_recovery call count"
+            );
+
+            let unknown = telemetry.events_by_type("mend.claim_ownership_unknown");
+            assert_eq!(
+                unknown.is_empty(),
+                should_release,
+                "{name}: unknown telemetry"
+            );
+            if should_release {
+                let verdicts = telemetry.events_by_type("mend.claim_identity_verdict");
+                assert_eq!(verdicts.len(), 1, "{name}: one ownership verdict");
+                assert_eq!(verdicts[0].data["verdict"], "expired_without_epoch");
+                assert_eq!(verdicts[0].data["evidence"], "legacy_claim_ttl_expired");
+            }
         }
     }
 

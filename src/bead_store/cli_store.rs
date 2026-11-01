@@ -1787,14 +1787,13 @@ impl BeadStore for CliBeadStore {
         let revision = expected.revision.ok_or_else(|| {
             anyhow::anyhow!("recovery release for {id} requires an observed revision")
         })?;
-        let claim_epoch = expected.claim_epoch.ok_or_else(|| {
-            anyhow::anyhow!("recovery release for {id} requires an observed claim epoch")
-        })?;
-        let values = HashMap::from([
+        let mut values = HashMap::from([
             ("id", id.to_string()),
             ("if_revision", revision.to_string()),
-            ("fencing_token", claim_epoch.to_string()),
         ]);
+        if let Some(claim_epoch) = expected.claim_epoch {
+            values.insert("fencing_token", claim_epoch.to_string());
+        }
 
         match self.run_operation("release", &values).await {
             Ok(_) => Ok(RecoveryReleaseOutcome::Released),
@@ -2907,6 +2906,7 @@ mod process_runner_tests {
             Some(4),
             b"claim epoch changed".to_vec(),
         ));
+        runner.push_output(ProcessOutput::success(Vec::new()));
         let store = CliBeadStore::new(
             backend,
             binary,
@@ -3005,12 +3005,18 @@ mod process_runner_tests {
             revision: Some(42),
             claim_epoch: None,
         };
-        let error = store
+        let outcome = store
             .release_recovery(&BeadId::from("needle-unfenced"), &unfenced)
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains("observed claim epoch"));
-        assert_eq!(runner.requests().len(), 2, "no unfenced mutation is safe");
+            .unwrap();
+        assert_eq!(outcome, RecoveryReleaseOutcome::Released);
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[2].arguments(),
+            ["release", "needle-unfenced", "--if-revision", "42"],
+            "legacy recovery uses its observed revision without adopting a token"
+        );
     }
 
     #[tokio::test]
