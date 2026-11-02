@@ -530,10 +530,6 @@ pub enum CliCommand {
         #[arg(long)]
         until: Option<String>,
 
-        /// Stop after reading this many log files (triage on huge log roots).
-        #[arg(long, value_name = "N")]
-        max_files: Option<usize>,
-
         /// Output format.
         #[arg(long, value_enum, default_value = "table")]
         format: ListFormat,
@@ -858,9 +854,8 @@ pub fn run() -> Result<()> {
             by,
             since,
             until,
-            max_files,
             format,
-        } => cmd_stats(by, since, until, max_files, format),
+        } => cmd_stats(by, since, until, format),
         CliCommand::Supervise { workspace } => cmd_supervise(workspace),
         CliCommand::CiReconcile { workspace, once } => cmd_ci_reconcile(workspace, once),
         CliCommand::Audit {
@@ -4416,62 +4411,6 @@ fn cmd_attach(identifier: &str) -> Result<()> {
     Ok(())
 }
 
-/// Default false-close scan window for `needle status`, in hours.
-///
-/// status runs on hot paths; even a streamed pass over a multi-gigabyte
-/// log root costs minutes of I/O (the 2026-11-01 lab wedge held the whole
-/// user slice at 33 GB RSS for six days on the old read-everything path),
-/// so the unflagged scan covers one day.
-const FALSE_CLOSE_DEFAULT_WINDOW_HOURS: i64 = 24;
-
-/// The effective false-close scan window for `needle status`: the
-/// `since`/`until` bounds handed to the log scan, plus the span in hours
-/// reported to operators (`false_close_window_hours` in JSON output).
-struct FalseCloseWindow {
-    since: Option<DateTime<Utc>>,
-    until: Option<DateTime<Utc>>,
-    window_hours: f64,
-}
-
-/// Resolve the effective false-close scan window from `--since`/`--until`.
-///
-/// Without flags the window is the last [`FALSE_CLOSE_DEFAULT_WINDOW_HOURS`]
-/// hours; an explicit `--since` moves the start and an explicit `--until`
-/// moves the end, widening or shifting the scan as the operator asks.
-/// `window_hours` is the effective span reported to operators, saturated
-/// at zero for an inverted window (which scans nothing).
-fn false_close_window(since: Option<&str>, until: Option<&str>) -> Result<FalseCloseWindow> {
-    let until_dt = until.map(telemetry::parse_until).transpose()?;
-    let end = until_dt.unwrap_or_else(Utc::now);
-    let since_dt = match since {
-        Some(explicit) => telemetry::parse_since(explicit)?,
-        None => end - chrono::Duration::hours(FALSE_CLOSE_DEFAULT_WINDOW_HOURS),
-    };
-    let window_hours = end.signed_duration_since(since_dt).num_seconds().max(0) as f64 / 3600.0;
-    Ok(FalseCloseWindow {
-        since: Some(since_dt),
-        until: until_dt,
-        window_hours,
-    })
-}
-
-/// Stream the window's telemetry logs into false-close counts, one event
-/// at a time. No event is retained: peak memory is one accumulator entry
-/// per adapter/model pair, regardless of log volume (the same defect class
-/// needle-bf51b54f fixed for `needle stats`). Files whose filename date
-/// lies entirely outside the window are never opened.
-fn stream_false_close_counts(
-    log_dir: &Path,
-    since: Option<DateTime<Utc>>,
-    until: Option<DateTime<Utc>>,
-) -> Result<Vec<telemetry::FalseCloseCount>> {
-    let mut acc = telemetry::FalseCloseAccumulator::new();
-    for path in telemetry::log_files_in_window(log_dir, since, until)? {
-        telemetry::stream_log_file(&path, since, until, |event| acc.observe(&event))?;
-    }
-    Ok(acc.finish())
-}
-
 /// `needle status` — show fleet status summary.
 fn cmd_status(
     format: ListFormat,
@@ -4529,11 +4468,9 @@ fn cmd_status(
     let discovered_count = discovered.len();
     let total_beads_completed: u64 = workers.iter().map(|w| w.beads_completed).sum();
     let total_bead_claims: u64 = workers.iter().map(|w| w.beads_processed).sum();
-    let fc_window = false_close_window(since.as_deref(), until.as_deref())?;
-    let false_close_window_hours = fc_window.window_hours;
-    let false_close_counts =
-        stream_false_close_counts(&needle_home.join("logs"), fc_window.since, fc_window.until)
-            .unwrap_or_default();
+    let false_close_counts = telemetry::read_logs(&needle_home.join("logs"), None, None, None)
+        .map(|events| telemetry::compute_false_close_counts(&events))
+        .unwrap_or_default();
 
     // Check heartbeat health for registered workers.
     let heartbeat_dir = needle_home.join("state").join("heartbeats");
@@ -4602,7 +4539,6 @@ fn cmd_status(
             println!();
 
             println!("False Closes by Adapter:");
-            println!("  window: {:.0}h", false_close_window_hours);
             println!("{:<28} {:<28} COUNT", "ADAPTER", "MODEL");
             println!("{}", "-".repeat(68));
             if false_close_counts.is_empty() {
@@ -4827,7 +4763,6 @@ fn cmd_status(
                 "discovered_workers": discovered_count,
                 "total_beads_completed": total_beads_completed,
                 "total_bead_claims": total_bead_claims,
-                "false_close_window_hours": false_close_window_hours,
                 "false_close_counts": false_close_counts.iter().map(|count| {
                     serde_json::json!({
                         "adapter": count.adapter,
@@ -5100,20 +5035,13 @@ fn cmd_status(
 }
 
 /// `needle stats` — show outcome statistics from telemetry logs.
-///
-/// Streams the window's log files event-by-event into a
-/// [`crate::stats::StatsAccumulator`]: events are aggregated as they are
-/// read and never retained, so peak memory is the aggregation state (one
-/// row per group) rather than the window. Files whose filename date lies
-/// entirely outside `--since`/`--until` are never opened.
 fn cmd_stats(
     by: StatsBy,
     since: Option<String>,
     until: Option<String>,
-    max_files: Option<usize>,
     format: ListFormat,
 ) -> Result<()> {
-    use crate::stats::{StatsAccumulator, StatsDimension};
+    use crate::stats::{compute_archive_stats, compute_stats, StatsDimension};
 
     let config = ConfigLoader::load_global()?;
     let log_dir = crate::state_dir::logs_dir_for(
@@ -5123,6 +5051,8 @@ fn cmd_stats(
 
     let since_dt = since.as_deref().map(telemetry::parse_since).transpose()?;
     let until_dt = until.as_deref().map(telemetry::parse_until).transpose()?;
+    let events = telemetry::read_logs(&log_dir, since_dt, until_dt, None)?;
+    let archive_stats = compute_archive_stats(&events);
 
     let dimension = match by {
         StatsBy::TemplateVersion => StatsDimension::TemplateVersion,
@@ -5135,31 +5065,7 @@ fn cmd_stats(
         StatsBy::Workspace => StatsDimension::Workspace,
     };
 
-    // Prune by filename date before opening anything.
-    let mut files = telemetry::log_files_in_window(&log_dir, since_dt, until_dt)?;
-    let window_files = files.len();
-    if let Some(cap) = max_files {
-        files.truncate(cap);
-    }
-    // Progress goes to stderr: stdout stays machine-readable in --format json.
-    eprintln!(
-        "needle stats: reading {} of {} log file(s) in window",
-        files.len(),
-        window_files
-    );
-
-    let mut acc = StatsAccumulator::new(dimension);
-    let progress_every = files.len().div_ceil(4).max(1);
-    for (idx, path) in files.iter().enumerate() {
-        telemetry::stream_log_file(path, since_dt, until_dt, |event| {
-            acc.observe(&event);
-        })?;
-        if (idx + 1) % progress_every == 0 {
-            eprintln!("needle stats: {}/{} log files read", idx + 1, files.len());
-        }
-    }
-    let (mut rows, archive_stats) = acc.into_parts();
-
+    let mut rows = compute_stats(&events, dimension);
     // Sort by beads descending so most active groups appear first.
     rows.sort_by(|a, b| b.beads.cmp(&a.beads).then(a.key.cmp(&b.key)));
 
@@ -8392,9 +8298,6 @@ struct CircuitStatusRow {
 }
 
 fn collect_circuit_statuses(config: &Config, workers: &[WorkerEntry]) -> Vec<CircuitStatusRow> {
-    // Status is called on hot paths. A slow git remote or CI source must not
-    // hold the whole command after its local state has been collected.
-    const LOOKUP_BUDGET: Duration = Duration::from_secs(8);
     let mut workspaces = vec![config.workspace.default.clone()];
     for workspace in &config.strands.explore.workspaces {
         if !workspaces.contains(workspace) {
@@ -8442,32 +8345,12 @@ fn collect_circuit_statuses(config: &Config, workers: &[WorkerEntry]) -> Vec<Cir
         }
     };
 
-    let started = Instant::now();
-    let rows = workspaces
+    workspaces
         .into_iter()
         .map(|workspace| {
             let workspace_display = workspace.display().to_string();
-            let remaining = LOOKUP_BUDGET.saturating_sub(started.elapsed());
-            let snapshot = if remaining.is_zero() {
-                None
-            } else {
-                match runtime.block_on(async {
-                    tokio::time::timeout(remaining, checker.snapshot_for_workspace(&workspace))
-                        .await
-                }) {
-                    Ok(Ok(snapshot)) => Some(snapshot),
-                    Ok(Err(error)) => {
-                        tracing::debug!(workspace = %workspace_display, error = %error, "build circuit status unavailable");
-                        None
-                    }
-                    Err(_) => {
-                        tracing::debug!(workspace = %workspace_display, "build circuit status timed out");
-                        None
-                    }
-                }
-            };
-            match snapshot {
-                Some(snapshot) => CircuitStatusRow {
+            match runtime.block_on(checker.snapshot_for_workspace(&workspace)) {
+                Ok(snapshot) => CircuitStatusRow {
                     workspace: workspace_display,
                     state: match snapshot.status {
                         crate::build_status::BuildStatus::Failing => "open",
@@ -8486,22 +8369,21 @@ fn collect_circuit_statuses(config: &Config, workers: &[WorkerEntry]) -> Vec<Cir
                     sha: snapshot.commit_sha,
                     phase: snapshot.phase,
                 },
-                None => CircuitStatusRow {
-                    workspace: workspace_display,
-                    state: "unknown".to_string(),
-                    status: "unknown".to_string(),
-                    source: "unknown".to_string(),
-                    template: String::new(),
-                    sha: None,
-                    phase: None,
-                },
+                Err(error) => {
+                    tracing::debug!(workspace = %workspace_display, error = %error, "build circuit status unavailable");
+                    CircuitStatusRow {
+                        workspace: workspace_display,
+                        state: "unknown".to_string(),
+                        status: "unknown".to_string(),
+                        source: "unknown".to_string(),
+                        template: String::new(),
+                        sha: None,
+                        phase: None,
+                    }
+                }
             }
         })
-        .collect();
-    // Timed-out HTTP probes use spawn_blocking and may outlive their futures.
-    // Do not wait for those background requests while returning status.
-    runtime.shutdown_timeout(Duration::from_millis(100));
-    rows
+        .collect()
 }
 
 /// Per-worker status information for the status command.
@@ -11140,52 +11022,6 @@ mod tests {
         {
             assert!(!by_worker, "by_worker should default to false");
         }
-    }
-
-    #[test]
-    fn false_close_window_defaults_to_24h_and_honors_flags() {
-        // Default: the last FALSE_CLOSE_DEFAULT_WINDOW_HOURS hours.
-        let fc = false_close_window(None, None).unwrap();
-        assert!(fc.since.is_some(), "default window must have a start");
-        assert!(fc.until.is_none(), "default window runs to now");
-        assert!(
-            (fc.window_hours - FALSE_CLOSE_DEFAULT_WINDOW_HOURS as f64).abs() < 0.01,
-            "default window is {}h, expected ~24h",
-            fc.window_hours
-        );
-
-        // Explicit --since widens the start; --until moves the end.
-        let fc = false_close_window(Some("168h"), Some("24h")).unwrap();
-        let since = fc.since.expect("explicit since");
-        let until = fc.until.expect("explicit until");
-        assert!(
-            (fc.window_hours - 144.0).abs() < 0.01,
-            "window is {}h, expected ~144h",
-            fc.window_hours
-        );
-        let expected_since = Utc::now() - chrono::Duration::hours(168);
-        assert!(
-            (since - expected_since).num_seconds().abs() < 5,
-            "since {since} not ~{expected_since}"
-        );
-        let expected_until = Utc::now() - chrono::Duration::hours(24);
-        assert!(
-            (until - expected_until).num_seconds().abs() < 5,
-            "until {until} not ~{expected_until}"
-        );
-
-        // --until alone selects the 24 hours ending at that bound.
-        let fc = false_close_window(None, Some("168h")).unwrap();
-        let expected_since = Utc::now() - chrono::Duration::hours(192);
-        assert!(
-            (fc.since.unwrap() - expected_since).num_seconds().abs() < 5,
-            "--until without --since must shift the default window"
-        );
-        assert_eq!(fc.window_hours, 24.0);
-
-        // An inverted window scans nothing and saturates the report at 0.
-        let fc = false_close_window(Some("24h"), Some("168h")).unwrap();
-        assert_eq!(fc.window_hours, 0.0);
     }
 
     #[test]
