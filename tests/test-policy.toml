@@ -40,6 +40,9 @@ version = 1
 # is the only place that can read this module's own source, and the rule it
 # enforces is what kept the lib tier intermittently red.
 # +23 for the Resolve DecisionExecutor ownership-guard suite (needle-f0fd0685).
+# +6 for the streaming stats contracts (needle-bf51b54f): filename-date
+# pruning and never-open guarantees in src/telemetry, and accumulator
+# equivalence/additivity in src/stats.
 # +10 for the log-prune unit suite (needle-daab3ee2).
 # +5 for dispatch-time verification through the resolved target-workspace store
 # (needle-828a425c): three collision/routing suites in src/claim/mod.rs that need
@@ -514,7 +517,24 @@ version = 1
 # ceiling while they land.
 # +3 gate-health close-evidence and dominant-fingerprint contracts
 # (needle-ab642a3d).
-max_tests = 4341
+# +7 provider-error contracts (needle-d07fbf8f): envelope provider-shape and
+# agent-reported-error pairs, exit-zero classification precedence, and the
+# release/ledger/gate-precedence outcome handlers. Raised +9 so the
+# comment-serde pair in flight on the shared tree stays under the ceiling
+# while it lands.
+# +3 status streaming false-close contracts (needle-0c7623fa): the
+# accumulator fold matches compute_false_close_counts on mixed event
+# types/adapters/models, the windowed fold never opens a filename-dated
+# file outside the window (proven by an unreadable directory twin), and
+# false_close_window's 24h default plus --since/--until handling.
+# +12 workspace disposable-extract contracts (needle-a005aa95): the narrow
+# name allow-list, stale-removal/fresh-keep/live-keep/tracked-keep gates,
+# non-checkout shape rejection, no-.git skip, fail-closed tracked audit,
+# zero-TTL bail, dedupe against the home roots, and the real-git
+# info/exclude + ls-files scan-cleanliness contract. Raised +15 so
+# concurrent workers' in-flight unit tests stay under the ceiling while
+# they land.
+max_tests = 4372
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -1167,6 +1187,13 @@ kind = "sleep"
 max_occurrences = 1
 owner = "needle-980afbb6"
 reason = "The replay executor waits past the configured heartbeat interval so the mock API observes the scheduled heartbeat before completion."
+
+[[unit_exception]]
+path = "src/scratch_sweep.rs"
+kind = "process"
+max_occurrences = 1
+owner = "needle-a005aa95"
+reason = "The workspace-extract contract is about git's own index and info/exclude behavior: the acceptance check is that git ls-files --others --exclude-standard stays clean after the sweep and that tracked paths under a candidate are detected. A temporary real repository is the only faithful fixture. One test helper spawns git."
 
 # Files under tests/ that are not compiled into a Rust harness are still test
 # assets. Each must match a rule with a durable component owner.
