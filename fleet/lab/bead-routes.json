@@ -2,9 +2,54 @@
   "version": 1,
   "remote_router": "/home/coding/.local/bin/bead",
   "routes": {
+    "jedarden/agent-transcript-archive": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/agent-transcript-archive",
+      "clients": ["lab"]
+    },
+    "jedarden/armor": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/ARMOR",
+      "clients": ["lab"]
+    },
+    "jedarden/bead-rs": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/bead-rs",
+      "clients": ["lab"]
+    },
+    "jedarden/cgov-polish-queue": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/cgov-polish-queue",
+      "clients": ["lab"]
+    },
     "jedarden/declarative-config": {
       "authority_host": "codinghome",
       "authority_path": "/home/coding/declarative-config",
+      "clients": ["lab"]
+    },
+    "jedarden/halfonadouble.com": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/halfonadouble.com",
+      "clients": ["lab"]
+    },
+    "jedarden/historical-options-mcp": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/historical-options-mcp",
+      "clients": ["lab"]
+    },
+    "jedarden/jeds-curated-skills": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/jeds-curated-skills",
+      "clients": ["lab"]
+    },
+    "jedarden/needle": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/NEEDLE",
+      "clients": ["lab"]
+    },
+    "jedarden/shephrd": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/shephrd",
       "clients": ["lab"]
     }
   }
