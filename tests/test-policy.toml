@@ -534,7 +534,13 @@ version = 1
 # info/exclude + ls-files scan-cleanliness contract. Raised +15 so
 # concurrent workers' in-flight unit tests stay under the ceiling while
 # they land.
-max_tests = 4372
+# +3 needs-human attribution-exemption contracts (needle-4ba96071): the
+# beadrs R042 "Operator-requested" header does not park, operator-attribution
+# phrasing (requested-by, decision, decided, possessive caution) does not
+# park, and the operator-performs-step phrase family still parks while a
+# delivered commit keeps exempting the re-pluck. Raised +6 so concurrent
+# workers' in-flight unit tests stay under the ceiling while they land.
+max_tests = 4378
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

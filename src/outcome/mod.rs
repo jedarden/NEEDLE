@@ -478,6 +478,45 @@ fn operator_store_gate_reason(gate_report: Option<&GateReport>) -> Option<String
         .map(|(gate, detail)| format!("operator action required by gate {gate}: {detail}"))
 }
 
+/// Phrases that name work only an operator can perform. Each phrase puts the
+/// operator on the performing side of a required step; a description that
+/// only *attributes* the work ("Operator-requested", "requested by the
+/// operator", "operator decision", "the operator decided") matches none of
+/// them, and a possessive caution ("do not run X; that is the operator's
+/// step") keeps its apostrophe, so it never matches the bare "operator step"
+/// phrase either. Two independent word hits ("operator" anywhere plus "must"
+/// anywhere) were the needle-4ba96071 defect: every beadrs R042 header
+/// opened with "Operator-requested" plus ordinary task words and parked any
+/// attempt that delivered no commit.
+const OPERATOR_STEP_PHRASES: &[&str] = &[
+    // The step itself is named as the operator's to perform.
+    "operator step",
+    "manual step",
+    // The operator carries an obligation.
+    "operator must",
+    "operator needs to",
+    "operator has to",
+    "human must",
+    "human needs to",
+    "human has to",
+    // The work requires an operator's participation.
+    "require an operator",
+    "requires an operator",
+    "require the operator",
+    "requires the operator",
+    "need an operator",
+    "needs an operator",
+    "need the operator",
+    "needs the operator",
+    "only an operator can",
+    "only the operator can",
+    // Canonical operator-required phrasings.
+    "operator intervention",
+    "manual intervention",
+    "operator approval required",
+    "operator action required",
+];
+
 fn operator_step_reason(description: Option<&str>) -> Option<String> {
     let description = description?.trim();
     if description.is_empty() {
@@ -489,26 +528,10 @@ fn operator_step_reason(description: Option<&str>) -> Option<String> {
     // it does not describe a person whose step only an operator can perform
     // (readling-bf50da3d parked twice on a pushed deliverable this way).
     let operator_haystack = lower.replace("`human`", " ");
-    let names_operator = operator_haystack.contains("operator")
-        || operator_haystack.contains("manual")
-        || operator_haystack.contains("human");
-    let names_step = [
-        "step",
-        "action",
-        "required",
-        "must",
-        "needs",
-        "perform",
-        "write",
-        "apply",
-        "create",
-        "approve",
-        "configure",
-        "only",
-    ]
-    .iter()
-    .any(|word| operator_haystack.contains(word));
-    if names_operator && names_step {
+    if OPERATOR_STEP_PHRASES
+        .iter()
+        .any(|phrase| operator_haystack.contains(phrase))
+    {
         Some(format!(
             "operator step named in bead description: {}",
             compact_reason(description)
@@ -7487,6 +7510,85 @@ Every retry cost a dispatch and taught the ledger nothing.
         )
         .expect("a genuine operator step must still park as human");
         assert!(reason.contains("operator step named"));
+    }
+
+    /// The beadrs R042 header, verbatim (needle-4ba96071): it records who
+    /// requested the work and where the evidence came from — attribution,
+    /// not an operator step. Both R042 attempts that ended in infrastructure
+    /// failures (beadrs-1ca13b1c's API 499, beadrs-4da7d7d8's hook timeouts)
+    /// parked as needs_human on this header and had to be un-parked by hand.
+    const R042_OPERATOR_REQUESTED_HEADER: &str = "Plan: docs/plan/plan.md R042 item 1 (commit 75dc46a6; decision record beadrs-691c4fec). Operator-requested 2026-10-28. Evidence comes from a 2026-10-28 sweep of 98 bead-rs workspaces on codinghome (50,819 beads, copies deduplicated) and of transcripts from 2026-08-03 to 2026-10-28 (292,734 bead-related shell commands; regex baselines, not release claims).";
+
+    #[test]
+    fn r042_operator_requested_header_does_not_park_as_needs_human() {
+        // No commit delivered this attempt or before it: the header alone
+        // must not fire the description fallback.
+        assert!(detect_needs_human(
+            &test_output(1),
+            None,
+            Some(R042_OPERATOR_REQUESTED_HEADER),
+            &[],
+            &[],
+        )
+        .is_none());
+
+        // The narrowing is phrase-level, not a blanket header exemption: a
+        // real operator step appended to the same description still parks.
+        let with_step = format!(
+            "{R042_OPERATOR_REQUESTED_HEADER}\n\nOperator step required: \
+             write the secret to OpenBao."
+        );
+        assert!(
+            detect_needs_human(&test_output(1), None, Some(&with_step), &[], &[]).is_some(),
+            "an operator step beside attribution phrasing must still park"
+        );
+    }
+
+    #[test]
+    fn operator_attribution_phrases_do_not_park_as_needs_human() {
+        let attributions = [
+            "Operator-requested 2026-10-28.",
+            "Requested by the operator during the sweep review.",
+            "Operator decision: split the cohort per beadrs-691c4fec.",
+            "The operator decided to defer this bead until the store cutover.",
+            "Do not run `needle cleanup` to trim the fleet; that is the \
+             operator's step.",
+        ];
+        for description in attributions {
+            assert!(
+                detect_needs_human(&test_output(1), None, Some(description), &[], &[]).is_none(),
+                "attribution phrasing must not park: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_step_phrases_park_when_no_commit_was_delivered() {
+        let steps = [
+            "operator step: rotate the OpenBao token.",
+            "a manual step is left: sign the release",
+            "the operator must rotate the credential",
+            "the human operator must apply the production secret",
+            "this requires an operator",
+            "only an operator can approve the migration",
+        ];
+        for description in steps {
+            assert!(
+                detect_needs_human(&test_output(1), None, Some(description), &[], &[]).is_some(),
+                "genuine operator-step phrasing must park: {description}"
+            );
+        }
+
+        // A delivered commit still exempts the re-pluck regardless of
+        // phrasing (the needle-7f40c7c2 narrowing is unchanged).
+        assert!(detect_needs_human(
+            &test_output(1),
+            None,
+            Some("this requires an operator"),
+            &["feedc0de".to_string()],
+            &[],
+        )
+        .is_none());
     }
 
     #[tokio::test]
