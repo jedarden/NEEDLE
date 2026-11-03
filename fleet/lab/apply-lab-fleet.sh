@@ -22,6 +22,13 @@
 # drift-watch half and skips the fleet convergence entirely; that is the
 # codinghome form, since this manifest must not converge there.
 #
+# With --install-bead-router (opt-in; combinable with --wrappers-only), also
+# runs bin/install-bead-router.sh: the bead-route router replaces
+# ~/.local/bin/bead (the real binary moves to ~/.local/lib/bead-route/
+# bead-real) and bead-routes.json becomes ~/.config/bead-route/routes.json,
+# so each routed repo has ONE authoritative live bead store across hosts
+# (README.md "bead-route"). The drift timer then also watches the router.
+#
 # Never touched:
 #   ~/.config/needle/worker-common.env  (credentials; must already exist)
 #   ~/.config/systemd/user/user.control/  (systemd set-property drop-ins)
@@ -33,6 +40,7 @@
 #   systemctl --user restart needle-worker@<identifier>
 #
 # Usage: apply-lab-fleet.sh [--dry-run] [--install-cargo-wrapper] [--wrappers-only]
+#                           [--install-bead-router]
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,11 +52,13 @@ ADAPTER_POLICY_CHECK="$SRC_DIR/../../scripts/check-adapter-cargo-environment.sh"
 DRY_RUN=0
 INSTALL_CARGO_WRAPPER=0
 WRAPPERS_ONLY=0
+INSTALL_BEAD_ROUTER=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         --install-cargo-wrapper) INSTALL_CARGO_WRAPPER=1 ;;
         --wrappers-only) WRAPPERS_ONLY=1 ;;
+        --install-bead-router) INSTALL_BEAD_ROUTER=1 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
@@ -76,6 +86,10 @@ install_cargo_wrappers() {
             echo "- ~/.local/bin/$wrapper already current"
         fi
     done
+    install_drift_units
+}
+
+install_drift_units() {
     # The drift check runs straight from this checkout, so the checker itself
     # cannot drift; it fetches origin/main for its reference, so a stale
     # checkout cannot hide upstream movement either (fleet/lab/bin/
@@ -95,6 +109,21 @@ install_cargo_wrappers() {
     fi
 }
 
+# bead-route (fleet/lab/bin/bead): one authoritative live bead store per routed
+# repo. The installer validates the routing table, preserves the real bead as
+# ~/.local/lib/bead-route/bead-real, swaps the router in with an atomic rename,
+# verifies, and restores the previous binary on failure; it honors --dry-run
+# itself. The drift timer then compares the router and routing table too.
+install_bead_router() {
+    echo "- bead-route router -> ~/.local/bin/bead"
+    if [[ "$DRY_RUN" == 1 ]]; then
+        "$SRC_DIR/bin/install-bead-router.sh" --dry-run "$SRC_DIR/bin/bead" "$SRC_DIR/bead-routes.json"
+    else
+        "$SRC_DIR/bin/install-bead-router.sh" "$SRC_DIR/bin/bead" "$SRC_DIR/bead-routes.json"
+    fi
+    install_drift_units
+}
+
 # --wrappers-only: for a host that runs the wrappers but not this manifest
 # (codinghome). Installs the wrappers + drift units and nothing else — never
 # the lab needle-worker convergence below.
@@ -102,6 +131,9 @@ if [[ "$WRAPPERS_ONLY" == 1 ]]; then
     echo "== wrapper + drift-watch install only (src: $SRC_DIR)"
     "$ADAPTER_POLICY_CHECK" --label codinghome --adapters-dir "$HOME/.config/needle/adapters"
     install_cargo_wrappers
+    if [[ "$INSTALL_BEAD_ROUTER" == 1 ]]; then
+        install_bead_router
+    fi
     echo "== wrappers current"
     exit 0
 fi
@@ -230,6 +262,9 @@ done
 # --- cargo wrappers + drift watch (opt-in: shared with non-fleet users) ------
 if [[ "$INSTALL_CARGO_WRAPPER" == 1 ]]; then
     install_cargo_wrappers
+fi
+if [[ "$INSTALL_BEAD_ROUTER" == 1 ]]; then
+    install_bead_router
 fi
 
 # --- reload (never restarts anything) ----------------------------------------

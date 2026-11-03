@@ -14,6 +14,14 @@
 # straight from the checkout by its unit (no installed copy), so the check
 # itself cannot drift.
 #
+# When ~/.config/bead-route/host.json exists (bead-route installed by
+# fleet/lab/bin/install-bead-router.sh), the same comparison also covers the
+# router (~/.local/bin/bead vs fleet/lab/bin/bead) and its routing table
+# (~/.config/bead-route/routes.json vs fleet/lab/bead-routes.json), and
+# host.json's real_bead must name an executable that is not the router. A bead
+# upgrade that writes ~/.local/bin/bead clobbers the router and surfaces here
+# as DRIFT; rerun the installer.
+#
 # Exit codes:
 #   0  every deployed wrapper matches the tracked copy
 #   1  DRIFT — a deployed wrapper is missing, non-executable, or diverged
@@ -32,6 +40,9 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TRACKED_DIR="fleet/lab/bin"
 INSTALL_DIR="$HOME/.local/bin"
 WRAPPERS=(cargo cargo-remote)
+BEAD_ROUTE_CONF="$HOME/.config/bead-route"
+BEAD_ROUTE_MARKER="bead-route-router-marker"
+FETCH_OK=0
 
 QUIET=0
 SELF_TEST=0
@@ -47,16 +58,18 @@ for arg in "$@"; do
     esac
 done
 
-# compare_one <name> <installed> <reference> <source>
-# Prints one DRIFT or OK line for a wrapper pair. Returns 0 in sync, 1 drift.
+# compare_one <name> <installed> <reference> <source> [require_exec]
+# Prints one DRIFT or OK line for a deployed/tracked pair. <name> is the
+# repo-relative tracked path. require_exec (default 1) is 0 for data files.
+# Returns 0 in sync, 1 drift.
 compare_one() {
-    local name="$1" installed="$2" reference="$3" refsrc="$4"
+    local name="$1" installed="$2" reference="$3" refsrc="$4" require_exec="${5:-1}"
     if [[ ! -f "$installed" ]]; then
-        printf 'wrapper-drift: DRIFT %s missing (tracked: %s/%s via %s)\n' \
-            "$installed" "$TRACKED_DIR" "$name" "$refsrc"
+        printf 'wrapper-drift: DRIFT %s missing (tracked: %s via %s)\n' \
+            "$installed" "$name" "$refsrc"
         return 1
     fi
-    if [[ ! -x "$installed" ]]; then
+    if [[ "$require_exec" == 1 && ! -x "$installed" ]]; then
         printf 'wrapper-drift: DRIFT %s is not executable\n' "$installed"
         return 1
     fi
@@ -74,22 +87,48 @@ compare_one() {
     return 0
 }
 
-# tracked_copy <name> <outfile>
-# Writes the authoritative tracked copy of $TRACKED_DIR/<name> to <outfile>
-# and prints the reference source used. Returns 1 when nothing is reachable.
+# tracked_copy <relpath> <outfile>
+# Writes the authoritative tracked copy of the repo-relative <relpath> to
+# <outfile> and prints the reference source used. origin/main is used when
+# main's fetch succeeded (FETCH_OK); returns 1 when nothing is reachable.
 tracked_copy() {
-    local name="$1" out="$2"
-    if git -C "$REPO_DIR" fetch --quiet origin main 2>/dev/null \
-       && git -C "$REPO_DIR" show "origin/main:$TRACKED_DIR/$name" > "$out" 2>/dev/null; then
+    local rel="$1" out="$2"
+    if [[ "$FETCH_OK" == 1 ]] \
+       && git -C "$REPO_DIR" show "origin/main:$rel" > "$out" 2>/dev/null; then
         printf 'origin/main'
         return 0
     fi
-    if [[ -f "$REPO_DIR/$TRACKED_DIR/$name" ]]; then
-        cp "$REPO_DIR/$TRACKED_DIR/$name" "$out"
+    if [[ -f "$REPO_DIR/$rel" ]]; then
+        cp "$REPO_DIR/$rel" "$out"
         printf 'checkout tree'
         return 0
     fi
     return 1
+}
+
+# check_real_bead <host.json> <router>
+# bead-route's host.json must name an executable real bead that is not the
+# router itself (else every routed call would recurse or fail with 127).
+# Prints one DRIFT or OK line. Returns 0 sound, 1 drift.
+check_real_bead() {
+    local host_json="$1" router="$2" real
+    real="$(python3 -c 'import json, sys; v = json.load(open(sys.argv[1])).get("real_bead"); print(v if isinstance(v, str) else "")' "$host_json" 2>/dev/null)" || real=""
+    if [[ -z "$real" ]]; then
+        printf 'wrapper-drift: DRIFT %s has no readable real_bead\n' "$host_json"
+        return 1
+    fi
+    if [[ ! -f "$real" || ! -x "$real" ]]; then
+        printf 'wrapper-drift: DRIFT bead-route real_bead %s is missing or not executable\n' "$real"
+        return 1
+    fi
+    if [[ -e "$router" && "$(realpath "$real")" == "$(realpath "$router")" ]] \
+       || head -c 4096 "$real" | grep -aqF "$BEAD_ROUTE_MARKER"; then
+        printf 'wrapper-drift: DRIFT bead-route real_bead %s is the router itself\n' "$real"
+        return 1
+    fi
+    [[ "$QUIET" == 1 ]] || \
+        printf 'wrapper-drift: OK bead-route real_bead %s\n' "$real"
+    return 0
 }
 
 # self_test: drive compare_one over fabricated pairs; touches nothing live.
@@ -132,6 +171,41 @@ self_test() {
         echo "self-test: non-executable wrapper not flagged (exit $st): $out" >&2; rc=1
     fi
 
+    # bead-route: the routing table is data (no exec bit required) but still
+    # compared byte-for-byte.
+    printf '{"version": 1}\n' > "$repo/routes.json"
+    printf '{"version": 1}\n' > "$t/routes.json"; chmod 644 "$t/routes.json"
+    out=$(compare_one routes.json "$t/routes.json" "$repo/routes.json" "self-test" 0); st=$?
+    if [[ $st -ne 0 ]]; then
+        echo "self-test: identical non-executable routes.json reported drift (exit $st): $out" >&2; rc=1
+    fi
+    printf '{"version": 2}\n' > "$t/routes.json"
+    out=$(compare_one routes.json "$t/routes.json" "$repo/routes.json" "self-test" 0); st=$?
+    if [[ $st -ne 1 ]] || ! grep -q 'DRIFT' <<<"$out"; then
+        echo "self-test: diverged routes.json not flagged (exit $st): $out" >&2; rc=1
+    fi
+
+    # bead-route: real_bead must be an executable that is not the router.
+    local router="$home/bead" real="$t/bead-real"
+    printf '#!/usr/bin/env -S python3 -I\n# %s\n' "$BEAD_ROUTE_MARKER" > "$router"
+    printf '#!/bin/sh\necho bead 0.0.0\n' > "$real"
+    chmod 755 "$router" "$real"
+    printf '{"real_bead": "%s"}\n' "$real" > "$t/host.json"
+    out=$(check_real_bead "$t/host.json" "$router"); st=$?
+    if [[ $st -ne 0 ]]; then
+        echo "self-test: sound real_bead reported drift (exit $st): $out" >&2; rc=1
+    fi
+    printf '{"real_bead": "%s"}\n' "$router" > "$t/host.json"
+    out=$(check_real_bead "$t/host.json" "$router"); st=$?
+    if [[ $st -ne 1 ]] || ! grep -q 'router itself' <<<"$out"; then
+        echo "self-test: real_bead naming the router not flagged (exit $st): $out" >&2; rc=1
+    fi
+    printf '{"real_bead": "%s/absent"}\n' "$t" > "$t/host.json"
+    out=$(check_real_bead "$t/host.json" "$router"); st=$?
+    if [[ $st -ne 1 ]] || ! grep -q 'missing or not executable' <<<"$out"; then
+        echo "self-test: missing real_bead not flagged (exit $st): $out" >&2; rc=1
+    fi
+
     rm -rf "$t"
     if [[ $rc -eq 0 ]]; then
         echo "wrapper-drift: self-test passed"
@@ -140,25 +214,43 @@ self_test() {
 }
 
 main() {
-    local rc=0 drifted=0 ok=0 w installed refsrc
-    TMP_REF="$(mktemp)"
+    local rc=0 drifted=0 ok=0 rel installed exec_bit refsrc entry
+    # Each entry: <repo-relative tracked path>|<deployed path>|<require exec>
+    local items=()
     for w in "${WRAPPERS[@]}"; do
-        installed="$INSTALL_DIR/$w"
-        if ! refsrc="$(tracked_copy "$w" "$TMP_REF")"; then
-            printf 'wrapper-drift: PROBE no tracked copy of %s reachable (fetch failed and checkout lacks %s/%s)\n' \
-                "$w" "$TRACKED_DIR" "$w" >&2
+        items+=("$TRACKED_DIR/$w|$INSTALL_DIR/$w|1")
+    done
+    if [[ -f "$BEAD_ROUTE_CONF/host.json" ]]; then
+        items+=("$TRACKED_DIR/bead|$INSTALL_DIR/bead|1")
+        items+=("fleet/lab/bead-routes.json|$BEAD_ROUTE_CONF/routes.json|0")
+    fi
+    TMP_REF="$(mktemp)"
+    git -C "$REPO_DIR" fetch --quiet origin main 2>/dev/null && FETCH_OK=1
+    for entry in "${items[@]}"; do
+        IFS='|' read -r rel installed exec_bit <<<"$entry"
+        if ! refsrc="$(tracked_copy "$rel" "$TMP_REF")"; then
+            printf 'wrapper-drift: PROBE no tracked copy of %s reachable (fetch failed and checkout lacks it)\n' \
+                "$rel" >&2
             rc=2
             continue
         fi
-        if compare_one "$w" "$installed" "$TMP_REF" "$refsrc"; then
+        if compare_one "$rel" "$installed" "$TMP_REF" "$refsrc" "$exec_bit"; then
             ok=$((ok + 1))
         else
             drifted=$((drifted + 1))
             [[ $rc -eq 0 ]] && rc=1
         fi
     done
+    if [[ -f "$BEAD_ROUTE_CONF/host.json" ]]; then
+        if check_real_bead "$BEAD_ROUTE_CONF/host.json" "$INSTALL_DIR/bead"; then
+            ok=$((ok + 1))
+        else
+            drifted=$((drifted + 1))
+            [[ $rc -eq 0 ]] && rc=1
+        fi
+    fi
     if [[ $rc -eq 0 ]]; then
-        printf 'wrapper-drift: all %d deployed wrappers match the tracked copies\n' "${#WRAPPERS[@]}"
+        printf 'wrapper-drift: all %d deployed items match the tracked copies\n' "$ok"
     else
         printf 'wrapper-drift: summary: %d drifted, %d ok\n' "$drifted" "$ok"
     fi

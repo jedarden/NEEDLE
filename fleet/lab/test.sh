@@ -87,4 +87,14 @@ done
 # against git fixtures.
 "$SRC_DIR/bin/needle-checkpoint-sweep" --self-test
 
+# bead-route (needle-fdc34782): one authoritative live bead store per routed
+# repo across hosts. The router, its installer, the routing table, and the
+# checkpoint publisher guards run end to end against a fake bead and an ssh
+# stub (isolated HOME; no network, no live store).
+bash -n "$SRC_DIR/bin/install-bead-router.sh"
+python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$SRC_DIR/bead-routes.json"
+grep -q -- '--install-bead-router' "$SRC_DIR/apply-lab-fleet.sh" \
+    || { echo "apply-lab-fleet.sh lost --install-bead-router" >&2; exit 1; }
+python3 -B -m unittest discover -s "$SRC_DIR/tests" -p 'test_bead_route.py'
+
 echo "lab fleet policy tests passed"

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "remote_router": "/home/coding/.local/bin/bead",
+  "routes": {
+    "jedarden/declarative-config": {
+      "authority_host": "codinghome",
+      "authority_path": "/home/coding/declarative-config",
+      "clients": ["lab"]
+    }
+  }
+}

@@ -22,6 +22,7 @@ what it deliberately never touches (credentials, systemd-managed drop-ins).
 | `bin/cargo` | `~/.local/bin/cargo` (opt-in: `--install-cargo-wrapper`) |
 | `bin/cargo-remote` | `~/.local/bin/cargo-remote` (same flag; hardening below) |
 | `wrapper-drift.{service,timer}` | `~/.config/systemd/user/` + timer enabled (same flag) |
+| `bin/bead` + `bead-routes.json` | `~/.local/bin/bead` + `~/.config/bead-route/routes.json` via `bin/install-bead-router.sh` (opt-in: `--install-bead-router`; see "bead-route") |
 
 Checkpoint publication validates aligned durable state and coalesces standalone
 commits for 15 minutes. It does not release claims, repair stores, or restart
@@ -57,6 +58,99 @@ itself drift. Install: `apply-lab-fleet.sh --install-cargo-wrapper` on the
 lab; on codinghome use `--wrappers-only`, which does only the wrapper +
 drift-watch half — the fleet convergence above must never run there, since
 this manifest is lab-specific.
+
+## bead-route: one authoritative bead store per shared repo (needle-fdc34782)
+
+**Why.** bead-rs keeps its live SQLite store per checkout. A repo cloned on
+codinghome, lab and gmktec therefore had several live stores. Claims were
+atomic only inside one host's store, so the same work ran twice, and two
+stores published one checkpoint until it forked. On 2026-11-03,
+declarative-config alone had 10 live copies.
+
+**What.** `bin/bead` is a stdlib-only Python router installed as
+`~/.local/bin/bead`, which is first on PATH for workers and agents on every
+host. For each call it finds the workspace (the nearest ancestor of the cwd
+holding `.beads/`) and normalizes its `origin` to `owner/repo`. It then looks
+that up in the routing table (`bead-routes.json`, installed to
+`~/.config/bead-route/routes.json`):
+
+| Situation | What `bead` does |
+|---|---|
+| no routes file | pure pass-through (`exec` of the real binary) |
+| unparseable routes file | refuses **every** call, exit 78 |
+| unrouted repo, or no workspace | pass-through |
+| authority host, authority path | pass-through, full access |
+| authority host, another clone | runs the real bead in the authority path; client allowlist applies; input-file paths made absolute |
+| host listed in `clients` | ships the call over multiplexed ssh to the authority's router (`__bead-route-serve__`); client allowlist applies |
+| any other host | refuses, exit 78, naming the authority |
+
+The real binary comes from `host.json`'s `real_bead`, then
+`~/.local/lib/bead-route/bead-real`, then `~/.cargo/bin/bead`. The router
+never resolves to itself. If none is usable, it exits 127.
+
+The client allowlist covers what NEEDLE runs (`src/bead_store/backend.rs`,
+the `capabilities --profile native-v1` and `--version` probes, and
+`sync status|reconcile|flush-only` from `sync_guard.rs`) plus read-only and
+ordinary issue commands. Clients are refused `init`, `restore`, `redact`,
+`manifest`, `watchdog`, `sync import-only|fork|commit|configure|diff|bisect`,
+`sync flush-only --output`, `doctor --repair|--rehearse|--starvation-recovery`,
+and any unknown subcommand. The serve side re-checks the client host, the
+workspace path and the allowlist. Input files
+(`--description-file`, `--notes-file`, `--reason-file`, `--body-file`,
+`--value-file`, `query --file`) travel inside the request. They are
+materialized in a 0700 temp dir that is always removed. `-` and
+`--fencing-token-stdin` forward stdin; stdin is otherwise never read, and a
+terminal stdin never is. Only `BEAD_ACTOR` is forwarded from the client's
+environment. The authority applies its own `BEAD_ORG_SECRET_SCANNER` from
+`~/.config/environment.d` when the ssh session lacks it.
+
+`bead __bead-route-role__ [DIR]` prints
+`{"role": "unrouted|authority|redirect|client|refused", ...}`. The checkpoint
+publishers (`needle-checkpoint-unwedge`, `needle-checkpoint-sweep`) query it
+and skip any workspace whose role is not `authority` or `unrouted` (outcome
+`routed`). Only the authority publishes and pushes a routed checkpoint. If a
+routes file exists but the role query fails, they also skip (`route-unknown`,
+fail safe).
+
+**Install.** `apply-lab-fleet.sh --install-bead-router` on lab, or
+`--wrappers-only --install-bead-router` on codinghome. Either runs
+`bin/install-bead-router.sh [--dry-run]`, which:
+
+1. validates the table;
+2. preserves a non-router `~/.local/bin/bead` as `bead-real`, with a
+   timestamped backup of a different previous copy;
+3. writes `host.json` and `routes.json` atomically;
+4. swaps the router in with an atomic rename;
+5. verifies `bead --version` and the role query, and restores the previous
+   binary if either fails.
+
+There is never a moment without a working `bead`. Rerunning the installer is
+idempotent.
+
+**Onboarding a repo.**
+
+1. Confirm that every non-authority copy holds no unique beads. Migrate or
+   recreate any that do on the authority first.
+2. Make sure the authority runs a bead at least as new as every client's.
+3. Add `"owner/repo": {"authority_host", "authority_path", "clients"}` to
+   `bead-routes.json`, then commit and push.
+4. Rerun the installer on every host.
+
+A diverged repo needs a decision before it is routed.
+
+**gmktec.** Tailnet policy blocks gmktec from opening SSH connections. It can
+therefore be an authority but never a client. Calls on gmktec for a repo whose
+authority is elsewhere are refused (exit 78). Do that work on the authority or
+a listed client. gmktec's workers are pinned to repos it is authority for.
+
+**Failure modes.**
+
+| Exit or signal | Cause | Action |
+|---|---|---|
+| 75 | The authority was unreachable (ssh exit 255). | The call is refused and never falls back to the local store. There is deliberately no disable switch. |
+| 78 | Refused command, unlisted host, mismatched or unreadable origin, or an invalid routes file. | Fix the routes file. An invalid file refuses every call on that host. |
+| 127 | No real bead binary was found. | Rerun the installer. |
+| wrapper-drift DRIFT | A bead upgrade that writes `~/.local/bin/bead` replaced the router with a plain binary, so that host is unrouted again. `check-wrapper-drift.sh` compares `~/.local/bin/bead` and `routes.json` against the tracked copies and checks `real_bead` whenever `host.json` exists. | Rerun the installer. It adopts the new binary as `bead-real`. |
 
 ## CPU budget accounting (needle-3d5c65d8, documented 2026-09-10)
 

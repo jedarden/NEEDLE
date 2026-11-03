@@ -1,0 +1,922 @@
+#!/usr/bin/env -S python3 -I
+# bead-route-router-marker: this file is the bead-route router, never a real bead binary.
+"""bead-route: one authoritative live bead store per shared repo, across hosts.
+
+Installed as ~/.local/bin/bead (first on PATH for workers and agents on every
+host). bead-rs keeps its live SQLite store per checkout, so a repo cloned on
+several machines has several live stores: claims are atomic only per host,
+work is duplicated, and checkpoints fork. This router gives each routed repo
+exactly one live store -- the authority checkout named in the routing table
+-- and forwards every other host's bead calls to it.
+
+Routing (routes file, default ~/.config/bead-route/routes.json):
+  no routes file        pure pass-through (pre-install behavior)
+  unparseable file      every call refused, exit 78 (fail closed)
+  unrouted workspace    pass-through to the real bead
+  authority, same path  pass-through, full access
+  authority, other clone  real bead run in the authority checkout; the client
+                          allowlist applies; input-file paths made absolute
+  listed client         request shipped over ssh to the authority's router
+                        (serve mode); the client allowlist applies
+  any other host        refused, exit 78
+
+There is deliberately no disable switch: a routed repo never falls back to a
+local store. An unreachable authority is exit 75, never a local run.
+
+Internal verbs:
+  bead __bead-route-serve__      authority side; reads one JSON envelope on stdin
+  bead __bead-route-role__ [DIR] print {"role", "origin", "authority_host",
+                                 "authority_path", "workspace"} and exit 0
+
+Exit codes owned by the router: 2 usage (stdin needed but is a terminal),
+75 authority unreachable, 78 refused / misconfigured, 127 no real bead.
+Every other exit code is the real bead's.
+"""
+import json
+import os
+import sys
+
+MARKER = "bead-route-router-marker"
+SERVE_VERB = "__bead-route-serve__"
+ROLE_VERB = "__bead-route-role__"
+
+EX_USAGE = 2
+EX_NOINPUT = 3
+EX_UNAVAILABLE = 75
+EX_REFUSED = 78
+EX_NOREAL = 127
+
+ENVELOPE_VERSION = 1
+ENVELOPE_LIMIT = 64 * 1024 * 1024
+SLOT_PREFIX = "bead-route-slot:"
+# sockaddr_un.sun_path is 108 bytes; ssh binds "<path>.<16 random>" first.
+CONTROL_PATH_BUDGET = 108 - len("/bead-route-") - 40 - 17
+
+# --- command surface (bead-rs cli.rs; NEEDLE src/bead_store/backend.rs) -----
+GLOBAL_FLAGS = frozenset(["--no-auto-flush", "--skip-foreign-workspace"])
+GLOBAL_VALUE_FLAGS = frozenset(["--acknowledge-secret"])
+META_FLAGS = frozenset(["-h", "--help", "-V", "--version"])
+
+# Commands a client (or a second clone on the authority host) may run against
+# the authority store: NEEDLE's operation table, its capability and version
+# probes, sync_guard's status/reconcile/flush, plus read-only and ordinary
+# issue commands, and `manifest dry-run|commit` (NEEDLE's split operation,
+# src/cli/proposals.rs). Anything absent -- init, restore, redact, watchdog,
+# unknown -- is refused (fail closed).
+LEAF_COMMANDS = frozenset([
+    "create", "list", "show", "ready", "search", "update", "release", "close",
+    "reopen", "resolve", "claim", "query", "changes", "why", "history",
+    "compare", "capabilities", "analyze-exclusion", "doctor", "help",
+])
+GROUP_COMMANDS = {
+    "comment": frozenset(["create", "reply", "resolve", "unresolve", "help"]),
+    "label": frozenset(["add", "remove", "help"]),
+    "dep": frozenset(["add", "remove", "list", "help"]),
+    "ref": frozenset(["add", "remove", "list", "find", "help"]),
+    "data": frozenset(["set", "get", "list", "remove", "help"]),
+    "schema": frozenset(["list", "show", "explain", "help"]),
+    "resource": frozenset(["add", "remove", "list", "lock", "help"]),
+    "policy": frozenset(["check", "validate", "help"]),
+    "recurrence": frozenset([
+        "create", "show", "list", "history", "materialize", "delete",
+        "add", "remove", "help",
+    ]),
+    "sync": frozenset(["status", "reconcile", "flush-only", "help"]),
+    "manifest": frozenset(["dry-run", "commit", "help"]),
+}
+# Flags that turn an allowed command into a store-administration one.
+REFUSED_FLAGS = {
+    ("doctor",): ("--repair", "--rehearse", "--starvation-recovery", "--force"),
+    ("sync", "flush-only"): ("--output",),
+}
+# Flags whose LOCAL file content must travel to the authority. "-" is stdin.
+INPUT_FILE_FLAGS = {
+    ("create",): ("--description-file",),
+    ("update",): ("--notes-file",),
+    ("close",): ("--reason-file",),
+    ("comment", "create"): ("--body-file",),
+    ("comment", "reply"): ("--body-file",),
+    ("data", "set"): ("--value-file",),
+    ("query",): ("--file",),
+    ("manifest", "dry-run"): ("--input",),
+    ("manifest", "commit"): ("--input",),
+}
+# Host-local paths that cannot be shipped (a checkpoint artifact references
+# sibling objects): made absolute on redirect, refused from a remote client.
+LOCAL_PATH_FLAGS = {
+    ("query",): ("--checkpoint",),
+}
+STDIN_FLAGS = frozenset(["--fencing-token-stdin"])
+# Authority-side policy a serve process loads from the authority user's own
+# ~/.config/environment.d when its (non-interactive ssh) environment lacks it.
+AUTHORITY_ENV_KEYS = frozenset(["BEAD_ORG_SECRET_SCANNER"])
+
+
+class Refusal(Exception):
+    """A routing decision that ends the call with a router exit code."""
+
+    def __init__(self, message, code=EX_REFUSED):
+        Exception.__init__(self, message)
+        self.message = message
+        self.code = code
+
+
+class CommandRefused(Exception):
+    """The command is not on the client allowlist."""
+
+
+# --- configuration -----------------------------------------------------------
+def _home():
+    return os.environ.get("HOME") or os.path.expanduser("~")
+
+
+def routes_path():
+    return os.environ.get("BEAD_ROUTE_ROUTES") or os.path.join(
+        _home(), ".config", "bead-route", "routes.json")
+
+
+def host_config_path():
+    return os.environ.get("BEAD_ROUTE_HOST_CONFIG") or os.path.join(
+        _home(), ".config", "bead-route", "host.json")
+
+
+def this_host():
+    name = os.environ.get("BEAD_ROUTE_HOST")
+    if not name:
+        import socket
+        name = socket.gethostname()
+    return name.split(".", 1)[0].lower()
+
+
+def _valid_host(name):
+    if not isinstance(name, str) or not name or len(name) > 253:
+        return False
+    if not (name[0].isalnum() and name.isascii()):
+        return False
+    return all(ch.isalnum() or ch in ".-_" for ch in name)
+
+
+def validate_routes(doc, where):
+    """Normalize a parsed routes document; raise Refusal (78) when invalid."""
+    def bad(why):
+        raise Refusal(
+            "bead-route: invalid routes file %s: %s; refusing every bead call "
+            "until it is fixed" % (where, why))
+
+    if not isinstance(doc, dict):
+        bad("top level must be a JSON object")
+    if doc.get("version") != 1:
+        bad("\"version\" must be 1")
+    default_router = doc.get(
+        "remote_router", os.path.join(_home(), ".local", "bin", "bead"))
+    if not isinstance(default_router, str) or not os.path.isabs(default_router):
+        bad("\"remote_router\" must be an absolute path")
+    routes = doc.get("routes")
+    if not isinstance(routes, dict):
+        bad("\"routes\" must be an object")
+    table = {}
+    for key, route in routes.items():
+        norm = key.strip().lower()
+        parts = norm.split("/")
+        if len(parts) != 2 or not all(parts):
+            bad("route key %r is not owner/repo" % key)
+        if norm in table:
+            bad("duplicate route %r" % key)
+        if not isinstance(route, dict):
+            bad("route %r must be an object" % key)
+        host = route.get("authority_host")
+        if not _valid_host(host):
+            bad("route %r has an invalid authority_host" % key)
+        path = route.get("authority_path")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            bad("route %r authority_path must be absolute" % key)
+        clients = route.get("clients", [])
+        if not isinstance(clients, list) or not all(_valid_host(c) for c in clients):
+            bad("route %r clients must be a list of host names" % key)
+        clients = [c.lower() for c in clients]
+        if host.lower() in clients:
+            bad("route %r lists its authority as a client" % key)
+        router = route.get("remote_router", default_router)
+        if not isinstance(router, str) or not os.path.isabs(router):
+            bad("route %r remote_router must be an absolute path" % key)
+        table[norm] = {
+            "key": norm,
+            "authority_host": host.lower(),
+            "authority_path": os.path.normpath(path),
+            "clients": clients,
+            "remote_router": router,
+        }
+    return table
+
+
+def load_routes(path):
+    """Return the route table, None when no routes file exists."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise Refusal(
+            "bead-route: cannot read routes file %s (%s); refusing every bead "
+            "call until it is fixed" % (path, error.strerror))
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise Refusal(
+            "bead-route: routes file %s is not valid JSON; refusing every bead "
+            "call until it is fixed" % path)
+    return validate_routes(doc, path)
+
+
+# --- workspace and origin ----------------------------------------------------
+def find_workspace(start):
+    """Nearest ancestor of start holding a .beads directory (bead-rs's rule)."""
+    path = os.path.abspath(start)
+    while True:
+        if os.path.isdir(os.path.join(path, ".beads")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
+def normalize_origin(url):
+    """owner/repo, lowercased, from an https, ssh, scp-like, or path URL."""
+    if not isinstance(url, str):
+        return None
+    text = url.strip().rstrip("/")
+    if text.endswith(".git"):
+        text = text[:-4]
+    if "://" not in text and ":" in text.split("/", 1)[0]:
+        text = text.split(":", 1)[1]
+    parts = [p for p in text.replace("\\", "/").split("/") if p]
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[-2:]).lower()
+
+
+def _inside_git(path):
+    while True:
+        if os.path.exists(os.path.join(path, ".git")):
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
+
+
+def workspace_origin(workspace):
+    """Normalized origin of workspace, None when it has no origin remote."""
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        result = subprocess.run(
+            ["git", "-C", workspace, "config", "--get", "remote.origin.url"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=env, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        return normalize_origin(result.stdout.decode("utf-8", "replace"))
+    if result is not None and result.returncode == 1:
+        return None
+    if _inside_git(workspace):
+        raise Refusal(
+            "bead-route: cannot read remote.origin.url for %s; refusing rather "
+            "than guess which store owns it" % workspace)
+    return None
+
+
+def decide(host, route, workspace_real, authority_real):
+    """Pure routing decision for one call."""
+    if route is None:
+        return "unrouted"
+    if host == route["authority_host"]:
+        return "authority" if workspace_real == authority_real else "redirect"
+    if host in route["clients"]:
+        return "client"
+    return "refused"
+
+
+# --- allowlist ----------------------------------------------------------------
+def _skip_globals(argv, index):
+    while index < len(argv):
+        token = argv[index]
+        if token in GLOBAL_FLAGS:
+            index += 1
+        elif token in GLOBAL_VALUE_FLAGS:
+            index += 2
+        elif "=" in token and token.split("=", 1)[0] in GLOBAL_VALUE_FLAGS:
+            index += 1
+        else:
+            break
+    return index
+
+
+def _skip_globals_and_meta(argv, index):
+    while True:
+        index = _skip_globals(argv, index)
+        if index < len(argv) and argv[index] in META_FLAGS:
+            index += 1
+            continue
+        return index
+
+
+def classify_command(argv):
+    """Return (command path, index of the first argument after it)."""
+    index = _skip_globals_and_meta(argv, 0)
+    if index >= len(argv):
+        if not argv or any(token in META_FLAGS for token in argv):
+            return (), len(argv)
+        raise CommandRefused("a bead call without a subcommand")
+    head = argv[index]
+    if head.startswith("-"):
+        raise CommandRefused("the unknown global option `%s`" % head)
+    if head in GROUP_COMMANDS:
+        sub_index = _skip_globals_and_meta(argv, index + 1)
+        if sub_index >= len(argv):
+            return (head,), sub_index
+        sub = argv[sub_index]
+        if sub.startswith("-") or sub not in GROUP_COMMANDS[head]:
+            raise CommandRefused("`bead %s %s`" % (head, sub))
+        return (head, sub), sub_index + 1
+    if head in LEAF_COMMANDS:
+        return (head,), index + 1
+    raise CommandRefused("`bead %s`" % head)
+
+
+def check_allowed(argv, remote):
+    """Apply the client allowlist; return (path, start) or raise CommandRefused."""
+    path, start = classify_command(argv)
+    rest = argv[start:]
+    for flag in REFUSED_FLAGS.get(path, ()):
+        for token in rest:
+            if token == flag or token.startswith(flag + "="):
+                raise CommandRefused("`bead %s %s`" % (" ".join(path), flag))
+    if remote:
+        for _index, flag, _value, _joined in path_args(argv, path, start, LOCAL_PATH_FLAGS):
+            raise CommandRefused(
+                "`bead %s %s` (a host-local path that cannot travel to the "
+                "authority)" % (" ".join(path), flag))
+    return path, start
+
+
+def path_args(argv, path, start, table):
+    """[(value index, flag, value, joined)] for table's flags of path."""
+    flags = table.get(path, ())
+    found = []
+    if not flags:
+        return found
+    index = start
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            break
+        if token in flags:
+            if index + 1 < len(argv):
+                found.append((index + 1, token, argv[index + 1], False))
+            index += 2
+            continue
+        name, eq, value = token.partition("=")
+        if eq and name in flags:
+            found.append((index, name, value, True))
+        index += 1
+    return found
+
+
+def needs_stdin(argv, path, start):
+    for token in argv[start:]:
+        if token == "--":
+            break
+        if token in STDIN_FLAGS:
+            return True
+    return any(value == "-" for _i, _f, value, _j in
+               path_args(argv, path, start, INPUT_FILE_FLAGS))
+
+
+def absolutize(argv, path, start, cwd):
+    """Resolve input and local path arguments against the caller's cwd."""
+    out = list(argv)
+    for table in (INPUT_FILE_FLAGS, LOCAL_PATH_FLAGS):
+        for index, flag, value, joined in path_args(out, path, start, table):
+            if value in ("-", ""):
+                continue
+            resolved = os.path.join(cwd, value)
+            out[index] = flag + "=" + resolved if joined else resolved
+    return out
+
+
+# --- real binary ----------------------------------------------------------------
+def _is_router_file(path):
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return False
+    return head.startswith(b"#!") and MARKER.encode() in head
+
+
+def real_candidates():
+    candidates = [os.environ.get("BEAD_ROUTE_REAL")]
+    try:
+        with open(host_config_path(), "rb") as handle:
+            config = json.loads(handle.read().decode("utf-8"))
+        if isinstance(config, dict) and isinstance(config.get("real_bead"), str):
+            candidates.append(config["real_bead"])
+    except (OSError, ValueError):
+        pass
+    candidates.append(os.path.join(_home(), ".local", "lib", "bead-route", "bead-real"))
+    candidates.append(os.path.join(_home(), ".cargo", "bin", "bead"))
+    return candidates
+
+
+def resolve_real():
+    """First usable real bead binary; never the router itself."""
+    me = os.path.realpath(os.path.abspath(__file__))
+    for candidate in real_candidates():
+        if not candidate or not os.path.isabs(candidate):
+            continue
+        resolved = os.path.realpath(candidate)
+        if resolved == me:
+            continue
+        if not (os.path.isfile(resolved) and os.access(resolved, os.X_OK)):
+            continue
+        if _is_router_file(resolved):
+            continue
+        return candidate
+    return None
+
+
+def exec_local(argv, cwd=None):
+    real = resolve_real()
+    if real is None:
+        raise Refusal(
+            "bead-route: no real bead binary found (checked host.json real_bead, "
+            "~/.local/lib/bead-route/bead-real, ~/.cargo/bin/bead)", EX_NOREAL)
+    if cwd is not None:
+        try:
+            os.chdir(cwd)
+        except OSError as error:
+            raise Refusal("bead-route: cannot enter authority checkout %s (%s)"
+                          % (cwd, error.strerror))
+    try:
+        os.execv(real, [real] + list(argv))
+    except OSError as error:
+        raise Refusal("bead-route: cannot execute %s (%s)" % (real, error.strerror),
+                      EX_NOREAL if error.errno == 2 else 126)
+
+
+# --- child supervision ------------------------------------------------------------
+def _load_prctl():
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+        return ctypes.CDLL(None, use_errno=True).prctl
+    except (ImportError, OSError, AttributeError):
+        return None
+
+
+class _Terminated(Exception):
+    def __init__(self, signum):
+        Exception.__init__(self, signum)
+        self.signum = signum
+
+
+def run_supervised(argv, **kwargs):
+    """Run argv as a child that cannot outlive this process; return its status.
+
+    SIGTERM/SIGHUP/SIGINT/SIGQUIT are forwarded to the child; a signal that
+    arrives before the child exists aborts the call (raising _Terminated so
+    callers' cleanup runs). PR_SET_PDEATHSIG covers SIGKILL of this process.
+    """
+    import signal
+    import subprocess
+    state = {"child": None}
+
+    def forward(signum, _frame):
+        child = state["child"]
+        if child is None:
+            raise _Terminated(signum)
+        try:
+            child.send_signal(signum)
+        except OSError:
+            pass
+
+    previous = {}
+    for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
+        previous[signum] = signal.signal(signum, forward)
+    prctl = _load_prctl()
+    parent = os.getpid()
+
+    def preexec():
+        for signum in previous:
+            signal.signal(signum, signal.SIG_DFL)
+        if prctl is not None:
+            prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG
+        if os.getppid() != parent:
+            os._exit(EX_UNAVAILABLE)
+
+    try:
+        state["child"] = subprocess.Popen(argv, preexec_fn=preexec, **kwargs)
+        status = state["child"].wait()
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    return 128 - status if status < 0 else status
+
+
+def _runtime_dir():
+    candidate = os.environ.get("XDG_RUNTIME_DIR")
+    if candidate and os.path.isdir(candidate) and os.access(candidate, os.W_OK):
+        return candidate
+    return None
+
+
+def _control_dir():
+    for candidate in (os.environ.get("XDG_RUNTIME_DIR"), os.path.join(_home(), ".ssh")):
+        if (candidate and os.path.isdir(candidate)
+                and len(candidate) < CONTROL_PATH_BUDGET):
+            return candidate
+    return None
+
+
+# --- client side ----------------------------------------------------------------
+def _read_fd0():
+    chunks = []
+    try:
+        while True:
+            chunk = os.read(0, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        pass
+    return b"".join(chunks)
+
+
+def build_envelope(argv, path, start, client_host, route, cwd):
+    """The request a client ships to the authority's router."""
+    import base64
+    files = {}
+    slots = []
+    out = []
+    positions = {index: (flag, value, joined) for index, flag, value, joined
+                 in path_args(argv, path, start, INPUT_FILE_FLAGS)}
+    total = 0
+    for index, token in enumerate(argv):
+        if index not in positions:
+            out.append(token)
+            continue
+        flag, value, joined = positions[index]
+        if joined:
+            out.append(flag)
+        if value == "-":
+            out.append("-")
+            continue
+        local = os.path.join(cwd, value)
+        try:
+            with open(local, "rb") as handle:
+                data = handle.read(ENVELOPE_LIMIT + 1)
+        except FileNotFoundError:
+            raise Refusal("bead-route: %s file not found: %s" % (flag, value), EX_NOINPUT)
+        except OSError as error:
+            raise Refusal("bead-route: cannot read %s file %s (%s)"
+                          % (flag, value, error.strerror), 1)
+        total += len(data)
+        if total > ENVELOPE_LIMIT:
+            raise Refusal("bead-route: input files exceed %d bytes" % ENVELOPE_LIMIT, EX_USAGE)
+        slot = "f%d" % len(slots)
+        files[slot] = base64.b64encode(data).decode("ascii")
+        slots.append([len(out), slot])
+        out.append(SLOT_PREFIX + slot)
+    stdin = None
+    if needs_stdin(argv, path, start):
+        if os.isatty(0):
+            raise Refusal(
+                "bead-route: this command reads stdin, which is a terminal; pipe "
+                "the input instead (a routed call never reads a TTY)", EX_USAGE)
+        stdin = base64.b64encode(_read_fd0()).decode("ascii")
+    env = {}
+    if "BEAD_ACTOR" in os.environ:
+        env["BEAD_ACTOR"] = os.environ["BEAD_ACTOR"]
+    return {
+        "v": ENVELOPE_VERSION,
+        "client_host": client_host,
+        "workspace_path": route["authority_path"],
+        "argv": out,
+        "files": files,
+        "slots": slots,
+        "stdin": stdin,
+        "env": env,
+    }
+
+
+def ssh_argv(route):
+    import shlex
+    program = os.environ.get("BEAD_ROUTE_SSH") or "ssh"
+    argv = [program, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    control = _control_dir()
+    if control is not None:
+        argv += ["-o", "ControlMaster=auto", "-o", "ControlPersist=600",
+                 "-o", "ControlPath=%s/bead-route-%%C" % control]
+    else:
+        argv += ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
+    argv += ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+             route["authority_host"], "--",
+             shlex.quote(route["remote_router"]), SERVE_VERB]
+    return argv
+
+
+def run_remote(argv, path, start, client_host, route, cwd):
+    import tempfile
+    envelope = build_envelope(argv, path, start, client_host, route, cwd)
+    payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+    del envelope
+    if len(payload) > ENVELOPE_LIMIT:
+        raise Refusal("bead-route: request exceeds %d bytes" % ENVELOPE_LIMIT, EX_USAGE)
+    # An unlinked spool, so the request (which may carry a fencing token)
+    # never sits in a named file or in ssh's argv.
+    with tempfile.TemporaryFile(dir=_runtime_dir()) as spool:
+        spool.write(payload)
+        spool.flush()
+        spool.seek(0)
+        del payload
+        try:
+            status = run_supervised(ssh_argv(route), stdin=spool)
+        except _Terminated as stop:
+            return 128 + stop.signum
+        except OSError as error:
+            sys.stderr.write(
+                "bead-route: cannot start ssh to authority %s (%s); refusing to "
+                "use the local store\n" % (route["authority_host"], error.strerror))
+            return EX_UNAVAILABLE
+    if status == 255:
+        sys.stderr.write(
+            "bead-route: authority %s unreachable (ssh transport failed); "
+            "refusing to use the local store for %s\n"
+            % (route["authority_host"], route["key"]))
+        return EX_UNAVAILABLE
+    return status
+
+
+def route_call(argv):
+    routes = load_routes(routes_path())
+    if not routes:
+        return exec_local(argv)
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        return exec_local(argv)
+    workspace = find_workspace(cwd)
+    if workspace is None:
+        return exec_local(argv)
+    origin = workspace_origin(workspace)
+    route = routes.get(origin) if origin else None
+    if route is None:
+        return exec_local(argv)
+    host = this_host()
+    role = decide(host, route, os.path.realpath(workspace),
+                  os.path.realpath(route["authority_path"]))
+    if role == "authority":
+        return exec_local(argv)
+    if role == "refused":
+        raise Refusal(
+            "bead-route: %s is routed to authority %s (%s); this host (%s) is not "
+            "a listed client and cannot reach it -- do bead work for this repo on "
+            "%s or a listed client (%s)" % (
+                route["key"], route["authority_host"], route["authority_path"],
+                host, route["authority_host"], ", ".join(route["clients"]) or "none"))
+    try:
+        path, start = check_allowed(argv, remote=(role == "client"))
+    except CommandRefused as why:
+        raise Refusal(
+            "bead-route: %s is not allowed from %s for routed repo %s; "
+            "store-administration commands run only in the authority checkout "
+            "%s:%s" % (why, host if role == "client" else workspace, route["key"],
+                       route["authority_host"], route["authority_path"]))
+    if role == "redirect":
+        return exec_local(absolutize(argv, path, start, cwd),
+                          cwd=route["authority_path"])
+    return run_remote(argv, path, start, host, route, cwd)
+
+
+# --- authority side -------------------------------------------------------------
+def authority_env_defaults():
+    """AUTHORITY_ENV_KEYS from the authority user's systemd environment.d.
+
+    A serve process starts from a non-interactive ssh session, which carries
+    neither ~/.bashrc nor the systemd user environment. Without this, a routed
+    write would skip the org secret scanner that every local caller on the
+    authority gets. The client never chooses these values.
+    """
+    found = {}
+    directory = os.path.join(_home(), ".config", "environment.d")
+    try:
+        names = sorted(n for n in os.listdir(directory) if n.endswith(".conf"))
+    except OSError:
+        return found
+    for name in names:
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        except (OSError, ValueError):
+            continue
+        for line in lines:
+            key, eq, value = line.strip().partition("=")
+            key = key.strip()
+            if not eq or key not in AUTHORITY_ENV_KEYS:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            found[key] = value
+    return found
+
+
+def _read_envelope():
+    data = b""
+    while len(data) <= ENVELOPE_LIMIT:
+        try:
+            chunk = os.read(0, 1 << 20)
+        except OSError:
+            break
+        if not chunk:
+            break
+        data += chunk
+    if len(data) > ENVELOPE_LIMIT:
+        raise Refusal("bead-route serve: request exceeds %d bytes" % ENVELOPE_LIMIT)
+    try:
+        envelope = json.loads(data.decode("utf-8"))
+    except ValueError:
+        raise Refusal("bead-route serve: malformed request")
+    malformed = Refusal("bead-route serve: malformed request")
+    if not isinstance(envelope, dict) or envelope.get("v") != ENVELOPE_VERSION:
+        raise malformed
+    argv = envelope.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(t, str) for t in argv):
+        raise malformed
+    for key in ("client_host", "workspace_path"):
+        if not isinstance(envelope.get(key), str):
+            raise malformed
+    files = envelope.get("files") or {}
+    slots = envelope.get("slots") or []
+    if not isinstance(files, dict) or not isinstance(slots, list):
+        raise malformed
+    for name, value in files.items():
+        if not (isinstance(value, str) and name[:1] == "f" and name[1:].isdigit()
+                and len(name) <= 8):
+            raise malformed
+    for slot in slots:
+        if not (isinstance(slot, list) and len(slot) == 2
+                and isinstance(slot[0], int) and isinstance(slot[1], str)
+                and slot[1] in files):
+            raise malformed
+    if not (envelope.get("stdin") is None or isinstance(envelope.get("stdin"), str)):
+        raise malformed
+    env = envelope.get("env") or {}
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        raise malformed
+    return envelope
+
+
+def serve():
+    import base64
+    import binascii
+    import shutil
+    import tempfile
+    envelope = _read_envelope()
+    host = this_host()
+    routes = load_routes(routes_path())
+    if routes is None:
+        raise Refusal("bead-route serve: %s has no routes file; refusing" % host)
+    workspace = envelope["workspace_path"]
+    if not (os.path.isabs(workspace) and os.path.isdir(os.path.join(workspace, ".beads"))):
+        raise Refusal("bead-route serve: %s is not a bead workspace on %s"
+                      % (workspace, host))
+    origin = workspace_origin(workspace)
+    route = routes.get(origin) if origin else None
+    if route is None:
+        raise Refusal("bead-route serve: %s is not a routed repo on %s" % (workspace, host))
+    if route["authority_host"] != host:
+        raise Refusal("bead-route serve: %s is routed to %s, not this host (%s)"
+                      % (route["key"], route["authority_host"], host))
+    if os.path.realpath(workspace) != os.path.realpath(route["authority_path"]):
+        raise Refusal("bead-route serve: workspace mismatch: %s is not the authority "
+                      "checkout %s" % (workspace, route["authority_path"]))
+    client = envelope["client_host"].lower()
+    if client not in route["clients"]:
+        raise Refusal("bead-route serve: host %s is not a client of %s"
+                      % (client, route["key"]))
+    argv = list(envelope["argv"])
+    try:
+        path, start = check_allowed(argv, remote=True)
+    except CommandRefused as why:
+        raise Refusal("bead-route serve: %s is not allowed from %s for %s"
+                      % (why, client, route["key"]))
+    slot_at = {}
+    for index, slot in envelope["slots"]:
+        if index in slot_at:
+            raise Refusal("bead-route serve: malformed request")
+        slot_at[index] = slot
+    covered = set()
+    for index, flag, value, joined in path_args(argv, path, start, INPUT_FILE_FLAGS):
+        if value == "-" and index not in slot_at:
+            continue
+        if joined or index not in slot_at or value != SLOT_PREFIX + slot_at[index]:
+            raise Refusal("bead-route serve: %s names a path that did not travel "
+                          "with the request" % flag)
+        covered.add(index)
+    if covered != set(slot_at):
+        raise Refusal("bead-route serve: a file slot does not name an input-file argument")
+    real = resolve_real()
+    if real is None:
+        raise Refusal("bead-route serve: no real bead binary on %s" % host, EX_NOREAL)
+    child_env = dict(os.environ)
+    for key, value in authority_env_defaults().items():
+        child_env.setdefault(key, value)
+    child_env.pop("BEAD_ACTOR", None)
+    actor = (envelope.get("env") or {}).get("BEAD_ACTOR")
+    if actor is not None:
+        child_env["BEAD_ACTOR"] = actor
+    scratch = tempfile.mkdtemp(prefix="bead-route-", dir=_runtime_dir() or "/tmp")
+    try:
+        try:
+            for index, slot in slot_at.items():
+                target = os.path.join(scratch, slot)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(base64.b64decode(envelope["files"][slot], validate=True))
+                argv[index] = target
+            stdin_path = None
+            if envelope.get("stdin") is not None:
+                stdin_path = os.path.join(scratch, "stdin")
+                fd = os.open(stdin_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(base64.b64decode(envelope["stdin"], validate=True))
+        except (binascii.Error, ValueError):
+            raise Refusal("bead-route serve: malformed request")
+        del envelope
+        import subprocess
+        stdin = open(stdin_path, "rb") if stdin_path else subprocess.DEVNULL
+        try:
+            return run_supervised([real] + argv, cwd=workspace, stdin=stdin, env=child_env)
+        except _Terminated as stop:
+            return 128 + stop.signum
+        finally:
+            if stdin_path:
+                stdin.close()
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+# --- role query -------------------------------------------------------------------
+def role_query(args):
+    if len(args) > 1:
+        raise Refusal("usage: bead %s [DIR]" % ROLE_VERB, EX_USAGE)
+    start = args[0] if args else os.getcwd()
+    if not os.path.isdir(start):
+        raise Refusal("bead-route: %s is not a directory" % start, EX_USAGE)
+    routes = load_routes(routes_path())
+    workspace = find_workspace(start)
+    origin = None
+    if workspace is not None:
+        try:
+            origin = workspace_origin(workspace)
+        except Refusal:
+            if routes:
+                raise
+    route = routes.get(origin) if (routes and origin) else None
+    role = "unrouted"
+    if route is not None:
+        role = decide(this_host(), route, os.path.realpath(workspace),
+                      os.path.realpath(route["authority_path"]))
+    print(json.dumps({
+        "role": role,
+        "origin": origin,
+        "authority_host": route["authority_host"] if route else None,
+        "authority_path": route["authority_path"] if route else None,
+        "workspace": workspace,
+    }, sort_keys=True))
+    return 0
+
+
+def main(argv):
+    try:
+        if argv[:1] == [SERVE_VERB]:
+            if len(argv) != 1:
+                raise Refusal("usage: bead %s < request" % SERVE_VERB, EX_USAGE)
+            return serve()
+        if argv[:1] == [ROLE_VERB]:
+            return role_query(argv[1:])
+        return route_call(argv)
+    except Refusal as refusal:
+        sys.stderr.write(refusal.message + "\n")
+        return refusal.code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -37,7 +37,7 @@ WRAPPER = Path.home() / ".local/bin/needle-checkpoint-unwedge"
 # else in the results map is an alert.
 BENIGN_OUTCOMES = {
     "in-sync", "pushed", "no-upstream", "detached", "push-dry-run",
-    "upstream-not-origin",
+    "upstream-not-origin", "routed",
 }
 
 # The one census outcome a healthy publisher produces: classify_workspace
@@ -137,14 +137,49 @@ def classify_branch(repo):
     return "push", name, " ".join(shas)
 
 
+def route_skip(workspace):
+    """Return (outcome, detail) when bead-route says this host must not publish.
+
+    bead-route (fleet/lab/bin/bead) gives a routed repo one authoritative live
+    store; only the authority's own checkout may publish or push its
+    checkpoint. With no routes file the router is not installed and nothing
+    changes; with one, a failed role query skips the workspace (fail safe).
+    """
+    routes = Path(os.environ.get("BEAD_ROUTE_ROUTES")
+                  or Path.home() / ".config/bead-route/routes.json")
+    if not routes.exists():
+        return None
+    router = os.environ.get("BEAD_ROUTE_ROUTER") or str(Path.home() / ".local/bin/bead")
+    try:
+        result = run([router, "__bead-route-role__", str(workspace)], cwd=workspace, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return "route-unknown", "bead-route role query failed (%s); skipped (fail safe)" % type(error).__name__
+    if result.returncode:
+        return "route-unknown", "bead-route role query exited %d; skipped (fail safe)" % result.returncode
+    try:
+        role = json.loads(result.stdout)
+    except ValueError:
+        role = None
+    if not isinstance(role, dict) or "role" not in role:
+        return "route-unknown", "bead-route role query returned no role; skipped (fail safe)"
+    if role["role"] in ("authority", "unrouted"):
+        return None
+    return "routed", "routed to %s (role %s); only the authority publishes this checkpoint" % (
+        role.get("authority_host"), role["role"])
+
+
 def classify_workspace(workspace, probe=True):
     """Classify a workspace without publishing or pushing it.
 
-    With probe (the default) the workspace's bead sync status decides the
-    skip classes; with probe=False the git-level classification alone
-    decides, which is what the census self-test exercises without a live
-    bead workspace.
+    With probe (the default) the bead-route role and the workspace's bead
+    sync status decide the skip classes; with probe=False the git-level
+    classification alone decides, which is what the census self-test
+    exercises without a live bead workspace.
     """
+    if probe:
+        skip = route_skip(workspace)
+        if skip is not None:
+            return skip[0], "", skip[1]
     outcome, branch, detail = classify_branch(workspace)
     if outcome in ("detached", "diverged", "unpushed-non-checkpoint"):
         # Never publish onto a detached HEAD, and never publish while the
