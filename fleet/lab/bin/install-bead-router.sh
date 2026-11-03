@@ -91,6 +91,10 @@ say "routes: $ROUTES_SRC"
 # --- 1. validate -------------------------------------------------------------
 [[ -f "$ROUTER_SRC" ]] || die "router file not found: $ROUTER_SRC"
 [[ -f "$ROUTES_SRC" ]] || die "routes file not found: $ROUTES_SRC"
+# Absolute from here on: the checks below run from `cd /`, where a relative
+# argument (e.g. `install-bead-router.sh bin/bead bead-routes.json`) is lost.
+ROUTER_SRC="$(cd "$(dirname "$ROUTER_SRC")" && pwd)/$(basename "$ROUTER_SRC")"
+ROUTES_SRC="$(cd "$(dirname "$ROUTES_SRC")" && pwd)/$(basename "$ROUTES_SRC")"
 grep -aqF "$MARKER" "$ROUTER_SRC" || die "$ROUTER_SRC does not carry the bead-route marker"
 python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$ROUTES_SRC" \
     || die "routes file is not valid JSON: $ROUTES_SRC"

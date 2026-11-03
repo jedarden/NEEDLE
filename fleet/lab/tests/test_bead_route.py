@@ -796,6 +796,20 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.conf))
         self.assertFalse(os.path.exists(os.path.dirname(self.real)))
 
+    def test_relative_source_paths_are_resolved(self):
+        # Deploying from a copied directory (`install-bead-router.sh bin/bead
+        # bead-routes.json`) failed: validation runs from `cd /`.
+        staged = os.path.join(self.home, "staged", "bin")
+        os.makedirs(staged)
+        shutil.copy(ROUTER, os.path.join(staged, "bead"))
+        shutil.copy(ROUTES_SRC, os.path.join(self.home, "staged", "bead-routes.json"))
+        write_exec(self.target, self.FAKE)
+        result = subprocess.run(["bash", INSTALLER, "--dry-run", "bin/bead", "bead-routes.json"],
+                                env=self.env(), cwd=os.path.join(self.home, "staged"),
+                                capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("routing table valid", result.stdout + result.stderr)
+
     def test_install_moves_the_real_binary_aside_and_leaves_a_working_router(self):
         write_exec(self.target, self.FAKE)
         result = self.install()
