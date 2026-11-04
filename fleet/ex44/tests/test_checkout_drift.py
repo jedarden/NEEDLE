@@ -183,7 +183,14 @@ class TestWiring(unittest.TestCase):
     def test_unit_files(self):
         with open(os.path.join(EX44, "checkout-drift.service"), encoding="utf-8") as fh:
             service = fh.read()
-        self.assertIn(f"ExecStart={CHECKER}", service)
+        # The deployed ExecStart path is a fixed literal, like every other
+        # unit-content assertion in fleet test harnesses — deriving it from
+        # this file's own location would make the test fail in any
+        # extraction of the tree (clean-gate verification runs there).
+        self.assertIn(
+            "ExecStart=/home/coding/NEEDLE/fleet/ex44/bin/check-checkout-drift.py",
+            service,
+        )
         self.assertIn("Type=oneshot", service)
         self.assertIn("TimeoutStartSec", service)
         with open(os.path.join(EX44, "checkout-drift.timer"), encoding="utf-8") as fh:
