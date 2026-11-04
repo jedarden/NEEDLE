@@ -1609,6 +1609,29 @@ impl ExploreStrand {
             }
         }
 
+        // Degradation restricts this frontier to ready repair work. The
+        // shared query admits the auto-created internal Gate broken bead but
+        // keeps human holds and the backend's dependency safety intact.
+        if matches!(crate::gate_health::is_degraded(workspace), Ok(true)) {
+            let mut candidates = crate::gate_health::ready_repair_beads(
+                remote_store.as_ref(),
+                &filters.exclude_ids,
+                &filters.exclude_labels,
+            )
+            .await?;
+            self.filter_circuit_candidates(workspace, &mut candidates)
+                .await;
+            candidates.retain(|bead| self.lane_admits(bead));
+            self.record_workspace_success(workspace);
+            return Ok(Some(WorkspaceFrontier {
+                store: remote_store,
+                candidates,
+                filtered_candidates: 0,
+                internal_artifact_ids: Vec::new(),
+                split_out_of_scope_candidates: 0,
+            }));
+        }
+
         let mut candidates = remote_store.ready(filters).await?;
         if candidates.iter().any(Self::may_be_completed_split_parent) {
             match crate::mitosis::reconcile_completed_split_parents(
@@ -1789,11 +1812,7 @@ impl ExploreStrand {
 
         let probe_workspaces: Vec<PathBuf> = workspaces_list
             .into_iter()
-            .filter(|workspace| {
-                workspace != &self.home_workspace
-                    && Self::has_beads_dir(workspace)
-                    && !matches!(crate::gate_health::is_degraded(workspace), Ok(true))
-            })
+            .filter(|workspace| workspace != &self.home_workspace && Self::has_beads_dir(workspace))
             .collect();
         let eligible_workspace_count = probe_workspaces.len();
         // Rotate before the expensive probes begin so simultaneous roamers
@@ -1996,19 +2015,6 @@ impl ExploreStrand {
                 continue;
             }
 
-            // Check if the workspace is gate-degraded. If so, skip ordinary dispatch.
-            // Degraded workspaces are excluded from Explore to prevent repeated gate
-            // execution errors. The workspace remains claimable for manual intervention
-            // or for fixing the specific gate that caused degradation.
-            if let Ok(true) = crate::gate_health::is_degraded(workspace) {
-                tracing::warn!(
-                    workspace = %workspace.display(),
-                    "workspace is gate-degraded — skipping Explore strand for ordinary dispatch"
-                );
-                exclusion_reasons.insert("workspace_gate_degraded".to_string());
-                continue;
-            }
-
             // Reuse both the store and its already admitted ready frontier.
             // Re-reading every workspace's queue here doubled the backend
             // queries after the ranking pass and amplified contention when
@@ -2049,6 +2055,12 @@ impl ExploreStrand {
 
             let mut candidates = frontier.candidates.clone();
             if candidates.is_empty() {
+                // A degraded workspace has no ordinary work to recover here;
+                // only its ready repair frontier is dispatchable.
+                if matches!(crate::gate_health::is_degraded(workspace), Ok(true)) {
+                    exclusion_reasons.insert("workspace_gate_degraded".to_string());
+                    continue;
+                }
                 // Recovery must not consume the remaining deadline and throw
                 // away work already found. Mend can recover these queues on a
                 // later cycle; a partial frontier should retry at the floor.

@@ -22,10 +22,13 @@
 //! skips a fingerprint-degraded workspace without knowing which path
 //! degraded it.
 
+use crate::bead_store::{active_quarantine_until, BeadStore, Filters};
+use crate::types::{Bead, BeadId, BeadStatus};
 use crate::verification_fingerprint::{DetectorConfig, FingerprintTracker, VerificationFailure};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -42,6 +45,73 @@ fn home_dir() -> PathBuf {
 
 /// Consecutive gate errors threshold for degradation.
 const DEGRADATION_THRESHOLD: u32 = 3;
+
+/// The only work a degraded workspace may dispatch. Historical Gate broken
+/// alerts carry the reserved internal label, while explicit repairs carry the
+/// gate-repair label. Requiring both the title and internal marker for the
+/// former keeps an ordinary similarly titled bead out of this exception.
+fn is_repair_bead(bead: &Bead) -> bool {
+    bead.labels.iter().any(|label| label == "gate-repair")
+        || (bead.title.starts_with("Gate broken:")
+            && bead
+                .labels
+                .iter()
+                .any(|label| label == crate::internal::INTERNAL_ARTIFACT_LABEL)
+            && bead.body.as_deref().is_some_and(|body| {
+                body.starts_with("## Gate Execution Error")
+                    || body.starts_with("## Shared verification-failure fingerprint")
+            }))
+}
+
+/// Query the normal ready frontier, then admit only repair work. The backend
+/// still enforces dependencies; this path removes its label exclusions so an
+/// auto-created internal alert can be seen, and restores all operator holds
+/// before returning a candidate to Pluck or Explore.
+pub(crate) async fn ready_repair_beads(
+    store: &dyn BeadStore,
+    exclude_ids: &HashSet<BeadId>,
+    worker_exclude_labels: &[String],
+) -> Result<Vec<Bead>> {
+    let filters = Filters {
+        assignee: None,
+        exclude_labels: Vec::new(),
+        exclude_ids: exclude_ids.clone(),
+    };
+    let now = chrono::Utc::now();
+    let mut beads = store.ready(&filters).await?;
+    beads.retain(|bead| {
+        if !is_repair_bead(bead)
+            || bead.status != BeadStatus::Open
+            || bead.assignee.is_some()
+            || exclude_ids.contains(&bead.id)
+            || active_quarantine_until(bead, now).is_some()
+        {
+            return false;
+        }
+        bead.labels.iter().all(|label| {
+            let normalized = label.trim().to_ascii_lowercase();
+            let operator_hold = matches!(
+                normalized.as_str(),
+                "blocked"
+                    | "manual_blocked"
+                    | "manual-blocked"
+                    | "blocked:manual"
+                    | "human"
+                    | "human-owned"
+                    | "owner:human"
+                    | "proposal-pending"
+            ) || normalized.starts_with("human:")
+                || crate::deferral::holds(label, now);
+            let worker_excluded = worker_exclude_labels
+                .iter()
+                .any(|excluded| excluded == label)
+                && !(bead.title.starts_with("Gate broken:")
+                    && matches!(normalized.as_str(), "alert" | "needle-internal"));
+            !operator_hold && !worker_excluded
+        })
+    });
+    Ok(beads)
+}
 
 /// Outcome of inspecting persisted gate-health records for vanished workspaces.
 ///

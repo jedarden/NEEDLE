@@ -2450,20 +2450,39 @@ impl super::Strand for PluckStrand {
             }
         }
 
-        // Check if the home workspace is gate-degraded. If so, skip ordinary dispatch.
-        // Degraded workspaces are excluded from Pluck to prevent repeated gate
-        // execution errors. The workspace remains claimable for manual intervention
-        // or for fixing the specific gate that caused degradation.
-        if let Ok(true) = crate::gate_health::is_degraded(
-            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
-        ) {
-            tracing::warn!(
-                workspace = %std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")).display(),
-                "Home workspace is gate-degraded — skipping Pluck strand for ordinary dispatch"
-            );
-            return StrandResult::Skipped {
-                reason: "workspace_gate_degraded".to_string(),
+        // A degraded home workspace may still dispatch a bead that repairs its
+        // gate. Query the ready frontier with the narrow repair exception;
+        // ordinary work never enters the candidate path below.
+        let home_workspace = self
+            .workspace
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+        if let Ok(true) = crate::gate_health::is_degraded(&home_workspace) {
+            let mut repairs = match crate::gate_health::ready_repair_beads(
+                store,
+                exclusions,
+                &self.exclude_labels,
+            )
+            .await
+            {
+                Ok(repairs) => repairs,
+                Err(error) => return StrandResult::Error(StrandError::StoreError(error)),
             };
+            repairs.retain(|bead| {
+                lane_admits(bead, self.lane.as_ref().map(|lane| lane.label.as_str()))
+            });
+            if let Some(workspace) = &self.circuit_workspace {
+                self.filter_circuit_candidates(&mut repairs, workspace)
+                    .await;
+            }
+            if repairs.is_empty() {
+                tracing::debug!(workspace = %home_workspace.display(), "no ready gate repair in degraded home workspace");
+                return StrandResult::Skipped {
+                    reason: "workspace_gate_degraded".to_string(),
+                };
+            }
+            Self::sort_by_current_key(&mut repairs);
+            return StrandResult::BeadFound(repairs);
         }
 
         // 1. Query bead store for ready, unassigned beads. If the normal
