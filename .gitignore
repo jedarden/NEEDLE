@@ -96,3 +96,7 @@ target/criterion/
 .beads/*.temp
 .beads/*.journal
 .br_recovery/
+
+# Python bytecode from the fleet test suites (unittest imports the checker
+# under fleet/ex44/tests, regenerating these on every run).
+fleet/**/__pycache__/

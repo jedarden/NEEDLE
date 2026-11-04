@@ -61,6 +61,22 @@ exploration sample.
    already-current or newer-than-published host is unchanged.
    `apply-ex44-fleet.sh` installs the helper next to the units, and `test.sh`
    runs the helper's `--self-test` alongside the unit-content assertions.
+9. **Watch checkout drift across hosts.** `checkout-drift.timer` runs
+   `bin/check-checkout-drift.py` every 15 minutes (needle-05eb7ee7). It
+   read-only scans every git checkout under `~` here and pipes itself over
+   SSH to lab and gmktec, so nothing is installed remotely. Per checkout it
+   reports in-progress merge/rebase state with its age, unpushed commits
+   with the age of the oldest, commits behind origin after a fetch
+   (remote-tracking refs only — the one bounded write, `GIT_OPTIONAL_LOCKS=0`
+   everywhere else), and modified paths under `.beads/checkpoint`. The
+   report lands in `~/.local/state/checkout-drift/last-report.json`;
+   findings page through the local telegram-relay with a 4h dedupe. The
+   unit fails on purpose: exit 1 when a checkout has been mid-merge over an
+   hour, has unpushed commits older than six hours, or is over 100 commits
+   behind; exit 2 when a configured host could not be scanned, because a
+   blind detector is not a clean run. `test.sh` runs the checker's
+   `--self-test` and its unittest suite, whose AST allowlist test rejects
+   any mutating git verb in the checker source.
 
 The backlog audit intentionally counts selection eligibility rather than raw
 open beads. It excludes active timed holds, manual/human work, and ordinary

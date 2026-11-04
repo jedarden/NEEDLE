@@ -1,0 +1,21 @@
+[Unit]
+Description=Checkout drift check: mid-merge, unpushed and far-behind git checkouts on codinghome/lab/gmktec
+# Exit 1 IS the alert (a checkout tripped a drift threshold — mid-merge past
+# 1h, unpushed commits older than 6h, or >100 commits behind), so unlike the
+# factory audit this unit must fail: a finding here is never routine, and the
+# journal / any unit-failure monitor surface it that way (same contract as
+# wrapper-drift.service). Exit 2 — a configured host could not be scanned —
+# fails the unit too, because a blind detector is not a clean run.
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/coding/NEEDLE
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Executed straight from the checkout like check-wrapper-drift.sh: an
+# installed copy could itself drift out of sync with the tracked policy.
+ExecStart=/home/coding/NEEDLE/fleet/ex44/bin/check-checkout-drift.py
+# One scan fetches every checkout on three hosts over SSH; the remote legs
+# dominate and a slow fetch must degrade to fetch_error entries, not kill
+# the run.
+TimeoutStartSec=20min

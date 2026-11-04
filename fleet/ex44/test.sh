@@ -140,6 +140,12 @@ grep -q 'enable --now needle-checkpoint-sweep.timer' "$SRC_DIR/apply-ex44-fleet.
 # acceptance sweep), with no live bead workspace or deployment required.
 "$SRC_DIR/../lab/bin/needle-checkpoint-sweep" --self-test
 
+# Checkout drift check (needle-05eb7ee7): the checker's fixture self-test
+# plus its static+fixture unittest suite (read-only allowlist, unit wiring,
+# threshold behaviour over synthetic repos).
+"$SRC_DIR/bin/check-checkout-drift.py" --self-test
+python3 -m unittest discover -s "$SRC_DIR/tests" -p 'test_checkout_drift.py'
+
 # The activation fragment keeps the lane, the workspace-only codex candidate
 # and the OpenAI cap together: enabling the candidate without the cap is what
 # would let one adapter pull the fleet onto an unbilled-by-us provider.

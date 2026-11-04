@@ -1,0 +1,16 @@
+[Unit]
+Description=Check ~ git checkouts on codinghome, lab and gmktec for merge/unpushed/behind drift every 15 min
+
+[Timer]
+# The 2026-11-03 incidents (declarative-config mid-merge for two days,
+# NEEDLE unpushed for days) went unnoticed precisely because nothing
+# looked. Fifteen minutes bounds how long a fresh mid-merge or unpushed
+# commit can age before the next report, at 96 fetch sweeps a day.
+OnCalendar=*:0/15
+RandomizedDelaySec=2m
+# A host that was down through a window checks at the next boot rather than
+# skipping it.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -135,6 +135,8 @@ install_if_changed 644 "$SRC_DIR/needle-improve.service" "$SYSTEMD_DIR/needle-im
 install_if_changed 644 "$SRC_DIR/needle-improve.timer" "$SYSTEMD_DIR/needle-improve.timer"
 install_if_changed 644 "$SRC_DIR/needle-release-upgrade.service" "$SYSTEMD_DIR/needle-release-upgrade.service"
 install_if_changed 644 "$SRC_DIR/needle-release-upgrade.timer" "$SYSTEMD_DIR/needle-release-upgrade.timer"
+install_if_changed 644 "$SRC_DIR/checkout-drift.service" "$SYSTEMD_DIR/checkout-drift.service"
+install_if_changed 644 "$SRC_DIR/checkout-drift.timer" "$SYSTEMD_DIR/checkout-drift.timer"
 install_if_changed 755 "$SRC_DIR/needle-zai-governor" "$NEEDLE_HOST_HOME/.local/bin/needle-zai-governor"
 # Both systemd ExecStart and test.sh invoke the helper directly, so it must
 # land executable; its behavior suite is test.sh's --self-test run.
@@ -279,6 +281,18 @@ if ! systemctl --user is-enabled -q needle-release-upgrade.timer 2>/dev/null; th
 fi
 if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-release-upgrade.timer; then
     run systemctl --user start --no-block needle-release-upgrade.timer
+fi
+
+# Checkout drift check (needle-05eb7ee7): nothing watched the git side
+# across hosts until 2026-11-03's misses — declarative-config mid-merge
+# for two days, NEEDLE unpushed for days, lab repos hundreds behind. The
+# unit is deliberately allowed to fail: exit 1 is a finding, not a broken
+# probe (same contract as wrapper-drift on lab).
+if ! systemctl --user is-enabled -q checkout-drift.timer 2>/dev/null; then
+    run systemctl --user enable checkout-drift.timer
+fi
+if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q checkout-drift.timer; then
+    run systemctl --user start --no-block checkout-drift.timer
 fi
 
 echo "- policy converged; no running worker was restarted"
