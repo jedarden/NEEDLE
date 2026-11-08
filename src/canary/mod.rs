@@ -154,20 +154,23 @@ fn canary_adapter_name(expected: &ExpectedOutcome) -> &'static str {
     }
 }
 
+const CANARY_VERIFIER_PATH: &str = "scripts/definition-of-done.sh";
+const CANARY_VERIFIER_CONTENT: &str = r#"#!/bin/sh
+set -eu
+test -f .needle.yaml
+test -f state_machine.py
+for expected in expected/*.yaml; do
+    test -f "$expected"
+done
+"#;
+
 fn canary_adapter_yaml(expected: &ExpectedOutcome) -> &'static str {
     match expected {
         ExpectedOutcome::Success { .. } => {
-            // The close reason must carry a fenced `verified:` block: since
-            // a05a441b the close-evidence gate rejects an evidence-free close
-            // (reopen + release), which made this fixture fail for every
-            // binary built after that commit — the fleet could not promote
-            // any build at all. `true` is deliberately not allow-listed, so
-            // it is ignored rather than re-run and the command list filters
-            // to empty, which `CloseVerificationRuntime::verify` passes
-            // without extracting committed state. That matters here: the
-            // canary workspace carries no build markers, so no allow-listed
-            // command could succeed in an extraction of it.
-            "name: canary-success\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary success fixture completed\\n\\n```verified:\\ntrue exit=0\\n```' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
+            // The runner provisions this fixture-specific verifier in the
+            // canary repository before dispatch. The close-evidence gate then
+            // re-runs it from a clean extraction of the committed fixture.
+            "name: canary-success\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary success fixture completed\\n\\n```verified:\\nscripts/definition-of-done.sh --fast exit=0\\n```' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
         }
         ExpectedOutcome::Failure { .. } => {
             "name: canary-failure\nagent_cli: sh\ninvoke_template: \"cd '{workspace}' && exit 42\"\ntimeout_secs: 30\n"
@@ -176,12 +179,10 @@ fn canary_adapter_yaml(expected: &ExpectedOutcome) -> &'static str {
             "name: canary-timeout\nagent_cli: sh\ninvoke_template: \"cd '{workspace}' && sleep 10\"\ntimeout_secs: 0\nidle_timeout_secs: 1\nhard_timeout_secs: 3\n"
         }
         ExpectedOutcome::StateMachine { .. } => {
-            // Same close-evidence requirement as canary-success above. This
-            // fixture asserts state transitions rather than final status, so
-            // without the block it still scored as passing while its bead was
-            // being reopened with `verification-failed` — a fixture that hid
-            // the very regression the suite exists to catch.
-            "name: canary-state-machine\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary state-machine fixture completed\\n\\n```verified:\\ntrue exit=0\\n```' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
+            // This fixture asserts state transitions rather than final
+            // status, so executable close evidence is still required to keep
+            // a rejected close from being scored as a pass.
+            "name: canary-state-machine\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary state-machine fixture completed\\n\\n```verified:\\nscripts/definition-of-done.sh --fast exit=0\\n```' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
         }
     }
 }
@@ -376,6 +377,7 @@ impl CanaryRunner {
         // writing a tracked .gitignore, so a fresh canary stays clean after
         // repeated runs without changing the fixture commit.
         self.ensure_runtime_artifacts_ignored()?;
+        self.ensure_canary_verifier()?;
 
         // Validate canary workspace has authoritative bead_cli.backend binding.
         // This prevents the canary from inheriting a machine-local legacy binding
@@ -534,6 +536,90 @@ impl CanaryRunner {
                     String::from_utf8_lossy(&marked.stderr).trim()
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Ensure the persistent canary fixture carries an executable verifier.
+    ///
+    /// Close-evidence verification runs claimed commands from a clean
+    /// extraction of the workspace's committed HEAD. The canary workspace is
+    /// deliberately language-neutral, so it has no Cargo, Go, or Python test
+    /// marker for the verifier to discover. Keep the adapter evidence honest
+    /// by shipping a small fixture-specific Definition of Done instead of
+    /// relying on an ignored command or an empty evidence block.
+    fn ensure_canary_verifier(&self) -> Result<()> {
+        let verifier = self.canary_workspace.join(CANARY_VERIFIER_PATH);
+        if let Some(parent) = verifier.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&verifier, CANARY_VERIFIER_CONTENT)
+            .with_context(|| format!("failed to write {}", verifier.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&verifier)
+                .with_context(|| format!("failed to inspect {}", verifier.display()))?
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&verifier, permissions)
+                .with_context(|| format!("failed to make {} executable", verifier.display()))?;
+        }
+
+        let add = Command::new("git")
+            .args(["add", "-f", "--", CANARY_VERIFIER_PATH])
+            .current_dir(&self.canary_workspace)
+            .output()
+            .context("failed to stage canary verifier")?;
+        if !add.status.success() {
+            bail!(
+                "failed to stage canary verifier: {}",
+                String::from_utf8_lossy(&add.stderr).trim()
+            );
+        }
+
+        let changed = Command::new("git")
+            .args([
+                "diff",
+                "--cached",
+                "--quiet",
+                "HEAD",
+                "--",
+                CANARY_VERIFIER_PATH,
+            ])
+            .current_dir(&self.canary_workspace)
+            .status()
+            .context("failed to inspect staged canary verifier")?;
+        if changed.success() {
+            return Ok(());
+        }
+
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "user.name=needle-canary",
+                "-c",
+                "user.email=needle@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--only",
+                "--message",
+                "Add canary close verifier",
+                "--",
+                CANARY_VERIFIER_PATH,
+            ])
+            .current_dir(&self.canary_workspace)
+            .output()
+            .context("failed to commit canary verifier")?;
+        if !commit.status.success() {
+            bail!(
+                "failed to commit canary verifier: {}",
+                String::from_utf8_lossy(&commit.stderr).trim()
+            );
         }
         Ok(())
     }
@@ -1549,8 +1635,16 @@ mod tests {
                 "{} must carry a verified: block, got: {yaml}",
                 canary_adapter_name(closing)
             );
+            assert!(
+                yaml.contains("scripts/definition-of-done.sh --fast exit=0"),
+                "{} must claim the committed fixture verifier, got: {yaml}",
+                canary_adapter_name(closing)
+            );
         }
         assert!(!canary_adapter_yaml(&failure).contains("```verified:"));
+        assert!(CANARY_VERIFIER_CONTENT.starts_with("#!/bin/sh\n"));
+        assert!(CANARY_VERIFIER_CONTENT.contains("test -f .needle.yaml\n"));
+        assert!(CANARY_VERIFIER_CONTENT.contains("expected/*.yaml"));
 
         let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 30);
         for admission in [
