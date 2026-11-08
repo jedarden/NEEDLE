@@ -361,6 +361,10 @@ impl CanaryRunner {
             );
         }
 
+        // Reject an unbound workspace before changing its fixture files. In
+        // particular, the verifier setup below requires a Git repository.
+        self.validate_bead_backend_binding()?;
+
         // Host resource admission is operator policy, independent of the
         // canary's isolated routing and queue. Capture only these limits before
         // changing fixture state, and fail closed if the host config is invalid.
@@ -377,11 +381,6 @@ impl CanaryRunner {
         // repeated runs without changing the fixture commit.
         self.ensure_runtime_artifacts_ignored()?;
         self.ensure_canary_verifier()?;
-
-        // Validate canary workspace has authoritative bead_cli.backend binding.
-        // This prevents the canary from inheriting a machine-local legacy binding
-        // that may not exist in production environments (2026-08-15 incident).
-        self.validate_bead_backend_binding()?;
 
         // Discover test beads in the canary workspace.
         let test_beads = self.discover_test_beads()?;
