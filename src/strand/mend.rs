@@ -3015,11 +3015,11 @@ impl MendStrand {
 
     // ── Step 6.5: Autonomous triage - orphaned split-children cleanup ──────────────
 
-    /// Close open beads with label `split-child` whose every dependent (beads they block) is closed.
+    /// Close open `split-child` beads whose labeled parent and every dependent are closed.
     ///
     /// This cleans up split-children that became orphaned when their parents were closed.
-    /// An orphaned split-child is an open bead with the `split-child` label where all
-    /// beads that depend on it (its dependents) are already closed.
+    /// A child without dependents is only eligible once its `parent-<id>` target
+    /// is done. During auto-split, children are created before the parent back-edge.
     async fn triage_orphaned_split_children(
         &self,
         store: &dyn BeadStore,
@@ -3057,13 +3057,30 @@ impl MendStrand {
                 continue;
             }
 
+            // The parent back-edge is wired only after all children are created.
+            // Until the labeled parent is done, a child with no dependents may
+            // simply be waiting for that edge (or for the next child in the chain).
+            let Some(parent_id) = bead
+                .labels
+                .iter()
+                .find_map(|label| label.strip_prefix("parent-"))
+            else {
+                continue;
+            };
+            if !bead_statuses
+                .get(&BeadId::from(parent_id))
+                .is_some_and(BeadStatus::is_done)
+            {
+                continue;
+            }
+
             // Get all dependents of this bead
             let dependents = dependents_map
                 .get(&bead.id)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
 
-            // Check if all dependents are closed
+            // Once the parent is done, zero dependents are safe to clean up too.
             let all_dependents_closed = dependents.is_empty()
                 || dependents.iter().all(|dep_id| {
                     bead_statuses
@@ -11049,6 +11066,65 @@ mod tests {
     // ── Autonomous triage tests ────────────────────────────────────────────────────
 
     #[tokio::test]
+    async fn triage_waits_for_labeled_parent_during_split_wiring() {
+        for (parent_status, closed_dependent, should_close) in [
+            (Some(BeadStatus::Open), false, false),
+            (Some(BeadStatus::Open), true, false),
+            (Some(BeadStatus::InProgress), false, false),
+            (None, false, false),
+            (Some(BeadStatus::Closed), false, true),
+        ] {
+            let hb_dir = tempfile::tempdir().unwrap();
+            let lock_dir = tempfile::tempdir().unwrap();
+            let reg_dir = tempfile::tempdir().unwrap();
+            let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+            let mut child = make_bead_with_deps("child", BeadStatus::Open, vec![]);
+            child.labels = vec!["split-child".to_string(), "parent-parent-1".to_string()];
+            let mut beads = vec![child];
+            if let Some(status) = parent_status {
+                beads.push(make_bead_with_deps("parent-1", status, vec![]));
+            }
+            if closed_dependent {
+                beads.push(make_bead_with_deps(
+                    "next-child",
+                    BeadStatus::Closed,
+                    vec![BrDependency {
+                        id: BeadId::from("child"),
+                        title: "Child".to_string(),
+                        status: "open".to_string(),
+                        priority: 1,
+                        dependency_type: "blocks".to_string(),
+                    }],
+                ));
+            }
+
+            let (store, _, _) = MockBeadStore::new(beads);
+            let mut summary = MendSummary::default();
+            mend.triage_orphaned_split_children(&store, &mut summary)
+                .await
+                .unwrap();
+
+            assert_eq!(summary.triage_orphans_closed, u32::from(should_close));
+            let child_after = store
+                .list_all()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|bead| bead.id == BeadId::from("child"))
+                .unwrap();
+            assert_eq!(
+                child_after.status,
+                if should_close {
+                    BeadStatus::Closed
+                } else {
+                    BeadStatus::Open
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn triage_closes_orphaned_split_child() {
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
@@ -11063,7 +11139,7 @@ mod tests {
             priority: 1,
             status: BeadStatus::Open,
             assignee: None,
-            labels: vec!["split-child".to_string()],
+            labels: vec!["split-child".to_string(), "parent-parent-1".to_string()],
             workspace: fixture_root("test"),
             dependencies: vec![],
             dependents: vec![BrDependency {
@@ -11100,7 +11176,9 @@ mod tests {
             updated_at: dt,
         };
 
-        let (store, _release_count, _) = MockBeadStore::new(vec![split_child, closed_dependent]);
+        let parent = make_bead_with_deps("parent-1", BeadStatus::Closed, vec![]);
+        let (store, _release_count, _) =
+            MockBeadStore::new(vec![split_child, closed_dependent, parent]);
         let (sink, events) = MemorySink::new();
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
         let registry = Registry::new(reg_dir.path());
@@ -11157,7 +11235,7 @@ mod tests {
             priority: 1,
             status: BeadStatus::Open,
             assignee: None,
-            labels: vec!["split-child".to_string()],
+            labels: vec!["split-child".to_string(), "parent-parent-1".to_string()],
             workspace: fixture_root("test"),
             dependencies: vec![],
             dependents: vec![BrDependency {
@@ -11194,7 +11272,8 @@ mod tests {
             updated_at: dt,
         };
 
-        let (store, _, _) = MockBeadStore::new(vec![split_child, open_dependent]);
+        let parent = make_bead_with_deps("parent-1", BeadStatus::Closed, vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![split_child, open_dependent, parent]);
         let (sink, events) = MemorySink::new();
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
         let registry = Registry::new(reg_dir.path());
