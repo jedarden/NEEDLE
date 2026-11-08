@@ -158,7 +158,6 @@ const CANARY_VERIFIER_PATH: &str = "scripts/definition-of-done.sh";
 const CANARY_VERIFIER_CONTENT: &str = r#"#!/bin/sh
 set -eu
 test -f .needle.yaml
-test -f state_machine.py
 for expected in expected/*.yaml; do
     test -f "$expected"
 done
@@ -1644,6 +1643,7 @@ mod tests {
         assert!(!canary_adapter_yaml(&failure).contains("```verified:"));
         assert!(CANARY_VERIFIER_CONTENT.starts_with("#!/bin/sh\n"));
         assert!(CANARY_VERIFIER_CONTENT.contains("test -f .needle.yaml\n"));
+        assert!(!CANARY_VERIFIER_CONTENT.contains("state_machine.py"));
         assert!(CANARY_VERIFIER_CONTENT.contains("expected/*.yaml"));
 
         let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 30);
