@@ -778,7 +778,10 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
             .run_worker(&format!("ladder-gate-errors-{attempt}"), &fixture.gate_path)
             .await?;
     }
-    assert_eq!(Fixture::log_lines(&fixture.gate_log), 3);
+    // The third error degrades the workspace and creates a Gate broken alert.
+    // That alert is now claimable as repair work, so the same worker runs its
+    // gate once more before --count 1 exits.
+    assert_eq!(Fixture::log_lines(&fixture.gate_log), 4);
     assert_failure_count(&fixture, &gate_bead, 0)?;
     let gate_why = fixture.why(&gate_bead)?;
     assert_manual_blocked_is_false(&gate_why, &gate_bead);
@@ -860,8 +863,8 @@ async fn unrunnable_gate_command_releases_without_failure_count() -> Result<()> 
     }
     assert_eq!(
         Fixture::log_lines(&fixture.gate_log),
-        3,
-        "every dispatch ran the unrunnable gate"
+        4,
+        "the third error also dispatches the new Gate broken repair alert"
     );
     assert_failure_count(&fixture, &bead, 0)?;
     assert_manual_blocked_is_false(&fixture.why(&bead)?, &bead);
