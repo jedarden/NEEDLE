@@ -38,6 +38,8 @@ mod fail_closed_verification;
 mod fallback_gate;
 #[path = "p2_integration_tests/file_contention.rs"]
 mod file_contention;
+#[path = "p2_integration_tests/gate_reattempt_no_gate.rs"]
+mod gate_reattempt_no_gate;
 #[path = "p2_integration_tests/label_import_strategies.rs"]
 mod label_import_strategies;
 #[path = "p2_integration_tests/mend_multi_claim_staleness.rs"]

@@ -567,7 +567,8 @@ max_tests = 4378
 # boot and claim, required fatal startup, and present-header exporter path.
 # +2 gate-health crash consistency contracts (needle-35e6cbe8): the
 # isolated writer helper and kill-during-partial-write assertion.
-push = 689
+# +3 gate-reattempt no-runnable-gate recovery scenarios (needle-2c63f90b).
+push = 692
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -800,7 +801,10 @@ tier = "push"
 # +1 shared-checkout edits cannot alter the committed verifier choice
 # (needle-165ab6f6).
 # +1 OTLP header degrade subprocess contract (needle-0ffb7802).
-max_tests = 139
+# +3 gate-reattempt no-runnable-gate recovery scenarios (needle-2c63f90b):
+# non-rerunnable close verification restoration, clean-tree restoration
+# gating, and unknown-gate operator escalation.
+max_tests = 142
 owner = "component:pluck-mend-explore"
 
 [[harness]]

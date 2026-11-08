@@ -44,6 +44,18 @@ pub const PROBE_BEAD_ID: &str = "gate-reattempt-probe";
 pub const PROBE_PROVENANCE: &str =
     "the idle gate reattempt probe — the workspace's own gates ran and passed at current HEAD";
 
+/// Prefix persisted in a probe schedule when an operator must decide how to
+/// recover a degradation that has no runnable gate.
+const NEEDS_OPERATOR_PREFIX: &str = "needs_operator: ";
+
+/// Gates that are emitted by outcome handling rather than configured as
+/// standalone workspace gates. A workspace cannot re-run these without a
+/// bead's outcome context, but a passing no-gate probe may still safely clear
+/// their stale workspace degradation.
+fn is_non_rerunnable_gate(gate: &str) -> bool {
+    matches!(gate, "close_verification" | "shipped_work" | "dod_bypass")
+}
+
 /// Configuration for the experimental idle gate reattempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateReattemptConfig {
@@ -119,12 +131,48 @@ impl GateReattemptState {
             .map(|next| next <= now)
             .unwrap_or(true)
     }
+
+    /// Whether this schedule is waiting for an operator rather than another
+    /// automatic probe.
+    pub fn needs_operator(&self) -> bool {
+        self.last_failure_reason.starts_with(NEEDS_OPERATOR_PREFIX)
+    }
+
+    /// The operator-facing reason, without the persisted verdict marker.
+    pub fn needs_operator_reason(&self) -> Option<&str> {
+        self.last_failure_reason.strip_prefix(NEEDS_OPERATOR_PREFIX)
+    }
+
+    fn record_needs_operator(&mut self, reason: String) {
+        self.last_failure_reason = format!("{NEEDS_OPERATOR_PREFIX}{reason}");
+        // Keep this schedule out of the automatic due frontier until an
+        // operator changes the workspace or removes the schedule. Unlike a
+        // gate failure, this is not a condition backoff can resolve.
+        self.next_probe_at = (Utc::now() + chrono::Duration::days(3650)).to_rfc3339();
+    }
 }
 
 /// The probe state directory: `<root>/state/gate-reattempt`.
 fn state_file_path(workspace: &Path) -> Result<PathBuf> {
     let id = crate::gate_health::workspace_id(workspace)?;
     Ok(crate::state_dir::gate_reattempt_dir().join(format!("{id}.json")))
+}
+
+/// Load a probe schedule from an explicit NEEDLE state root.
+pub fn load_state_at(root: &Path, workspace: &Path) -> Result<Option<GateReattemptState>> {
+    let id = crate::gate_health::workspace_id(workspace)?;
+    let path = root
+        .join("state")
+        .join("gate-reattempt")
+        .join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let state: GateReattemptState = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(state))
 }
 
 /// Load the persisted probe schedule for a workspace, if any.
@@ -215,7 +263,7 @@ pub fn due_workspaces(now: DateTime<Utc>) -> Result<Vec<PathBuf>> {
         }
         match load_state(&state.workspace) {
             Ok(Some(schedule)) => {
-                if schedule.due_at(now) {
+                if !schedule.needs_operator() && schedule.due_at(now) {
                     let at = schedule
                         .next_probe_at
                         .parse::<DateTime<Utc>>()
@@ -281,13 +329,129 @@ pub enum ProbeVerdict {
         /// Human-readable summary of the first rejection.
         reason: String,
     },
-    /// The probe could not produce a verdict (no gates resolve, execution
-    /// error, store/config failure) — treat exactly like a failure for
-    /// scheduling, but never as evidence the workspace recovered.
+    /// The probe could not produce a verdict (execution error or
+    /// store/config failure) — treat exactly like a failure for scheduling,
+    /// but never as evidence the workspace recovered. A workspace with no
+    /// runnable gate is classified below using its degrading fingerprint.
     Inconclusive {
         /// Why no verdict was produced.
         reason: String,
     },
+    /// No workspace gate can be constructed, and the degradation identifies
+    /// an outcome gate that cannot be re-run without a bead context. This is
+    /// safe to restore through the normal workspace restore path.
+    NeedsOperator {
+        /// Why the probe cannot decide automatically.
+        reason: String,
+    },
+}
+
+/// Recover the gate identity from old gate-health records that predate the
+/// explicit `degraded_gate` field.
+fn degraded_gate_for_no_runnable_probe(
+    state: &crate::gate_health::GateHealthState,
+) -> Option<String> {
+    state.degraded_gate.clone().or_else(|| {
+        let reason = state.last_reason.to_ascii_lowercase();
+        if reason.contains("close reason carries no verification evidence") {
+            Some("close_verification".to_string())
+        } else if reason.contains("uncommitted")
+            || reason.contains("dirty tree")
+            || reason.contains("no runnable verifier")
+            || state.last_command.contains("git status")
+        {
+            Some("fallback_clean_tree".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Check the same meaningful dirty paths used by the fallback verifier.
+async fn workspace_tree_is_clean(workspace: &Path) -> Result<bool> {
+    let output = tokio::process::Command::new("git")
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            crate::file_contention::git_safety::EXCLUDE_PATHSPEC,
+        ])
+        .current_dir(workspace)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .with_context(|| format!("failed to inspect the git tree in {}", workspace.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git status failed in {}: {}",
+            workspace.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let dirty = stdout
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .map(|path| path.rsplit(" -> ").next().unwrap_or(path).trim())
+        .filter(|path| !path.is_empty())
+        .filter(|path| {
+            ![".beads/", ".needle-predispatch-sha", ".hoop/", ".needle/"]
+                .iter()
+                .any(|prefix| path.starts_with(prefix))
+        })
+        .collect::<Vec<_>>();
+    Ok(dirty.is_empty())
+}
+
+/// Decide a no-runnable-gate degradation without pretending that an unrelated
+/// gate passed.
+async fn no_runnable_gate_verdict(workspace: &Path) -> ProbeVerdict {
+    let state = match crate::gate_health::load_state(workspace) {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            return ProbeVerdict::NeedsOperator {
+                reason: "workspace resolves no gate to re-run and its degrading gate is unknown"
+                    .to_string(),
+            }
+        }
+        Err(error) => {
+            return ProbeVerdict::NeedsOperator {
+                reason: format!("cannot inspect the degrading gate: {error:#}"),
+            }
+        }
+    };
+
+    let Some(gate) = degraded_gate_for_no_runnable_probe(&state) else {
+        return ProbeVerdict::NeedsOperator {
+            reason: "workspace resolves no gate to re-run and its degrading gate is unknown"
+                .to_string(),
+        };
+    };
+
+    if gate == "fallback_clean_tree" {
+        return match workspace_tree_is_clean(workspace).await {
+            Ok(true) => ProbeVerdict::Passed { gates_run: 0 },
+            Ok(false) => ProbeVerdict::Failed {
+                reason: "fallback_clean_tree still sees meaningful uncommitted paths".to_string(),
+            },
+            Err(error) => ProbeVerdict::Inconclusive {
+                reason: format!("fallback_clean_tree could not inspect the workspace: {error:#}"),
+            },
+        };
+    }
+
+    if is_non_rerunnable_gate(&gate) {
+        return ProbeVerdict::Passed { gates_run: 0 };
+    }
+
+    ProbeVerdict::NeedsOperator {
+        reason: format!(
+            "workspace resolves no gate to re-run; degrading gate '{gate}' is not known to be safe to bypass"
+        ),
+    }
 }
 
 /// Run the degraded workspace's own verification gates at current HEAD,
@@ -354,10 +518,7 @@ pub async fn run_gate_probe(
     }
 
     if named_gates.is_empty() {
-        return ProbeVerdict::Inconclusive {
-            reason: "workspace resolves no gate to re-run (explicit opt-out or nothing detected)"
-                .to_string(),
-        };
+        return no_runnable_gate_verdict(workspace).await;
     }
 
     let Some(validation_gate) =
@@ -502,6 +663,17 @@ where
                     save_state(&state)?;
                 }
             }
+        }
+        ProbeVerdict::NeedsOperator { reason } => {
+            let mut state = load_state(&workspace)?
+                .unwrap_or_else(|| GateReattemptState::first(workspace.clone()));
+            state.record_needs_operator(reason.clone());
+            save_state(&state)?;
+            tracing::error!(
+                workspace = %workspace.display(),
+                reason = %reason,
+                "gate reattempt: no runnable gate can safely judge this degradation — operator action required"
+            );
         }
         ProbeVerdict::Failed { reason } | ProbeVerdict::Inconclusive { reason } => {
             let mut state = load_state(&workspace)?

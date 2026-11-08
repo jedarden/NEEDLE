@@ -4626,6 +4626,13 @@ fn cmd_status(
                     );
                     println!("    Command: {}", state.last_command);
                     println!("    Reason: {}", state.last_reason);
+                    if let Ok(Some(probe)) =
+                        crate::gate_reattempt::load_state_at(&needle_home, &state.workspace)
+                    {
+                        if let Some(reason) = probe.needs_operator_reason() {
+                            println!("    Gate reattempt: needs_operator — {reason}");
+                        }
+                    }
                 }
                 println!();
             }
@@ -4798,12 +4805,21 @@ fn cmd_status(
                 }).collect::<Vec<_>>(),
                 "degraded_workspaces": degraded_workspaces.len(),
                 "degraded": degraded_workspaces.iter().map(|state| {
+                    let probe = crate::gate_reattempt::load_state_at(&needle_home, &state.workspace)
+                        .ok()
+                        .flatten();
                     serde_json::json!({
                         "workspace": state.workspace,
                         "consecutive_errors": state.consecutive_errors,
                         "last_error_at": state.last_error_at,
                         "last_command": state.last_command,
                         "last_reason": state.last_reason,
+                        "gate_reattempt": probe.map(|probe| serde_json::json!({
+                            "verdict": if probe.needs_operator() { "needs_operator" } else { "backoff" },
+                            "reason": probe.needs_operator_reason().unwrap_or(&probe.last_failure_reason),
+                            "consecutive_probe_failures": probe.consecutive_probe_failures,
+                            "next_probe_at": probe.next_probe_at,
+                        })),
                     })
                 }).collect::<Vec<_>>(),
                 "workers": heartbeat_statuses.iter().map(|ws| {
