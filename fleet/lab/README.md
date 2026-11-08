@@ -17,6 +17,8 @@ what it deliberately never touches (credentials, systemd-managed drop-ins).
 | `workers.tsv` | rendered to `~/.config/needle/workers/<identifier>.env` |
 | `fleet-policy.env` | `~/.config/needle/fleet-policy.env` |
 | `bin/needle-checkpoint-unwedge` | `~/.local/bin/needle-checkpoint-unwedge` |
+| `needle-checkpoint-sweep.{service,timer}` | fleet-wide checkpoint publication every 15 minutes |
+| `bin/needle-checkpoint-sweep-watchdog` + `needle-checkpoint-sweep-watchdog.{service,timer}` | 5-minute timer health check and one-shot recovery |
 | `../../scripts/{commit-checkpoint,checkpoint-publish}.sh` | `~/.local/lib/needle-checkpoint/` |
 | `checkpoint-publication-{service,timer}.conf` | drop-ins for existing checkpoint publication units |
 | `bin/cargo` | `~/.local/bin/cargo` (opt-in: `--install-cargo-wrapper`) |
@@ -30,6 +32,33 @@ workers. Upgrade workers to a build containing `1eaefdf8` before enabling that
 cadence: older dispatch guards require Git publication after every mutation.
 During a rolling upgrade, retain `NEEDLE_CHECKPOINT_COMMIT_DEBOUNCE_SECONDS=0`
 on the publisher services until their workspace's workers have upgraded.
+
+## Checkpoint sweep timer recovery
+
+The lab sweep is a serialized `Type=oneshot` service using
+`OnUnitActiveSec=15min`. That schedule is relative to activation of the service,
+not an independent wall-clock interval. When the sweep exceeded its old
+`TimeoutStartSec=1800` on 2026-10-30, systemd terminated the service and marked
+it failed. The timer remained `active (elapsed)` but had no pending activation
+(`NextElapseUSecMonotonic=infinity`): there was no successful service activation
+from which systemd could calculate the next `OnUnitActiveSec` deadline. This is
+why restarting only the timer did not help, while starting the service once did;
+the service activation refreshed the baseline and the timer re-armed. The
+codinghome sweep did not reproduce it because its serial workload completed
+within the old timeout. Routed repositories are still skipped by the
+bead-route guard and remain owned by their authority publisher.
+
+Lab now allows one sweep to run for up to one hour and enables
+`needle-checkpoint-sweep-watchdog.timer` on every converge. Every five minutes
+the watchdog checks that the timer is active and has a finite next elapse. For
+the broken state it starts the sweep service once with `--no-block`; a marker
+under `~/.needle/checkpoint-sweep-watchdog/` prevents a retry storm while the
+service is still broken or running. The marker is cleared after a finite next
+elapse is observed, making one future incident recoverable. The watchdog does
+not restart an active sweep and never touches routed work. Sharding remains a
+future scale change if the one-hour bound is approached; the current mitigation
+targets the observed 31-minute timeout without introducing concurrent
+publishers.
 
 ## Wrapper tracking and drift detection (claudego-dd2fa6f4, 2026-09-24)
 

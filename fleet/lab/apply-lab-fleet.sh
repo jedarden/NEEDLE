@@ -209,12 +209,22 @@ done
 # branch only when every unpushed commit is checkpoint-only, at the same
 # 15-minute cadence. Unlike the legacy per-repo publication units above, the
 # sweep timer is enabled on every fleet host — it is what keeps the
-# git-committed handoff channel current.
+# git-committed handoff channel current. The companion watchdog is enabled on
+# every lab converge: a timed-out Type=oneshot can leave an OnUnitActiveSec
+# timer active with NextElapseUSecMonotonic=infinity, and restarting only the
+# timer does not create the service activation that re-arms it.
 run install -m 755 "$SRC_DIR/bin/needle-checkpoint-sweep" "$HOME/.local/bin/needle-checkpoint-sweep"
+run install -m 755 "$SRC_DIR/bin/needle-checkpoint-sweep-watchdog" "$HOME/.local/bin/needle-checkpoint-sweep-watchdog"
 for kind in service timer; do
     run install -m 644 "$SRC_DIR/needle-checkpoint-sweep.$kind" "$SYSTEMD_DIR/needle-checkpoint-sweep.$kind"
 done
+for kind in service timer; do
+    run install -m 644 "$SRC_DIR/needle-checkpoint-sweep-watchdog.$kind" "$SYSTEMD_DIR/needle-checkpoint-sweep-watchdog.$kind"
+done
+# Refresh the user manager before enabling units that may be newly installed.
+run systemctl --user daemon-reload
 run systemctl --user enable --now needle-checkpoint-sweep.timer
+run systemctl --user enable --now needle-checkpoint-sweep-watchdog.timer
 while IFS=$'\t' read -r id ws agent delay explore; do
     [[ "$id" =~ ^# ]] && continue
     target="$WORKERS_DIR/$id.env"

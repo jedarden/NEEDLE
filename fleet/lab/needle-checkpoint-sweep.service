@@ -9,4 +9,7 @@ Environment=PATH=/run/current-system/sw/bin:%h/.local/bin:%h/.cargo/bin:%h/.need
 Type=oneshot
 ExecStart=%h/.local/bin/needle-checkpoint-sweep
 Nice=10
-TimeoutStartSec=1800
+# Lab's serialized sweep exceeded the old 30-minute limit on 2026-10-30.
+# Keep one sweep per activation, but allow the observed fleet size to finish;
+# the watchdog handles the separate timer-no-next-elapse failure mode.
+TimeoutStartSec=3600

@@ -87,6 +87,19 @@ done
 # against git fixtures.
 "$SRC_DIR/bin/needle-checkpoint-sweep" --self-test
 
+# A timed-out Type=oneshot can leave the OnUnitActiveSec timer active with no
+# next elapse. The watchdog requests one service start, suppresses repeats,
+# and clears its gate after the timer re-arms.
+bash -n "$SRC_DIR/bin/needle-checkpoint-sweep-watchdog"
+"$SRC_DIR/bin/needle-checkpoint-sweep-watchdog" --self-test
+for unit in needle-checkpoint-sweep-watchdog.service needle-checkpoint-sweep-watchdog.timer; do
+    [[ -f "$SRC_DIR/$unit" ]] || { echo "missing checkpoint sweep watchdog unit: $unit" >&2; exit 1; }
+done
+grep -q 'needle-checkpoint-sweep-watchdog.timer' "$SRC_DIR/apply-lab-fleet.sh" \
+    || { echo "apply-lab-fleet.sh does not enable the checkpoint sweep watchdog" >&2; exit 1; }
+grep -q 'TimeoutStartSec=3600' "$SRC_DIR/needle-checkpoint-sweep.service" \
+    || { echo "checkpoint sweep timeout was not raised for lab" >&2; exit 1; }
+
 # bead-route (needle-fdc34782): one authoritative live bead store per routed
 # repo across hosts. The router, its installer, the routing table, and the
 # checkpoint publisher guards run end to end against a fake bead and an ssh

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Recover the systemd timer state left behind when the checkpoint sweep times
+# out.  OnUnitActiveSec is relative to activation of the service it triggers;
+# a timed-out oneshot can leave its timer active with no next elapse.  Starting
+# the service once gives systemd a new activation baseline and re-arms it.
+#
+# The marker prevents a broken sweep from being started on every watchdog tick.
+# It is removed only after the timer reports a finite next elapse, so a later
+# failure is eligible for one more recovery attempt.
+set -u -o pipefail
+
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+TIMER_UNIT="needle-checkpoint-sweep.timer"
+SERVICE_UNIT="needle-checkpoint-sweep.service"
+STATE_DIR="${NEEDLE_CHECKPOINT_WATCHDOG_STATE_DIR:-${NEEDLE_HOME:-$HOME/.needle}/checkpoint-sweep-watchdog}"
+MARKER="$STATE_DIR/recovery-requested"
+
+usage() {
+    cat <<'EOF'
+usage: needle-checkpoint-sweep-watchdog [--self-test]
+EOF
+}
+
+unit_properties() {
+    "$SYSTEMCTL_BIN" --user show "$1" \
+        --property=ActiveState --property=NextElapseUSecMonotonic \
+        --no-pager
+}
+
+property() {
+    local name="$1" text="$2"
+    awk -F= -v name="$name" '$1 == name { print substr($0, length(name) + 2); exit }' <<<"$text"
+}
+
+self_test() {
+    local temp="$1" fake="$temp/systemctl" state="$temp/state" output
+    mkdir -p "$temp/bin" "$state"
+    cat >"$fake" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${2:-}" == start && "${3:-}" == needle-checkpoint-sweep.service ]]; then
+        : >"$FAKE_START_MARKER"
+elif [[ "${3:-}" == needle-checkpoint-sweep.timer ]]; then
+        cat "$FAKE_TIMER_STATE"
+elif [[ "${3:-}" == needle-checkpoint-sweep.service ]]; then
+        printf 'ActiveState=failed\nNextElapseUSecMonotonic=\n'
+else
+        echo "unexpected systemctl invocation: $*" >&2
+        exit 99
+fi
+EOF
+    chmod 755 "$fake"
+    printf 'ActiveState=active\nNextElapseUSecMonotonic=infinity\n' >"$temp/timer-broken"
+    printf 'ActiveState=active\nNextElapseUSecMonotonic=123456\n' >"$temp/timer-healthy"
+    : >"$temp/start-marker"
+
+    FAKE_TIMER_STATE="$temp/timer-broken" FAKE_START_MARKER="$temp/start-marker" \
+        SYSTEMCTL_BIN="$fake" NEEDLE_CHECKPOINT_WATCHDOG_STATE_DIR="$state" \
+        "$0" >/dev/null
+    [[ -f "$state/recovery-requested" && -f "$temp/start-marker" ]] \
+        || { echo "watchdog self-test: broken timer was not recovered" >&2; return 1; }
+
+    # A second broken-timer observation is deliberately a no-op.
+    rm -f "$temp/start-marker"
+    FAKE_TIMER_STATE="$temp/timer-broken" FAKE_START_MARKER="$temp/start-marker" \
+        SYSTEMCTL_BIN="$fake" NEEDLE_CHECKPOINT_WATCHDOG_STATE_DIR="$state" \
+        "$0" >/dev/null
+    [[ ! -e "$temp/start-marker" ]] \
+        || { echo "watchdog self-test: recovery was requested twice" >&2; return 1; }
+
+    # Once the timer is re-armed, the gate is cleared for a future incident.
+    FAKE_TIMER_STATE="$temp/timer-healthy" FAKE_START_MARKER="$temp/start-marker" \
+        SYSTEMCTL_BIN="$fake" NEEDLE_CHECKPOINT_WATCHDOG_STATE_DIR="$state" \
+        "$0" >/dev/null
+    [[ ! -e "$state/recovery-requested" ]] \
+        || { echo "watchdog self-test: healthy timer did not clear the gate" >&2; return 1; }
+    echo "needle-checkpoint-sweep-watchdog self-test passed"
+}
+
+main() {
+    local timer service_state next active
+    timer="$(unit_properties "$TIMER_UNIT")" || {
+        echo "checkpoint sweep watchdog: cannot inspect $TIMER_UNIT" >&2
+        return 2
+    }
+    active="$(property ActiveState "$timer")"
+    next="$(property NextElapseUSecMonotonic "$timer")"
+
+    if [[ "$active" != active ]]; then
+        echo "checkpoint sweep watchdog: timer is $active; no recovery needed"
+        return 0
+    fi
+    if [[ -n "$next" && "$next" != infinity && "$next" != 0 ]]; then
+        if [[ -e "$MARKER" ]]; then
+            rm -f "$MARKER"
+            echo "checkpoint sweep watchdog: timer re-armed; recovery gate cleared"
+        else
+            echo "checkpoint sweep watchdog: timer healthy (next=$next)"
+        fi
+        return 0
+    fi
+
+    service_state="$(property ActiveState "$(unit_properties "$SERVICE_UNIT")")" || service_state=""
+    case "$service_state" in
+        active|activating|deactivating)
+            echo "checkpoint sweep watchdog: timer has no next elapse, service is $service_state; no duplicate start"
+            return 0
+            ;;
+    esac
+    if [[ -e "$MARKER" ]]; then
+        echo "checkpoint sweep watchdog: timer still has no next elapse; recovery already requested once"
+        return 0
+    fi
+
+    mkdir -p "$STATE_DIR"
+    # Claim the one-shot recovery before starting the service. The watchdog
+    # timer itself is serialized, but an operator may invoke this script too.
+    ( set -o noclobber; : >"$MARKER" ) 2>/dev/null || {
+        echo "checkpoint sweep watchdog: recovery already claimed"
+        return 0
+    }
+    if "$SYSTEMCTL_BIN" --user start "$SERVICE_UNIT" --no-block; then
+        echo "checkpoint sweep watchdog: requested one service start to re-arm the timer"
+        return 0
+    fi
+    echo "checkpoint sweep watchdog: service recovery request failed" >&2
+    return 1
+}
+
+case "${1:-}" in
+    "") main ;;
+    --self-test)
+        [[ "$#" -eq 1 ]] || { usage >&2; exit 2; }
+        temp="$(mktemp -d -t needle-checkpoint-watchdog.XXXXXX)"
+        trap 'rm -rf "$temp"' EXIT
+        self_test "$temp"
+        ;;
+    *) usage >&2; exit 2 ;;
+esac

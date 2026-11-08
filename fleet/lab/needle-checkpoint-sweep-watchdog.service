@@ -1,0 +1,9 @@
+[Unit]
+Description=Recover a wedged fleet checkpoint sweep timer
+After=needle-checkpoint-sweep.timer
+
+[Service]
+Type=oneshot
+Environment=NEEDLE_HOME=%h/.needle
+ExecStart=%h/.local/bin/needle-checkpoint-sweep-watchdog
+TimeoutStartSec=30

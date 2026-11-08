@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch the fleet checkpoint sweep timer for a missing next elapse
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
