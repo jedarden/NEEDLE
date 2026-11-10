@@ -109,6 +109,15 @@ pub enum LoomError {
         detail: &'static str,
         retryable: bool,
     },
+    /// A terminal turn failure whose safe detail was derived from adapter
+    /// output. The owned detail lets Weft report a bounded, sanitized stderr
+    /// line without widening the static failure contract used by validation
+    /// failures.
+    TurnFailureDetail {
+        code: &'static str,
+        detail: String,
+        retryable: bool,
+    },
 }
 
 impl fmt::Display for LoomError {
@@ -137,6 +146,26 @@ impl fmt::Display for LoomError {
                 )
             }
             Self::TurnFailure { code, detail, .. } => write!(f, "{code}: {detail}"),
+            Self::TurnFailureDetail { code, detail, .. } => write!(f, "{code}: {detail}"),
+        }
+    }
+}
+
+impl LoomError {
+    /// Return the fields needed for the one-shot LOOM `/fail` transition.
+    pub fn turn_failure(&self) -> Option<(&str, &str, bool)> {
+        match self {
+            Self::TurnFailure {
+                code,
+                detail,
+                retryable,
+            } => Some((*code, *detail, *retryable)),
+            Self::TurnFailureDetail {
+                code,
+                detail,
+                retryable,
+            } => Some((*code, detail.as_str(), *retryable)),
+            _ => None,
         }
     }
 }

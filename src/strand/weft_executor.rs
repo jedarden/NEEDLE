@@ -5,8 +5,8 @@ use std::io::Write;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use crate::config::{Config, LoomServeStrand};
 use crate::dispatch::{AgentAdapter, Dispatcher, ExecutionResult};
 use crate::prompt::BuiltPrompt;
+use crate::sanitize::Sanitizer;
 use crate::telemetry::Telemetry;
 use crate::types::BeadId;
 
@@ -23,6 +24,9 @@ use super::weft_envelope::{
     harness_for_adapter, shape_invocation, shell_quote, translate, validate_loom_adapter,
     EnvelopeRequest, WeftHarness,
 };
+
+const MAX_FAILURE_DETAIL_BYTES: usize = 512;
+const INVOCATION_FAILURE_WINDOW: Duration = Duration::from_secs(1);
 
 pub struct MappedWeftExecutor {
     config: Config,
@@ -207,22 +211,34 @@ impl MappedWeftExecutor {
                 .dispatch_unclaimed_analysis(&dispatch_id, &prompt, &adapter, &workspace)
                 .await
         }
-        .map_err(|_| failure("adapter_failed", "mapped adapter execution failed", false))?;
+        .map_err(|error| {
+            tracing::warn!(
+                adapter = %adapter.name,
+                error = %error,
+                "mapped Weft adapter could not be spawned"
+            );
+            failure("adapter_spawn", "mapped adapter could not be spawned", true)
+        })?;
+
+        // A timeout is always transient, even when the adapter emitted a
+        // partial transcript. A non-zero exit without a completion is a
+        // deterministic invocation/argv failure when it happens immediately;
+        // later non-zero exits are treated as retryable adapter failures.
+        if result.timeout_reason.is_some() {
+            return Err(execution_failure(&result));
+        }
 
         let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let (output, turns_used) = extract_output(harness, &result);
-        let first_output_timeout = result.timeout_reason.is_some() && result.stdout.is_empty();
-        let parsed = parse_adapter_output(&output, first_output_timeout);
+        let parsed = parse_adapter_output(&output, false);
         let Some(mut completion) = parsed.completion_body() else {
-            let timeout = first_output_timeout;
-            return Err(failure(
+            if result.exit_code != 0 {
+                return Err(execution_failure(&result));
+            }
+            return Err(failure_with_detail(
                 "empty_reply",
-                if timeout {
-                    "the adapter produced no output before the timeout"
-                } else {
-                    "the adapter produced no output"
-                },
-                timeout,
+                stderr_detail(&result.stderr, "the adapter produced no output"),
+                false,
             ));
         };
         let adapter_result = json!({
@@ -486,6 +502,62 @@ fn failure(code: &'static str, detail: &'static str, retryable: bool) -> LoomErr
     }
 }
 
+fn failure_with_detail(code: &'static str, detail: String, retryable: bool) -> LoomError {
+    LoomError::TurnFailureDetail {
+        code,
+        detail,
+        retryable,
+    }
+}
+
+/// Classify a completed adapter process that could not produce a completion.
+///
+/// Spawn failures and timeouts are transient. An immediate non-zero exit is
+/// normally a deterministic CLI/argv usage failure (for example, an adapter
+/// rejecting a flag), so it is not retried. A slower non-zero exit may reflect
+/// a transient provider or process failure and remains retryable.
+fn execution_failure(result: &ExecutionResult) -> LoomError {
+    let detail = stderr_detail(&result.stderr, "mapped adapter execution failed");
+    if result.timeout_reason.is_some() {
+        return failure_with_detail("adapter_timeout", detail, true);
+    }
+
+    let immediate = result.elapsed <= INVOCATION_FAILURE_WINDOW;
+    failure_with_detail(
+        if immediate {
+            "adapter_invocation"
+        } else {
+            "adapter_failed"
+        },
+        detail,
+        !immediate,
+    )
+}
+
+/// Keep LOOM error details useful without allowing adapter output to leak
+/// secrets or prompt text. Only the first stderr line is ever considered.
+fn stderr_detail(stderr: &str, fallback: &str) -> String {
+    let first_line = stderr.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return fallback.to_owned();
+    }
+
+    static SANITIZER: OnceLock<Option<Sanitizer>> = OnceLock::new();
+    let sanitized = match SANITIZER.get_or_init(|| Sanitizer::new(&[]).ok()) {
+        Some(sanitizer) => sanitizer.sanitize(first_line),
+        None => return "(withheld: redaction unavailable)".to_owned(),
+    };
+    cap_detail(&sanitized)
+}
+
+fn cap_detail(detail: &str) -> String {
+    let mut end = detail.len().min(MAX_FAILURE_DETAIL_BYTES);
+    while end > 0 && !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    detail[..end].to_owned()
+}
+
 struct ScratchTurn {
     path: PathBuf,
 }
@@ -563,5 +635,51 @@ mod tests {
             );
         }
         assert!(!path.exists());
+    }
+
+    fn execution_result(exit_code: i32, stderr: &str, elapsed: Duration) -> ExecutionResult {
+        ExecutionResult {
+            exit_code,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            elapsed,
+            pid: 1,
+            trace_path: None,
+            timeout_reason: None,
+        }
+    }
+
+    #[test]
+    fn immediate_nonzero_exit_is_a_nonretryable_invocation_failure() {
+        let result = execution_result(
+            2,
+            "error: unexpected argument --settings\nprompt must not appear",
+            Duration::from_millis(3),
+        );
+        let error = execution_failure(&result);
+        assert!(matches!(
+            error,
+            LoomError::TurnFailureDetail {
+                code: "adapter_invocation",
+                retryable: false,
+                detail,
+            } if detail == "error: unexpected argument --settings"
+        ));
+    }
+
+    #[test]
+    fn timeout_is_retryable_and_uses_the_first_stderr_line() {
+        let mut result =
+            execution_result(124, "provider stalled\nsecond line", Duration::from_secs(2));
+        result.timeout_reason = Some(crate::dispatch::TimeoutReason::Hard { timeout_secs: 1 });
+        let error = execution_failure(&result);
+        assert!(matches!(
+            error,
+            LoomError::TurnFailureDetail {
+                code: "adapter_timeout",
+                retryable: true,
+                detail,
+            } if detail == "provider stalled"
+        ));
     }
 }

@@ -275,17 +275,24 @@ impl super::Strand for WeftStrand {
                 tokio::select! {
                     result = &mut execution_future => break match result {
                         Ok(execution) => execution,
-                        Err(LoomError::TurnFailure { code, detail, retryable }) => {
+                        Err(error) if error.turn_failure().is_some() => {
+                            let Some((code, detail, retryable)) = error.turn_failure() else {
+                                return strand_error(error);
+                            };
+                            let error_code = code.to_owned();
+                            let error_detail = detail.to_owned();
+                            let fail_code = error_code.clone();
+                            let fail_detail = error_detail.clone();
                             let client = Arc::clone(&self.client);
                             let turn_id = turn.id.clone();
                             return match tokio::task::spawn_blocking(move || {
-                                client.fail(&turn_id, code, detail, retryable)
+                                client.fail(&turn_id, &fail_code, &fail_detail, retryable)
                             }).await {
                                 Ok(Ok(_)) => {
                                     self.emit(crate::telemetry::EventKind::WeftFailed {
                                         turn_id: turn.id.clone(),
                                         strand: turn.strand.clone(),
-                                        error_code: code.to_string(),
+                                        error_code,
                                         retryable,
                                     });
                                     StrandResult::NoWork
@@ -295,14 +302,25 @@ impl super::Strand for WeftStrand {
                                     StrandResult::NoWork
                                 }
                                 Ok(Err(error)) => {
-                                    if is_unreachable(&error) {
-                                        self.emit(unreachable_event(Some(turn.id.clone()), "fail"));
-                                        StrandResult::NoWork
-                                    } else {
-                                        strand_error(error)
-                                    }
+                                    // `/fail` is deliberately not retried: a second
+                                    // report can race a lease transition and violate
+                                    // the one-failure-per-attempt contract. Leave the
+                                    // claimed turn for LOOM's lease expiry instead.
+                                    tracing::error!(
+                                        turn_id = %turn.id,
+                                        error = %error,
+                                        "failed to report Weft turn failure to LOOM; lease will expire"
+                                    );
+                                    StrandResult::NoWork
                                 }
-                                Err(error) => StrandResult::Error(StrandError::StoreError(anyhow!(error))),
+                                Err(error) => {
+                                    tracing::error!(
+                                        turn_id = %turn.id,
+                                        error = %error,
+                                        "Weft failure report task stopped; lease will expire"
+                                    );
+                                    StrandResult::NoWork
+                                }
                             };
                         }
                         Err(LoomError::LeaseLost) => {
