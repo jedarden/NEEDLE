@@ -379,9 +379,10 @@ enum ClaimIdentityVerdict {
     /// The exact claim identity carries the expiry returned by the backend's
     /// verified fenced handle, and the live snapshot still has that epoch.
     Expired,
-    /// A legacy claim has a revision but no claim epoch. A fresh live
-    /// heartbeat no longer names the bead, and the claim is older than Mend's
-    /// configured TTL, so revision-only recovery may release it.
+    /// A legacy claim has a revision but no claim epoch (and therefore no
+    /// lease either). No live same-workspace heartbeat advertises the bead as
+    /// current work, and the claim is older than Mend's configured TTL, so
+    /// revision-only recovery may release it.
     ExpiredWithoutEpoch,
     /// The live claim no longer matches the bead inventory or heartbeat claim.
     FencedConflict,
@@ -638,6 +639,58 @@ fn lookup_claim_heartbeats(
         .collect()
 }
 
+/// Whether a live heartbeat from the claim's own workspace advertises `bead`
+/// as its current work.
+///
+/// This positive advertisement is what holds an otherwise unrecoverable
+/// legacy-unfenced claim open (see the gate in [`classify_claim_identity`]).
+/// "Live" requires the heartbeat's process to exist and its timestamp to be
+/// within the heartbeat TTL: a stale file written by a dead or silent process
+/// is not current work. "Same workspace" compares the heartbeat's workspace
+/// against the store's canonical identity — through the heartbeat's own
+/// canonical path or, when present, the claim identity's recorded workspace
+/// hash — so a cross-workspace heartbeat can never protect an unrelated bead
+/// ID. When the store's workspace identity cannot be established, the
+/// comparison cannot be made and the heartbeat does not advertise.
+fn live_heartbeat_advertises_bead(
+    heartbeat: Option<&ClaimHeartbeatLookup>,
+    bead: &Bead,
+    store_workspace_identity: Option<&str>,
+    heartbeat_ttl: Duration,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(ClaimHeartbeatLookup::Present(heartbeat)) = heartbeat else {
+        return false;
+    };
+    if !HealthMonitor::check_pid_alive(heartbeat.pid) {
+        return false;
+    }
+    let age = now
+        .signed_duration_since(heartbeat.last_heartbeat)
+        .to_std()
+        .unwrap_or(Duration::ZERO);
+    if age > heartbeat_ttl {
+        return false;
+    }
+    let names_bead = heartbeat.current_bead.as_ref() == Some(&bead.id)
+        || heartbeat
+            .claim_identity
+            .as_ref()
+            .is_some_and(|identity| identity.bead_id == bead.id);
+    if !names_bead {
+        return false;
+    }
+    let Some(expected) = store_workspace_identity else {
+        return false;
+    };
+    canonical_workspace_identity(&heartbeat.workspace)
+        .is_some_and(|workspace| workspace == expected)
+        || heartbeat
+            .claim_identity
+            .as_ref()
+            .is_some_and(|identity| identity.workspace_identity == expected)
+}
+
 fn classify_claim_identity(
     bead: &Bead,
     heartbeat: Option<&ClaimHeartbeatLookup>,
@@ -665,8 +718,36 @@ fn classify_claim_identity(
         return ClaimIdentityVerdict::FencedConflict;
     }
     let Some(_) = live_claim.revision else {
+        // No observed revision means no compare-and-swap guard for the release
+        // either, so revision-less snapshots stay undetermined regardless of
+        // every other piece of evidence.
         return unknown(UndeterminedHeartbeat::ClaimSnapshotUnknown);
     };
+
+    // Legacy-unfenced recovery (needle-f9a0dd86). A claim made before the
+    // backend began fencing carries neither a claim epoch nor a lease, so it
+    // can never expire through the exact-identity gate below; and because
+    // every `--count 1` relaunch reuses the assignee name, positive process
+    // death is never provable for it either. Such a claim is unrecoverable by
+    // construction — 127 lab beads were held ~60 days this way. When the live
+    // snapshot has that unfenced shape, the claim is older than Mend's claim
+    // TTL, and no live same-workspace heartbeat advertises the bead as its
+    // current work, the claim is dead by construction: classify it expired
+    // and release it fenced on the observed revision, so a concurrent claim
+    // or renewal wins the compare-and-swap. A claim that carries an epoch or
+    // a lease keeps the exact gate, and a live advertising heartbeat wins.
+    if live_claim.claim_epoch.is_none()
+        && stale_by_claim_ttl
+        && !live_heartbeat_advertises_bead(
+            heartbeat,
+            bead,
+            store_workspace_identity,
+            heartbeat_ttl,
+            now,
+        )
+    {
+        return ClaimIdentityVerdict::ExpiredWithoutEpoch;
+    }
 
     let no_heartbeat_verdict = |reason| {
         if registry == RegistryLiveness::RegisteredDead {
@@ -707,25 +788,6 @@ fn classify_claim_identity(
         .unwrap_or(Duration::ZERO);
     if age > heartbeat_ttl {
         return unknown(UndeterminedHeartbeat::Stale);
-    }
-
-    // Older bead-rs claims can have a revision without a claim epoch. A fresh
-    // heartbeat that is alive but no longer announces this bead, combined
-    // with Mend's claim-age threshold, is the bounded recovery evidence for
-    // that legacy shape. This is deliberately narrower than age alone and is
-    // unavailable when the registry cannot positively identify the worker as
-    // alive. A heartbeat claim identity that still names the bead also wins.
-    let heartbeat_announces_bead = heartbeat.current_bead.as_ref() == Some(&bead.id)
-        || heartbeat
-            .claim_identity
-            .as_ref()
-            .is_some_and(|identity| identity.bead_id == bead.id);
-    if live_claim.claim_epoch.is_none()
-        && stale_by_claim_ttl
-        && registry == RegistryLiveness::RegisteredAlive
-        && !heartbeat_announces_bead
-    {
-        return ClaimIdentityVerdict::ExpiredWithoutEpoch;
     }
 
     let correlated_identity = match correlate_mend_claim_identity(
@@ -1168,7 +1230,7 @@ async fn cleanup_in_progress(
                 Some((classified_verdict, classified_evidence)),
             ),
             ClaimIdentityVerdict::ExpiredWithoutEpoch => (
-                "expired: legacy claim has no epoch and its live heartbeat no longer names it"
+                "expired: legacy claim has no epoch and no live heartbeat advertises it"
                     .to_string(),
                 Some((classified_verdict, classified_evidence)),
             ),
@@ -5071,6 +5133,211 @@ mod tests {
                 assert_eq!(verdicts[0].data["verdict"], "expired_without_epoch");
                 assert_eq!(verdicts[0].data["evidence"], "legacy_claim_ttl_expired");
             }
+        }
+    }
+
+    /// needle-f9a0dd86 regression: a claim made before bead-rs began fencing
+    /// carries neither a claim epoch nor a lease, so no exact-identity lease
+    /// can ever expire, and because every `--count 1` relaunch reuses the
+    /// assignee name, positive process death is never provable either. Such a
+    /// claim is unrecoverable by construction — 127 lab beads were held ~60
+    /// days this way. Mend now reaps that shape once the claim is older than
+    /// its TTL and no live same-workspace heartbeat advertises the bead as
+    /// current work; every other evidence shape keeps the claim untouched.
+    #[tokio::test]
+    async fn mend_reaps_legacy_unfenced_claim() {
+        /// Heartbeat evidence shapes for one claim under test.
+        #[derive(Clone, Copy)]
+        enum HeartbeatFixture {
+            /// A heartbeat file exists but is stale past the heartbeat TTL and
+            /// does not name the bead — the silent worker the lab incident
+            /// actually had.
+            StaleSilent,
+            /// No heartbeat file at all.
+            Missing,
+            /// A fresh heartbeat from a live process whose current bead is the
+            /// claimed bead in the claim's workspace.
+            LiveAdvertisesBead,
+        }
+
+        // (name, heartbeat fixture, claim stale by TTL, snapshot claim epoch,
+        //  release expected, evidence on the unknown verdict when kept)
+        let cases: [(&str, HeartbeatFixture, bool, Option<u64>, bool, &str); 5] = [
+            // (a) Legacy-unfenced claim, TTL expired, only a stale silent
+            // heartbeat: reaped through revision-fenced recovery.
+            (
+                "legacy-stale-silent-heartbeat",
+                HeartbeatFixture::StaleSilent,
+                true,
+                None,
+                true,
+                "",
+            ),
+            // (a') Same shape with no heartbeat file at all: also reaped.
+            (
+                "legacy-missing-heartbeat",
+                HeartbeatFixture::Missing,
+                true,
+                None,
+                true,
+                "",
+            ),
+            // (b) The same legacy claim younger than the claim TTL: kept.
+            (
+                "claim-within-ttl",
+                HeartbeatFixture::StaleSilent,
+                false,
+                None,
+                false,
+                "heartbeat_stale",
+            ),
+            // (c) Legacy claim advertised by a live heartbeat's current bead:
+            // kept — the advertisement holds the claim open.
+            (
+                "live-heartbeat-advertises",
+                HeartbeatFixture::LiveAdvertisesBead,
+                true,
+                None,
+                false,
+                "claim_identity_unknown",
+            ),
+            // (d) A claim carrying an epoch with no heartbeat keeps the exact
+            // gate and stays unknown: the epoch could still expire.
+            (
+                "epoch-claim-no-heartbeat",
+                HeartbeatFixture::Missing,
+                true,
+                Some(9),
+                false,
+                "heartbeat_missing",
+            ),
+        ];
+
+        for (
+            name,
+            heartbeat_fixture,
+            stale_by_ttl,
+            claim_epoch,
+            expect_release,
+            unknown_evidence,
+        ) in cases
+        {
+            let heartbeat_dir = tempfile::tempdir().unwrap();
+            let registry_dir = tempfile::tempdir().unwrap();
+            let workspace = fixture_root("mend-legacy-unfenced-workspace");
+            let assignee = format!("worker-unfenced-{name}");
+            let mut bead = make_in_progress_bead(&format!("nd-unfenced-{name}"), &assignee);
+            bead.workspace = workspace.clone();
+            bead.updated_at = if stale_by_ttl {
+                Utc::now() - chrono::Duration::seconds(90)
+            } else {
+                Utc::now()
+            };
+
+            let registry = Registry::new(registry_dir.path());
+            registry
+                .register(crate::registry::WorkerEntry {
+                    id: assignee.clone(),
+                    pid: std::process::id(),
+                    workspace: workspace.clone(),
+                    agent: "test".to_string(),
+                    model: None,
+                    provider: None,
+                    started_at: Utc::now(),
+                    beads_processed: 0,
+                    beads_completed: 0,
+                    config_reload_generation: 0,
+                    otlp_degraded: None,
+                    state: None,
+                })
+                .unwrap();
+
+            match heartbeat_fixture {
+                // The PID is deliberately alive here: a dead PID is positive
+                // process-death evidence that releases the claim through its
+                // own gate, which would mask the claim-TTL dimension this
+                // fixture isolates. A stale heartbeat from a live process is
+                // exactly the silent-worker shape the lab incident had.
+                HeartbeatFixture::StaleSilent => {
+                    let mut heartbeat = make_stale_heartbeat(&assignee, std::process::id(), None);
+                    heartbeat.qualified_id = assignee.clone();
+                    heartbeat.workspace = workspace.clone();
+                    write_heartbeat(heartbeat_dir.path(), &heartbeat);
+                }
+                HeartbeatFixture::Missing => {}
+                HeartbeatFixture::LiveAdvertisesBead => {
+                    let mut heartbeat =
+                        make_stale_heartbeat(&assignee, std::process::id(), Some(bead.id.as_ref()));
+                    heartbeat.qualified_id = assignee.clone();
+                    heartbeat.workspace = workspace.clone();
+                    heartbeat.last_heartbeat = Utc::now();
+                    write_heartbeat(heartbeat_dir.path(), &heartbeat);
+                }
+            }
+
+            let (store, release_count, _) = MockBeadStore::new(vec![bead.clone()]);
+            let snapshot = ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: bead.assignee.clone(),
+                revision: Some(4),
+                claim_epoch,
+            };
+            store.set_claim_snapshot(bead.id.clone(), snapshot.clone());
+            store.set_recovery_current(bead.id.clone(), snapshot);
+
+            let telemetry = TestHelper::new("mend-legacy-unfenced");
+            let released = cleanup_in_progress(
+                &store,
+                &registry,
+                telemetry.telemetry(),
+                Some(Duration::from_secs(60)),
+                Some(heartbeat_dir.path()),
+                Duration::from_secs(300),
+                ClaimCleanupPolicy::MendExact {
+                    workspace_identity: canonical_workspace_identity(&workspace),
+                },
+            )
+            .await
+            .unwrap();
+            telemetry.sync().await;
+
+            assert_eq!(
+                released,
+                u32::from(expect_release),
+                "{name}: released count"
+            );
+            assert_eq!(
+                release_count.load(Ordering::Relaxed),
+                u32::from(expect_release),
+                "{name}: release mutation count"
+            );
+            assert_eq!(
+                store.recovery_observed().len(),
+                usize::from(expect_release),
+                "{name}: release_recovery call count"
+            );
+
+            let verdicts = telemetry.events_by_type("mend.claim_identity_verdict");
+            assert_eq!(verdicts.len(), 1, "{name}: one ownership verdict");
+            if expect_release {
+                assert_eq!(
+                    verdicts[0].data["verdict"], "expired_without_epoch",
+                    "{name}"
+                );
+                assert_eq!(
+                    verdicts[0].data["evidence"], "legacy_claim_ttl_expired",
+                    "{name}"
+                );
+            } else {
+                assert_eq!(verdicts[0].data["verdict"], "unknown", "{name}");
+                assert_eq!(verdicts[0].data["evidence"], unknown_evidence, "{name}");
+            }
+            let unknown = telemetry.events_by_type("mend.claim_ownership_unknown");
+            assert_eq!(
+                unknown.len(),
+                usize::from(!expect_release),
+                "{name}: unknown telemetry"
+            );
         }
     }
 
